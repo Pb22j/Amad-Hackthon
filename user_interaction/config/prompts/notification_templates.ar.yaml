@@ -1,0 +1,6 @@
+accepted: "تمام، سأتحقق من ذلك الآن."
+progress: "{summary}"
+input_needed: "{summary}"
+completed: "{summary}"
+failed: "لم أتمكن من إنهاء ذلك الآن. {summary}"
+

@@ -1,0 +1,24 @@
+# Local secrets
+.env
+**/.env
+!.env.template
+!**/.env.template
+!**/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Node / generated UI
+node_modules/
+.next/
+dist/
+.wrangler/
+
+# Runtime data and OS files
+*.log
+*.sqlite3
+agentic/data/
+.DS_Store

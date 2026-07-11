@@ -1,0 +1,37 @@
+openrouter:
+  api_key_env: OPENROUTER_API_KEY
+  base_url: https://openrouter.ai/api/v1
+  intent_model_env: OPENROUTER_INTENT_MODEL
+  chat_model_env: OPENROUTER_CHAT_MODEL
+  reasoning_model_env: OPENROUTER_REASONING_MODEL
+
+security_guard:
+  provider_env: SECURITY_GUARD_PROVIDER
+  model_env: SECURITY_GUARD_MODEL
+  required_env: SECURITY_GUARD_REQUIRED
+  timeout_seconds_env: SECURITY_GUARD_TIMEOUT_SECONDS
+
+personaplex:
+  api_key_env: PERSONAPLEX_API_KEY
+  agent_id_env: PERSONAPLEX_AGENT_ID
+  url_env: PERSONAPLEX_URL
+  voice_env: PERSONAPLEX_VOICE
+  text_prompt_env: PERSONAPLEX_TEXT_PROMPT
+
+arabic_voice:
+  provider_env: ARABIC_VOICE_PROVIDER
+  api_key_env: ARABIC_VOICE_API_KEY
+
+voice_audio:
+  provider_env: VOICE_AUDIO_PROVIDER
+  stt_model_env: VOICE_STT_MODEL
+  tts_model_env: VOICE_TTS_MODEL
+  tts_voice_en_env: VOICE_TTS_VOICE_EN
+  tts_voice_ar_env: VOICE_TTS_VOICE_AR
+  tts_format_env: VOICE_TTS_FORMAT
+  openai_api_key_env: OPENAI_API_KEY
+
+agentic:
+  base_url_env: AGENTIC_BASE_URL
+  webhook_secret_env: AGENTIC_WEBHOOK_SECRET
+  request_path: /agentic/request

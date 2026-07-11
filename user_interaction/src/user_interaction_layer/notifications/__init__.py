@@ -1,0 +1,2 @@
+"""Notification rendering and handling."""
+

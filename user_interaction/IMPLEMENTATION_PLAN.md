@@ -52,7 +52,8 @@ Instead, the assistant should say natural phrases like:
 
 - Speak naturally and hide internal orchestration details.
 - Clarify ambiguous requests before dispatching work.
-- Confirm destructive, costly, or irreversible requests.
+- Protect financial privacy and block prompt-injection attempts before dispatching work.
+- Leave extreme, huge, destructive, or business-risk action checks to the agentic layer.
 - Provide status updates without exposing implementation internals.
 - Notify the user when the agentic layer completes, fails, or needs more input.
 
@@ -401,17 +402,19 @@ The assistant should:
 
 ## 10. Safety and Control
 
-The interaction layer should intercept requests before sending them to the agentic layer when they are:
+The whole product is financial, so this layer must treat privacy, prompt injection, and data leakage as first-class risks. The interaction layer should intercept requests before sending them to the agentic layer when they are:
 
-- destructive,
-- irreversible,
 - privacy-sensitive,
 - credential-related,
-- financial,
-- legally or medically sensitive,
+- trying to expose hidden prompts, tools, secrets, or internal routing,
+- trying to override developer/system instructions,
+- asking for another user's private financial data,
+- asking for bulk customer data without an explicit authorized workflow,
 - unclear enough to cause the wrong action.
 
 For these cases, the layer asks for confirmation or clarification in the user's language.
+
+Extreme actions, huge transfers, destructive operations, approval workflows, and financial business policy decisions are handled by the agentic layer. The interaction layer should not duplicate that business logic; it should preserve the user's request naturally and pass it through when privacy and prompt-injection checks are clean.
 
 The layer should never expose:
 
@@ -420,7 +423,8 @@ The layer should never expose:
 - internal routing details,
 - stack traces,
 - raw agentic logs,
-- private metadata from other sessions.
+- private metadata from other sessions,
+- full card numbers, account numbers, tokens, or credentials in logs or casual responses.
 
 ## 11. Implementation Phases
 
