@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amad-financial-agent"
+version = "0.1.0"
+description = "Secure LangChain/LangGraph financial agentic layer"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "alembic>=1.14,<2",
+  "cryptography>=44,<47",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "jsonschema>=4.23,<5",
+  "langchain>=1.0,<2",
+  "langchain-anthropic>=0.3,<2",
+  "langchain-openai>=0.3,<2",
+  "langgraph>=1.0,<2",
+  "langgraph-checkpoint-postgres>=3.0,<4",
+  "psycopg[binary,pool]>=3.2,<4",
+  "prometheus-client>=0.21,<1",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "pycryptodome>=3.21,<4",
+  "PyYAML>=6,<7",
+  "SQLAlchemy[asyncio]>=2.0,<3",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "aiosqlite>=0.20,<1",
+  "hypothesis>=6.120,<7",
+  "mutmut>=3.5,<4",
+  "pytest>=8.3,<10",
+  "pytest-asyncio>=0.25,<2",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+]
+
+[project.scripts]
+amad-agent = "agentic.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentic"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "integration: tests involving multiple application components",
+  "postgres: tests requiring a PostgreSQL service",
+  "real_model: tests invoking a configured external model",
+  "security: adversarial and security-invariant tests",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["agentic"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.mutmut]
+source_paths = ["agentic/"]
+only_mutate = [
+  "agentic/security/confirmation.py",
+  "agentic/security/identity.py",
+  "agentic/security/redaction.py",
+  "agentic/policy/output_policy.py",
+]
+pytest_add_cli_args_test_selection = [
+  "tests/unit/test_security.py",
+  "tests/unit/test_output_policy.py",
+]
+also_copy = ["agentic/config/"]
+mutate_only_covered_lines = true

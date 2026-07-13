@@ -1,0 +1,66 @@
+name: financial-agent-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: amad
+          POSTGRES_USER: amad
+          POSTGRES_PASSWORD: test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U amad -d amad"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://amad:test-password@localhost:5432/amad
+      LANGGRAPH_DATABASE_URL: postgresql://amad:test-password@localhost:5432/amad
+      TEST_POSTGRES_URL: postgresql://amad:test-password@localhost:5432/amad
+      CONFIRMATION_SIGNING_KEY: cccccccccccccccccccccccccccccccc
+      CHECKPOINT_ENCRYPTION_KEY: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+      APP_DATA_ENCRYPTION_KEY: dddddddddddddddddddddddddddddddd
+      INTERACTION_SHARED_SECRET: iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+      OPENROUTER_API_KEY: test-key-not-used
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: alembic upgrade head
+      - run: amad-agent setup-langgraph
+      - run: alembic check
+      - run: pytest --cov=agentic --cov-branch --cov-fail-under=95
+      - run: amad-agent eval-security
+      - run: pip check
+
+  mutation:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite+aiosqlite:///:memory:
+      LANGGRAPH_DATABASE_URL: postgresql://unused
+      CONFIRMATION_SIGNING_KEY: cccccccccccccccccccccccccccccccc
+      CHECKPOINT_ENCRYPTION_KEY: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+      APP_DATA_ENCRYPTION_KEY: dddddddddddddddddddddddddddddddd
+      INTERACTION_SHARED_SECRET: iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+      OPENROUTER_API_KEY: test-key-not-used
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - run: mutmut run
+      - run: python -m agentic.evals.mutation_gate --minimum 0.70

@@ -1,0 +1,43 @@
+models:
+  primary:
+    provider: openrouter
+    model: openai/gpt-4.1-mini
+    temperature: 0
+    timeout_seconds: 45
+    max_retries: 2
+    required_capabilities: [tool_calling, structured_output, async]
+    fallback_roles: []
+    input_cost_per_million: 0
+    output_cost_per_million: 0
+  intent_classifier:
+    provider: openrouter
+    model: openai/gpt-4.1-mini
+    temperature: 0
+    timeout_seconds: 15
+    max_retries: 1
+    required_capabilities: [structured_output, async]
+  guardrail:
+    provider: openrouter
+    model: openai/gpt-4.1-mini
+    temperature: 0
+    timeout_seconds: 15
+    max_retries: 1
+    required_capabilities: [structured_output, async]
+  summarizer:
+    provider: openrouter
+    model: openai/gpt-4.1-mini
+    temperature: 0
+    timeout_seconds: 20
+    max_retries: 1
+    required_capabilities: [async]
+  memory_extractor:
+    provider: openrouter
+    model: openai/gpt-4.1-mini
+    temperature: 0
+    timeout_seconds: 15
+    max_retries: 1
+    required_capabilities: [structured_output, async]
+  embeddings:
+    provider: openai
+    model: text-embedding-3-small
+    required_capabilities: [embeddings]

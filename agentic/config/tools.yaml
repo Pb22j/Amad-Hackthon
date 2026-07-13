@@ -1,0 +1,12 @@
+tools: {}
+  # The tool provider may return only LangChain tools and define agent-level security
+  # metadata here. Alternatively it may return a ToolBundle containing both.
+  # tools:
+  #   transfer_funds:
+  #   risk: financial_action
+  #   required_scopes: [financial:write]
+  #   requires_confirmation: true
+  #   requires_receipt: true
+  #   requires_owner_metadata: true
+  #   idempotent: true
+  #   max_calls_per_task: 2

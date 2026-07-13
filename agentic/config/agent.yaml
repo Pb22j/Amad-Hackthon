@@ -1,0 +1,17 @@
+service:
+  name: amad-financial-agent
+  environment: development
+  api_version: v1
+  debug: false
+agent:
+  supported_languages: [en, ar]
+  default_language: en
+  semantic_memory_enabled: false
+  require_signed_interaction_requests: true
+  emit_progress_events: true
+  tool_provider: null
+database:
+  pool_size: 10
+  max_overflow: 20
+  pool_timeout_seconds: 30
+  echo: false

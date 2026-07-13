@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: amad
+      POSTGRES_USER: amad
+      POSTGRES_PASSWORD: development-only-password
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amad -d amad"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - amad-postgres:/var/lib/postgresql/data
+
+volumes:
+  amad-postgres:
+
