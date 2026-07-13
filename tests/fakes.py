@@ -45,7 +45,7 @@ class StaticClassifier:
         self.intent = intent
         self.confidence = confidence
 
-    def with_structured_output(self, _: Any) -> "StaticClassifier":
+    def with_structured_output(self, _: Any, **__: Any) -> "StaticClassifier":
         return self
 
     async def ainvoke(self, _: Any) -> IntentClassification:

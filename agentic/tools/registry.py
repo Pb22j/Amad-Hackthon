@@ -1,3 +1,5 @@
+"""Validated one-to-one registry of external tools and security metadata."""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -8,6 +10,8 @@ from agentic.tools.metadata import ToolMetadata
 
 
 class ToolRegistry:
+    """Reject ambiguous, duplicate, missing, or unused tool metadata."""
+
     def __init__(self, tools: Sequence[BaseTool], metadata: Sequence[ToolMetadata]) -> None:
         self._tools = {tool.name: tool for tool in tools}
         self._metadata = {item.name: item for item in metadata}
@@ -24,8 +28,9 @@ class ToolRegistry:
             )
 
     def entries(self) -> list[tuple[BaseTool, ToolMetadata]]:
+        """Return stable tool/metadata pairs ready for guarded wrapping."""
+
         return [(tool, self._metadata[name]) for name, tool in self._tools.items()]
 
     def metadata(self, name: str) -> ToolMetadata:
         return self._metadata[name]
-

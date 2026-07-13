@@ -1,3 +1,5 @@
+"""Repository for append-only agent security decisions."""
+
 from __future__ import annotations
 
 from typing import Any

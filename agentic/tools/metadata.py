@@ -1,3 +1,5 @@
+"""Strict schemas describing tool risk and the trusted result envelope."""
+
 from __future__ import annotations
 
 from enum import StrEnum
@@ -7,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ToolRisk(StrEnum):
+    """Risk class used to select authorization, retry, and audit behavior."""
+
     READ = "read"
     SENSITIVE_READ = "sensitive_read"
     WRITE = "write"
@@ -14,10 +18,14 @@ class ToolRisk(StrEnum):
 
 
 class ToolMetadata(BaseModel):
+    """Agent-owned security policy attached to one stable external tool name."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = Field(min_length=1, max_length=200)
     risk: ToolRisk
+    intents: frozenset[str] = frozenset()
+    explicit_user_fields: frozenset[str] = frozenset()
     required_scopes: frozenset[str] = frozenset()
     requires_confirmation: bool = False
     requires_receipt: bool = False
@@ -27,6 +35,8 @@ class ToolMetadata(BaseModel):
 
 
 class ToolResult(BaseModel):
+    """Normalized result every teammate-owned tool must return."""
+
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["completed", "failed", "pending", "unknown"]
@@ -37,4 +47,3 @@ class ToolResult(BaseModel):
     receipt_id: str | None = None
     operation_id: str | None = None
     error_code: str | None = None
-

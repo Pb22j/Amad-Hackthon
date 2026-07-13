@@ -55,6 +55,7 @@ async def test_clarification_is_single_answer_and_expires(database, agentic_requ
         )
         answered = await repository.answer(clarification.id, task_id=task.id, answer="account-1")
         assert answered.status == "answered"
+        assert await repository.answered_values(task.id) == ("account-1",)
         with pytest.raises(ValueError, match="already answered"):
             await repository.answer(clarification.id, task_id=task.id, answer="account-2")
 

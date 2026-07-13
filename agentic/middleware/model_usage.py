@@ -1,3 +1,5 @@
+"""LangChain middleware recording token usage and configured cost estimates."""
+
 from __future__ import annotations
 
 from typing import Any

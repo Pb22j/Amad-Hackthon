@@ -1,3 +1,5 @@
+"""Idempotent persistence and reconciliation state for external tool calls."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

@@ -97,6 +97,34 @@ async def test_graph_returns_concise_structured_report(database, app_config):
 
 
 @pytest.mark.integration
+async def test_graph_recovers_when_model_finishes_with_plain_text(database, app_config):
+    await add_task(database)
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(content="Your balance was retrieved."),
+            report_message(summary="Balance retrieved through recovery"),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(Intent.ACCOUNT_INFORMATION),
+        external_tools=[],
+        tool_metadata=[],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state(),
+        config={"configurable": {"thread_id": "task-1"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert result["status"] == "completed"
+    assert result["final_report"]["summary"] == "Balance retrieved through recovery"
+
+
+@pytest.mark.integration
 async def test_graph_executes_guarded_read_tool(database, app_config):
     await add_task(database)
     calls = 0
@@ -305,6 +333,74 @@ async def test_clarification_interrupt_and_resume(database, app_config):
     assert payload["question"] == "Which account should be used?"
     result = await graph.ainvoke(Command(resume="checking"), config=config, context=context)
     assert result["final_report"]["summary"] == "Account selected"
+
+
+@pytest.mark.integration
+@pytest.mark.security
+async def test_guard_clarifies_model_invented_explicit_argument(database, app_config):
+    await add_task(database)
+    observed = []
+
+    async def transfer(amount: int, destination: str) -> dict[str, Any]:
+        observed.append({"amount": amount, "destination": destination})
+        return {
+            "status": "completed",
+            "summary": "Transfer simulated",
+            "data": {},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    tool = StructuredTool.from_function(
+        coroutine=transfer,
+        name="transfer_funds",
+        description="Transfer funds.",
+        args_schema=TransferArgs,
+    )
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_funds",
+                        "args": {"amount": 25, "destination": "default"},
+                        "id": "invented-destination",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            report_message(summary="Transfer simulated"),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(Intent.MONEY_TRANSFER),
+        external_tools=[tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="transfer_funds",
+                risk=ToolRisk.WRITE,
+                required_scopes=frozenset({"financial:write"}),
+                explicit_user_fields=frozenset({"destination"}),
+            )
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+    graph_config = {"configurable": {"thread_id": "task-1"}}
+    context = runtime_context(database, app_config)
+    context.original_request = "Transfer 25"
+
+    interrupted = await graph.ainvoke(state("Transfer 25"), config=graph_config, context=context)
+
+    assert not observed
+    assert interrupted["__interrupt__"][0].value["kind"] == "clarification"
+    result = await graph.ainvoke(
+        Command(resume="Real Beneficiary"), config=graph_config, context=context
+    )
+    assert observed == [{"amount": 25, "destination": "Real Beneficiary"}]
+    assert result["status"] == "completed"
 
 
 @pytest.mark.integration

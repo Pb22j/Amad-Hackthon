@@ -7,6 +7,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from agentic.agent.graph import build_financial_agent
 from agentic.agent.service import AgentService
 from agentic.api.app import create_app
+from agentic.api.schemas import TaskStatus, TaskStatusResponse
 from agentic.policy.models import Intent
 from agentic.security.confirmation import ConfirmationSigner
 from agentic.security.signing import InteractionSignatureVerifier
@@ -109,7 +110,7 @@ def test_default_lifespan_builds_runtime(monkeypatch, app_config):
         yield InMemorySaver()
 
     class MemoryModel:
-        def with_structured_output(self, _):
+        def with_structured_output(self, _, **__):
             return self
 
         async def ainvoke(self, _):
@@ -158,6 +159,15 @@ class StubService:
 
     async def delete_memory(self, **kwargs):
         return 2
+
+    async def get_task_status(self, task_id, payload):
+        if self.error:
+            raise self.error
+        return TaskStatusResponse(
+            task_id=task_id,
+            status=TaskStatus.COMPLETED,
+            final_report={"status": "completed", "summary": "API completed"},
+        )
 
 
 def test_resume_endpoint_success_and_validation_error(app_config, agentic_request):
@@ -261,3 +271,48 @@ def test_memory_delete_endpoint(app_config, agentic_request):
         )
     assert response.status_code == 200
     assert response.json() == {"deleted": 2}
+
+
+def test_non_production_evaluation_status_endpoint(app_config, agentic_request):
+    app = create_app(service=StubService(app_config), config=app_config)
+    payload = {
+        "request_id": str(agentic_request.request_id),
+        "session_id": str(agentic_request.session_id),
+        "user_id": agentic_request.user_id,
+        "tenant_id": agentic_request.tenant_id,
+    }
+    with TestClient(app) as client:
+        response = client.post(
+            f"/agentic/tasks/{agentic_request.request_id}/status", json=payload
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert response.json()["final_report"]["summary"] == "API completed"
+
+
+def test_evaluation_status_endpoint_is_disabled_in_production(app_config, agentic_request):
+    production_config = app_config.model_copy(
+        update={
+            "app": app_config.app.model_copy(
+                update={
+                    "service": app_config.app.service.model_copy(
+                        update={"environment": "production"}
+                    )
+                }
+            )
+        }
+    )
+    app = create_app(service=StubService(production_config), config=production_config)
+    with TestClient(app) as client:
+        response = client.post(
+            f"/agentic/tasks/{agentic_request.request_id}/status",
+            json={
+                "request_id": str(agentic_request.request_id),
+                "session_id": str(agentic_request.session_id),
+                "user_id": agentic_request.user_id,
+                "tenant_id": agentic_request.tenant_id,
+            },
+        )
+
+    assert response.status_code == 404

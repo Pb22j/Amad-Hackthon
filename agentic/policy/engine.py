@@ -1,3 +1,5 @@
+"""Deterministic request screening and financial intent risk assessment."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

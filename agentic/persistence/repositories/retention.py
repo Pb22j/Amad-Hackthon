@@ -1,3 +1,5 @@
+"""Retention queries for expired memories and nonterminal task checkpoints."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -36,4 +38,3 @@ class RetentionRepository:
         )
         await self.session.flush()
         return [task.id for task in tasks], deleted.rowcount or 0
-

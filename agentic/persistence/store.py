@@ -1,3 +1,5 @@
+"""PostgreSQL-backed LangGraph store for approved semantic memory."""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -19,4 +21,3 @@ async def postgres_memory_store(
         if setup:
             await store.setup()
         yield store
-

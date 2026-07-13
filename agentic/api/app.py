@@ -1,3 +1,11 @@
+"""FastAPI composition root for the financial agentic service.
+
+This module intentionally performs dependency wiring only. Request execution
+lives in :mod:`agentic.agent.service`; graph construction lives in
+:mod:`agentic.agent.graph`; and every external financial tool is wrapped by the
+security boundary in :mod:`agentic.tools.guard` before it reaches the model.
+"""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
@@ -13,7 +21,14 @@ from langchain_core.tools import BaseTool
 from agentic import __version__
 from agentic.agent.graph import build_financial_agent
 from agentic.agent.service import AgentService
-from agentic.api.schemas import AgenticRequest, HealthResponse, MemoryDeleteRequest, ResumeTaskRequest
+from agentic.api.schemas import (
+    AgenticRequest,
+    HealthResponse,
+    MemoryDeleteRequest,
+    ResumeTaskRequest,
+    TaskStatusRequest,
+    TaskStatusResponse,
+)
 from agentic.config.loader import AppConfig, load_config
 from agentic.llm.factory import ModelFactory
 from agentic.memory.extraction import LLMMemoryExtractor
@@ -36,6 +51,13 @@ def create_app(
     tool_metadata: Sequence[ToolMetadata] | None = None,
     signature_verifier: InteractionSignatureVerifier | None = None,
 ) -> FastAPI:
+    """Build the API and initialize production dependencies during lifespan.
+
+    Tests may inject a prebuilt ``service`` or explicit tools. Normal startup
+    discovers the list exported by the root ``tools`` package, unless
+    ``AGENTIC_TOOL_PROVIDER`` selects a different provider.
+    """
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if service is not None:
@@ -72,6 +94,7 @@ def create_app(
             bundle = load_tool_bundle(
                 runtime_config.app.agent.tool_provider,
                 runtime_config.tools.tools,
+                require_tools=runtime_config.app.service.environment == "production",
             )
             runtime_tools = bundle.tools
             runtime_metadata = bundle.metadata
@@ -201,6 +224,33 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return Response(status_code=status.HTTP_202_ACCEPTED)
+
+    @app.post(
+        "/agentic/tasks/{task_id}/status",
+        response_model=TaskStatusResponse,
+        include_in_schema=False,
+    )
+    async def evaluation_task_status(
+        task_id: UUID,
+        request: Request,
+        x_interaction_timestamp: str | None = Header(default=None),
+        x_interaction_signature: str | None = Header(default=None),
+    ) -> TaskStatusResponse:
+        """Poll a task from the standalone evaluator; disabled in production."""
+
+        runtime_config: AppConfig = request.app.state.config
+        if runtime_config.app.service.environment == "production":
+            raise HTTPException(status_code=404, detail="not found")
+        body = await request.body()
+        await verify_request_signature(
+            request, body, x_interaction_timestamp, x_interaction_signature
+        )
+        try:
+            payload = TaskStatusRequest.model_validate_json(body)
+            service_instance: AgentService = request.app.state.agent_service
+            return await service_instance.get_task_status(task_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.delete("/agentic/memory", status_code=status.HTTP_200_OK)
     async def delete_memory(

@@ -1,3 +1,5 @@
+"""HMAC signing and replay-window verification for interaction requests."""
+
 from __future__ import annotations
 
 import hashlib
@@ -29,4 +31,3 @@ class InteractionSignatureVerifier:
         ).hexdigest()
         if not hmac.compare_digest(expected, signature):
             raise PermissionError("invalid request signature")
-

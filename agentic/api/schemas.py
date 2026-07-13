@@ -1,3 +1,5 @@
+"""Strict external API schemas and the durable task-status state machine."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -102,6 +104,24 @@ class ResumeTaskRequest(StrictSchema):
         if has_answer == has_confirmation:
             raise ValueError("provide either a clarification answer or an authorization token")
         return self
+
+
+class TaskStatusRequest(StrictSchema):
+    """Authenticated identity tuple used by the temporary evaluation poller."""
+
+    request_id: UUID
+    session_id: UUID
+    user_id: str = Field(min_length=1, max_length=200)
+    tenant_id: str = Field(min_length=1, max_length=200)
+
+
+class TaskStatusResponse(StrictSchema):
+    """Safe task state returned by the non-production evaluation endpoint."""
+
+    task_id: UUID
+    status: TaskStatus
+    final_report: dict[str, Any] | None = None
+    pending_action: dict[str, Any] | None = None
 
 
 class MemoryDeleteRequest(StrictSchema):

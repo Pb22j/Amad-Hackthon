@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -13,13 +14,20 @@ from agentic.persistence.database import Database
 
 @pytest.fixture(autouse=True)
 def environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    if os.getenv("RUN_LIVE_AGENT_TESTS") == "1":
+        # The opt-in live matrix deliberately uses the caller's real provider,
+        # PostgreSQL, encryption, and signing configuration.
+        return
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("LANGGRAPH_DATABASE_URL", "postgresql://unused")
     monkeypatch.setenv("CONFIRMATION_SIGNING_KEY", "c" * 32)
     monkeypatch.setenv("CHECKPOINT_ENCRYPTION_KEY", "e" * 32)
     monkeypatch.setenv("APP_DATA_ENCRYPTION_KEY", "d" * 32)
     monkeypatch.setenv("INTERACTION_SHARED_SECRET", "i" * 32)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    # Deterministic tests must not need provider credentials, but the opt-in
+    # compatibility suite must retain the real key loaded by the caller.
+    if os.getenv("RUN_REAL_MODEL_TESTS") != "1":
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
 
 @pytest.fixture

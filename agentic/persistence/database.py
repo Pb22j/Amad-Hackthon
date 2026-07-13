@@ -1,3 +1,5 @@
+"""Async SQLAlchemy engine and transaction-scoped session management."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -50,4 +52,3 @@ class Database:
 
     async def dispose(self) -> None:
         await self.engine.dispose()
-

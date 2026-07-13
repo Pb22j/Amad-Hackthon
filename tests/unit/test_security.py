@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -32,6 +33,28 @@ def test_confirmation_is_bound_to_exact_arguments(auth):
     )
     assert claims.arguments_hash == arguments_hash(
         {"amount": "100.00", "currency": "SAR", "destination": "b1"}
+    )
+
+
+def test_confirmation_hash_is_stable_across_decimal_json_boundary(auth):
+    signer = ConfirmationSigner("k" * 32)
+    token = signer.issue(
+        auth=auth,
+        task_id="task-1",
+        tool_name="transfer_funds",
+        arguments={"amount": "25.00", "destination": "Savings"},
+    )
+
+    claims = signer.verify(
+        token,
+        auth=auth,
+        task_id="task-1",
+        tool_name="transfer_funds",
+        arguments={"amount": Decimal("25.00"), "destination": "Savings"},
+    )
+
+    assert claims.arguments_hash == arguments_hash(
+        {"amount": Decimal("25.00"), "destination": "Savings"}
     )
 
 

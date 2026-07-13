@@ -1,3 +1,5 @@
+"""Persistence for clarification questions, answers, and expiration."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -65,3 +67,16 @@ class ClarificationRepository:
         row.answered_at = now
         await self.session.flush()
         return row
+
+    async def answered_values(self, task_id: str) -> tuple[Any, ...]:
+        """Return values supplied through authenticated clarification resumes."""
+
+        statement = (
+            select(ClarificationRow.answer)
+            .where(
+                ClarificationRow.task_id == task_id,
+                ClarificationRow.status == "answered",
+            )
+            .order_by(ClarificationRow.answered_at)
+        )
+        return tuple(await self.session.scalars(statement))

@@ -1,3 +1,5 @@
+"""Release gate that enforces a minimum mutation score for security code."""
+
 from __future__ import annotations
 
 import argparse

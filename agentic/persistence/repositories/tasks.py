@@ -1,3 +1,5 @@
+"""Idempotent task creation and validated task-status transitions."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

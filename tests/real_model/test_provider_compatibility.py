@@ -16,7 +16,7 @@ async def test_configured_primary_model_supports_structured_output_and_async(app
     class Probe(BaseModel):
         ok: bool
 
-    result = await model.with_structured_output(Probe).ainvoke(
+    result = await model.with_structured_output(Probe, method="function_calling").ainvoke(
         "Return ok=true as structured output."
     )
     assert result.ok is True

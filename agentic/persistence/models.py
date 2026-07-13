@@ -1,3 +1,5 @@
+"""Application-owned SQLAlchemy tables for durable tasks, memory, and audit."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

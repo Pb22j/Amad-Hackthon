@@ -1,3 +1,5 @@
+"""Deterministic allowlist preventing secrets and instructions from memory."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence

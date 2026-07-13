@@ -1,3 +1,10 @@
+"""Construction of the deterministic outer graph and bounded reasoning agent.
+
+The outer LangGraph owns request screening, intent/risk classification, routing,
+and finalization. The inner LangChain agent may reason and propose tool calls,
+but it only receives tools that were replaced by deterministic guarded wrappers.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -5,6 +12,7 @@ from typing import Any, Literal
 import json
 
 from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
 from langchain.agents.middleware import (
     ModelCallLimitMiddleware,
     ModelFallbackMiddleware,
@@ -16,12 +24,17 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
-from agentic.agent.prompts import FINANCIAL_AGENT_SYSTEM_PROMPT, INTENT_CLASSIFIER_PROMPT
+from agentic.agent.prompts import (
+    FINANCIAL_AGENT_SYSTEM_PROMPT,
+    INTENT_CLASSIFIER_PROMPT,
+    REPORT_RECOVERY_PROMPT,
+)
 from agentic.agent.report import AgentReport
 from agentic.agent.state import FinancialAgentState
 from agentic.api.schemas import TaskStatus
 from agentic.config.loader import AppConfig
 from agentic.middleware.model_usage import ModelUsageMiddleware
+from agentic.middleware.tool_scope import IntentToolScopeMiddleware
 from agentic.policy.engine import PolicyEngine
 from agentic.policy.models import IntentClassification
 from agentic.tools.clarification import build_clarification_tool
@@ -31,6 +44,8 @@ from agentic.tools.registry import ToolRegistry
 
 
 def _rejected_report(reason: str) -> AgentReport:
+    """Map internal policy reason codes to intentionally generic user reports."""
+
     messages = {
         "credential_request": "The request was rejected because authentication secrets cannot be requested or processed.",
         "cross_user_request": "The request was rejected because another user's financial information cannot be accessed.",
@@ -53,13 +68,23 @@ def build_financial_agent(
     checkpointer: BaseCheckpointSaver | None = None,
     fallback_models: Sequence[BaseChatModel] = (),
 ) -> Any:
+    """Compile the financial graph from models, tools, policy, and persistence.
+
+    External tools are registered one-to-one with metadata and wrapped before
+    ``create_agent`` sees them. This is the principal invariant preventing the
+    model from bypassing authorization, confirmation, and result validation.
+    """
+
     policy = PolicyEngine(config.policies)
     registry = ToolRegistry(external_tools, tool_metadata)
     guard_factory = GuardedToolFactory()
     guarded_tools = [guard_factory.wrap(tool, metadata) for tool, metadata in registry.entries()]
     guarded_tools.append(build_clarification_tool())
 
+    # Budgets are middleware, not prompt instructions, so an injected prompt
+    # cannot disable or extend them.
     middleware: list[Any] = [
+        IntentToolScopeMiddleware({item.name for item in tool_metadata}),
         ModelCallLimitMiddleware(
             run_limit=config.limits.task.max_model_calls,
             exit_behavior="error",
@@ -91,13 +116,25 @@ def build_financial_agent(
         tools=guarded_tools,
         system_prompt=FINANCIAL_AGENT_SYSTEM_PROMPT,
         middleware=middleware,
-        response_format=AgentReport,
+        # ToolStrategy avoids provider-specific native structured-output APIs.
+        # This works consistently through OpenRouter while still validating
+        # the final report against the strict Pydantic schema.
+        response_format=ToolStrategy(AgentReport),
         context_schema=AgentRuntimeContext,
+        state_schema=FinancialAgentState,
         name="financial_action_agent",
     )
-    classifier = classifier_model.with_structured_output(IntentClassification)
+    classifier = classifier_model.with_structured_output(
+        IntentClassification, method="function_calling"
+    )
+    report_recovery = primary_model.with_structured_output(
+        AgentReport, method="function_calling"
+    )
+    intent_scoping_enabled = any(item.intents for item in tool_metadata)
 
     async def screen_request(state: FinancialAgentState) -> dict[str, Any]:
+        """Apply cheap deterministic request checks before spending model calls."""
+
         decision = policy.screen_request(state["original_request"]["text"])
         if not decision.allowed:
             return {
@@ -107,6 +144,8 @@ def build_financial_agent(
         return {"status": TaskStatus.VALIDATING.value}
 
     async def classify_request(state: FinancialAgentState) -> dict[str, Any]:
+        """Obtain schema-validated intent and derive risk through code policy."""
+
         classification = await classifier.ainvoke(
             [
                 SystemMessage(content=INTENT_CLASSIFIER_PROMPT),
@@ -127,7 +166,13 @@ def build_financial_agent(
             "intent": classification.model_dump(mode="json"),
             "risk": risk.model_dump(mode="json"),
             "status": TaskStatus.RUNNING.value,
-            "available_tools": [tool.name for tool in guarded_tools],
+            "available_tools": [
+                item.name
+                for item in tool_metadata
+                if not intent_scoping_enabled
+                or not item.intents
+                or classification.intent.value in item.intents
+            ],
         }
 
     def route_after_screen(state: FinancialAgentState) -> Literal["classify", "finalize"]:
@@ -136,7 +181,26 @@ def build_financial_agent(
     def route_after_classification(state: FinancialAgentState) -> Literal["agent", "finalize"]:
         return "finalize" if state.get("status") == TaskStatus.REJECTED.value else "agent"
 
+    async def ensure_structured_report(state: FinancialAgentState) -> dict[str, Any]:
+        """Recover when a provider ends the agent loop with ordinary text.
+
+        The recovery model receives no executable tools. It can only produce an
+        ``AgentReport``, which is subsequently checked against persisted tool
+        executions and authoritative receipts by ``AgentService``.
+        """
+
+        if state.get("structured_response") is not None:
+            return {}
+        report = await report_recovery.ainvoke(
+            [SystemMessage(content=REPORT_RECOVERY_PROMPT), *state["messages"]]
+        )
+        if not isinstance(report, AgentReport):
+            report = AgentReport.model_validate(report)
+        return {"structured_response": report.model_dump(mode="json")}
+
     async def finalize(state: FinancialAgentState) -> dict[str, Any]:
+        """Normalize every graph exit into the small public report schema."""
+
         report = state.get("final_report") or state.get("structured_response")
         if report is None:
             report = AgentReport(
@@ -162,11 +226,13 @@ def build_financial_agent(
     builder.add_node("screen", screen_request)
     builder.add_node("classify", classify_request)
     builder.add_node("agent", inner_agent)
+    builder.add_node("ensure_report", ensure_structured_report)
     builder.add_node("finalize", finalize)
     builder.add_edge(START, "screen")
     builder.add_conditional_edges("screen", route_after_screen)
     builder.add_conditional_edges("classify", route_after_classification)
-    builder.add_edge("agent", "finalize")
+    builder.add_edge("agent", "ensure_report")
+    builder.add_edge("ensure_report", "finalize")
     builder.add_edge("finalize", END)
     return builder.compile(checkpointer=checkpointer)
 

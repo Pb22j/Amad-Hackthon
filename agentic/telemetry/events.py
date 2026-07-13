@@ -1,3 +1,5 @@
+"""Safe task-event delivery to the user-facing interaction layer."""
+
 from __future__ import annotations
 
 import asyncio

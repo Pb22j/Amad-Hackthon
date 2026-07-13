@@ -1,3 +1,5 @@
+"""Multilingual prompt-injection signals used for defense-in-depth telemetry."""
+
 from __future__ import annotations
 
 import re

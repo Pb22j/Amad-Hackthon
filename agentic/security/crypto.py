@@ -1,3 +1,5 @@
+"""Randomized AES-GCM SQLAlchemy types for sensitive application columns."""
+
 from __future__ import annotations
 
 import hashlib
@@ -7,6 +9,7 @@ import secrets
 from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from pydantic_core import to_jsonable_python
 from sqlalchemy import LargeBinary
 from sqlalchemy.types import TypeDecorator
 
@@ -42,7 +45,10 @@ class EncryptedJSON(TypeDecorator[dict[str, Any]]):
         del dialect
         if value is None:
             return None
-        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+        json_value = to_jsonable_python(value, serialize_unknown=False)
+        serialized = json.dumps(
+            json_value, ensure_ascii=False, separators=(",", ":")
+        ).encode()
         return encrypt_bytes(serialized)
 
     def process_result_value(self, value: bytes | None, dialect: Any) -> Any:
@@ -63,4 +69,3 @@ class EncryptedText(TypeDecorator[str]):
     def process_result_value(self, value: bytes | None, dialect: Any) -> str | None:
         del dialect
         return decrypt_bytes(bytes(value)).decode("utf-8") if value is not None else None
-

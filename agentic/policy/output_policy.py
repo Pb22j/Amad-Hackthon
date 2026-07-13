@@ -1,3 +1,5 @@
+"""Validation connecting final success claims to authoritative tool receipts."""
+
 from __future__ import annotations
 
 from agentic.agent.report import AgentReport
@@ -27,4 +29,3 @@ class OutputPolicy:
         if any(phrase in combined for phrase in FORBIDDEN_OUTPUT_PHRASES):
             raise ValueError("report attempts to expose internal instructions")
         return safe
-

@@ -1,3 +1,5 @@
+"""Recursive removal of secrets and common financial identifiers."""
+
 from __future__ import annotations
 
 import re
@@ -31,4 +33,3 @@ def redact(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         return [redact(item) for item in value]
     return value
-

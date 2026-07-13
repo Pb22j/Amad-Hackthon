@@ -1,3 +1,5 @@
+"""Structured JSON logging with recursive redaction before serialization."""
+
 from __future__ import annotations
 
 import json
@@ -38,4 +40,3 @@ def configure_logging(level: int = logging.INFO) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
-

@@ -8,6 +8,7 @@ financial_actions:
     - add_beneficiary
   require_authoritative_receipt:
     - transfer_funds
+    - pay_bill
     - buy_investment
     - sell_investment
     - withdraw_funds
@@ -41,4 +42,3 @@ memory:
     - api_key
     - cvv
     - full_card_number
-

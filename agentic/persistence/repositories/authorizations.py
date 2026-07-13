@@ -1,3 +1,5 @@
+"""Single-use persistence for exact financial-action authorizations."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -38,4 +40,3 @@ class AuthorizationRepository:
         row.consumed_at = datetime.now(timezone.utc)
         await self.session.flush()
         return row
-

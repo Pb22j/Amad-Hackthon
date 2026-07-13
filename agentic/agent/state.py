@@ -1,3 +1,5 @@
+"""JSON-safe typed state shared by nodes in the financial LangGraph."""
+
 from __future__ import annotations
 
 from typing import Annotated, Any, TypedDict

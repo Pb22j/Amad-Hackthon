@@ -1,3 +1,12 @@
+"""Application service coordinating durable financial-agent task lifecycles.
+
+``AgentService`` is the bridge between the stateless HTTP API and the resumable
+LangGraph. It persists task transitions, scopes memory, constructs trusted
+runtime identity, records interrupts, validates reports, and publishes safe
+events. It never asks the end user directly; that remains the interaction
+layer's responsibility.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -21,13 +30,15 @@ from agentic.api.schemas import (
     AuthorizationContext,
     ResumeTaskRequest,
     TaskStatus,
+    TaskStatusRequest,
+    TaskStatusResponse,
 )
 from agentic.config.loader import AppConfig
 from agentic.memory.extraction import MemoryExtractor
 from agentic.memory.policy import MemoryPolicy, MemoryPolicyError
 from agentic.memory.service import MemoryService
 from agentic.persistence.database import Database
-from agentic.persistence.models import ToolExecutionRow
+from agentic.persistence.models import AgentTaskRow, TaskEventRow, ToolExecutionRow
 from agentic.policy.output_policy import OutputPolicy
 from agentic.persistence.repositories.clarifications import ClarificationRepository
 from agentic.persistence.repositories.tasks import TaskRepository
@@ -41,6 +52,8 @@ from agentic.tools.guard import AgentRuntimeContext
 
 
 class AgentService:
+    """Run, pause, resume, and audit authenticated agent tasks."""
+
     def __init__(
         self,
         *,
@@ -71,6 +84,8 @@ class AgentService:
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
     async def submit(self, request: AgenticRequest, *, background: bool = True) -> AcceptedTask:
+        """Accept an idempotent request and optionally execute it in the background."""
+
         if len(request.natural_language_request) > self.config.limits.task.max_request_characters:
             raise ValueError("request exceeds configured maximum length")
         await self.rate_limiter.acquire(tenant_id=request.tenant_id, user_id=request.user_id)
@@ -137,6 +152,8 @@ class AgentService:
             )
 
     async def _run_new(self, task_id: str, request: AgenticRequest) -> None:
+        """Build trusted graph context and invoke a newly accepted task once."""
+
         async with self.database.session() as session:
             repository = TaskRepository(session)
             row = await repository.get(task_id, tenant_id=request.tenant_id, user_id=request.user_id)
@@ -160,6 +177,8 @@ class AgentService:
                 else []
             ),
         )
+        # Only the signed request envelope supplies identity and scopes. Neither
+        # the user message nor model output can mutate this runtime object.
         auth = AuthContext(
             user_id=request.user_id,
             tenant_id=request.tenant_id,
@@ -175,6 +194,7 @@ class AgentService:
             initial_authorization_token=(
                 request.confirmation.authorization_token if request.confirmation else None
             ),
+            original_request=request.natural_language_request,
         )
         async with self.database.session() as session:
             memories = await MemoryService(session, self.memory_policy).list_for_user(
@@ -203,6 +223,8 @@ class AgentService:
         await self._invoke(task_id, request, state, runtime_context)
 
     async def resume(self, task_id: UUID, request: ResumeTaskRequest) -> None:
+        """Resume a paused task after rechecking its full identity tuple."""
+
         await self.rate_limiter.acquire(tenant_id=request.tenant_id, user_id=request.user_id)
         try:
             await self._resume(task_id, request)
@@ -215,6 +237,7 @@ class AgentService:
         task_id_str = str(task_id)
         async with self.database.session() as session:
             repository = TaskRepository(session)
+            clarifications = ClarificationRepository(session)
             row = await repository.get(
                 task_id_str, tenant_id=request.tenant_id, user_id=request.user_id
             )
@@ -226,7 +249,7 @@ class AgentService:
             if request.clarification_id:
                 if current != TaskStatus.WAITING_FOR_INPUT:
                     raise ValueError("task is not waiting for clarification")
-                await ClarificationRepository(session).answer(
+                await clarifications.answer(
                     str(request.clarification_id), task_id=task_id_str, answer=request.answer
                 )
                 resume_value = request.answer
@@ -234,6 +257,7 @@ class AgentService:
                 if current != TaskStatus.WAITING_FOR_CONFIRMATION:
                     raise ValueError("task is not waiting for confirmation")
                 resume_value = request.authorization_token
+            explicit_user_values = await clarifications.answered_values(task_id_str)
             await repository.transition(row, TaskStatus.RUNNING)
             original = AgenticRequest(
                 request_id=UUID(row.request_id),
@@ -261,6 +285,8 @@ class AgentService:
             session_factory=self.database.session_factory,
             config=self.config,
             confirmation_signer=self.confirmation_signer,
+            original_request=original.natural_language_request,
+            explicit_user_values=explicit_user_values,
         )
         await self._invoke(
             task_id_str,
@@ -270,9 +296,55 @@ class AgentService:
         )
 
     async def delete_memory(self, *, tenant_id: str, user_id: str, session_id: str) -> int:
+        """Delete curated cross-task memory within an authenticated namespace."""
+
         auth = AuthContext(user_id, tenant_id, session_id, frozenset())
         async with self.database.session() as session:
             return await MemoryService(session, self.memory_policy).delete_for_user(auth=auth)
+
+    async def get_task_status(
+        self, task_id: UUID, request: TaskStatusRequest
+    ) -> TaskStatusResponse:
+        """Return identity-scoped state for the temporary external evaluator.
+
+        The API exposes this method only outside production. It intentionally
+        returns the persisted safe interrupt payload or final report, never a
+        checkpoint, prompt, model trace, or raw tool result.
+        """
+
+        async with self.database.session() as session:
+            row = await session.scalar(
+                select(AgentTaskRow).where(
+                    AgentTaskRow.id == str(task_id),
+                    AgentTaskRow.tenant_id == request.tenant_id,
+                    AgentTaskRow.user_id == request.user_id,
+                    AgentTaskRow.session_id == str(request.session_id),
+                    AgentTaskRow.request_id == str(request.request_id),
+                )
+            )
+            if row is None:
+                raise LookupError("task not found")
+
+            status = TaskStatus(row.status)
+            pending_action = None
+            if status in {TaskStatus.WAITING_FOR_INPUT, TaskStatus.WAITING_FOR_CONFIRMATION}:
+                event = await session.scalar(
+                    select(TaskEventRow)
+                    .where(
+                        TaskEventRow.task_id == str(task_id),
+                        TaskEventRow.event_type == status.value,
+                    )
+                    .order_by(TaskEventRow.created_at.desc())
+                    .limit(1)
+                )
+                pending_action = event.payload if event else None
+
+            return TaskStatusResponse(
+                task_id=task_id,
+                status=status,
+                final_report=row.final_report,
+                pending_action=pending_action,
+            )
 
     async def _invoke(
         self,
@@ -281,6 +353,8 @@ class AgentService:
         graph_input: Any,
         runtime_context: AgentRuntimeContext,
     ) -> None:
+        """Invoke the graph under its wall-clock budget and persist the outcome."""
+
         graph_config = {"configurable": {"thread_id": task_id}}
         started = time.monotonic()
         try:
@@ -407,8 +481,15 @@ class AgentService:
             for row in executions
             if row.tool_name in required_tool_names and row.status == "completed" and row.receipt_id
         }
+        # The model may omit a receipt, but it may never invent one. Attach
+        # missing IDs deterministically from completed persisted executions so
+        # a successful provider action is not turned into a failed task merely
+        # because report formatting was incomplete.
         if not required_receipts.issubset(set(report.receipt_ids)):
-            raise ValueError("report omitted an authoritative financial-action receipt")
+            report = AgentReport.model_validate(
+                report.model_dump(mode="json")
+                | {"receipt_ids": sorted(set(report.receipt_ids) | required_receipts)}
+            )
         target = {
             "completed": TaskStatus.COMPLETED,
             "partially_completed": TaskStatus.PARTIALLY_COMPLETED,

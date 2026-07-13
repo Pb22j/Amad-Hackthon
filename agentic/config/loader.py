@@ -1,3 +1,10 @@
+"""Strict, immutable configuration models and YAML/environment loader.
+
+Operational settings live in reviewable YAML files while secrets remain in the
+environment. Unknown fields are rejected to catch misspellings and obsolete
+settings during startup rather than silently weakening a policy.
+"""
+
 from __future__ import annotations
 
 import os
@@ -192,8 +199,6 @@ class AppConfig(StrictModel):
                 raise ValueError("checkpoint encryption is required in production")
             if not self.secrets.interaction_event_webhook_url:
                 raise ValueError("interaction event webhook is required in production")
-            if not self.app.agent.tool_provider:
-                raise ValueError("tool provider is required in production")
         return self
 
 
@@ -206,6 +211,8 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_config(config_dir: str | Path | None = None) -> AppConfig:
+    """Load all configuration files and required secret environment values."""
+
     root = Path(config_dir) if config_dir else Path(__file__).resolve().parent
     secrets = SecretsConfig(
         database_url=os.environ["DATABASE_URL"],
@@ -233,4 +240,6 @@ def load_config(config_dir: str | Path | None = None) -> AppConfig:
 
 @lru_cache(maxsize=1)
 def get_config() -> AppConfig:
+    """Return the process-wide immutable configuration instance."""
+
     return load_config()

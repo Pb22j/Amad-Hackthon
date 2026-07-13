@@ -1,3 +1,5 @@
+"""Provider-neutral construction of role-specific LangChain chat models."""
+
 from __future__ import annotations
 
 import os
@@ -11,11 +13,15 @@ from agentic.llm.capabilities import validate_capabilities
 
 
 class ModelFactory:
+    """Create and cache models by semantic role from ``llm.yaml``."""
+
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
         self._cache: dict[str, BaseChatModel] = {}
 
     def create(self, role: str) -> BaseChatModel:
+        """Build one configured role after validating provider capabilities."""
+
         if role in self._cache:
             return self._cache[role]
         try:
@@ -28,6 +34,8 @@ class ModelFactory:
         return model
 
     def create_fallbacks(self, role: str) -> list[BaseChatModel]:
+        """Build the ordered fallback models configured for a primary role."""
+
         try:
             fallback_roles = self.config.models[role].fallback_roles
         except KeyError as exc:

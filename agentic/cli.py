@@ -1,3 +1,5 @@
+"""Operational commands for database setup, retention, and security evals."""
+
 from __future__ import annotations
 
 import argparse

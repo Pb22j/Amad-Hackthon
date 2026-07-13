@@ -1,3 +1,5 @@
+"""Process-local request and concurrency budgets used behind a gateway limit."""
+
 from __future__ import annotations
 
 import asyncio
@@ -47,4 +49,3 @@ class InMemoryRateLimiter:
                 self._user_active[key] -= 1
             if self._tenant_active[tenant_id] > 0:
                 self._tenant_active[tenant_id] -= 1
-

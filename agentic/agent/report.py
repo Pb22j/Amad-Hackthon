@@ -1,3 +1,5 @@
+"""Small structured report returned to the user-facing interaction agent."""
+
 from __future__ import annotations
 
 from typing import Any, Literal

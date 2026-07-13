@@ -1,3 +1,5 @@
+"""Structured intent and risk models shared by classification and policy."""
+
 from __future__ import annotations
 
 from enum import StrEnum
@@ -50,4 +52,3 @@ class RiskAssessment(BaseModel):
     reason_codes: tuple[str, ...] = ()
     requires_confirmation: bool = False
     contains_sensitive_data: bool = False
-

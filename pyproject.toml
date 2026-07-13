@@ -52,6 +52,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
   "integration: tests involving multiple application components",
+  "live_agent: tests invoking the real provider and local PostgreSQL dummy workflows",
   "postgres: tests requiring a PostgreSQL service",
   "real_model: tests invoking a configured external model",
   "security: adversarial and security-invariant tests",

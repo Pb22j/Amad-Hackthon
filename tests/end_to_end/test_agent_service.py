@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from agentic.agent.graph import build_financial_agent
 from agentic.agent.service import AgentService
-from agentic.api.schemas import ResumeTaskRequest, TaskStatus
+from agentic.api.schemas import ResumeTaskRequest, TaskStatus, TaskStatusRequest
 from agentic.memory.extraction import MemoryCandidate
 from agentic.persistence.models import AgentTaskRow, ClarificationRow
 from agentic.policy.models import Intent
@@ -82,10 +82,22 @@ async def test_service_completes_and_persists_report(database, app_config, agent
         model=ScriptedChatModel(responses=[report_message(summary="Balance retrieved")]),
     )
     accepted = await service.submit(agentic_request, background=False)
+    status = await service.get_task_status(
+        accepted.task_id,
+        TaskStatusRequest(
+            request_id=agentic_request.request_id,
+            session_id=agentic_request.session_id,
+            user_id=agentic_request.user_id,
+            tenant_id=agentic_request.tenant_id,
+        ),
+    )
     async with database.session() as session:
         task = await session.get(AgentTaskRow, str(accepted.task_id))
         assert task.status == TaskStatus.COMPLETED.value
         assert task.final_report["summary"] == "Balance retrieved"
+    assert status.status == TaskStatus.COMPLETED
+    assert status.final_report["summary"] == "Balance retrieved"
+    assert status.pending_action is None
     assert [event.event_type.value for event in events.events] == ["accepted", "completed"]
 
 
@@ -123,6 +135,17 @@ async def test_service_persists_clarification_and_resumes(
     accepted = await service.submit(agentic_request, background=False)
     input_event = events.events[-1]
     assert input_event.event_type.value == "input_needed"
+    status = await service.get_task_status(
+        accepted.task_id,
+        TaskStatusRequest(
+            request_id=agentic_request.request_id,
+            session_id=agentic_request.session_id,
+            user_id=agentic_request.user_id,
+            tenant_id=agentic_request.tenant_id,
+        ),
+    )
+    assert status.status == TaskStatus.WAITING_FOR_INPUT
+    assert status.pending_action["question"] == "Which source account?"
     clarification_id = UUID(input_event.details["clarification_id"])
     async with database.session() as session:
         clarification = await session.get(ClarificationRow, str(clarification_id))
@@ -266,6 +289,16 @@ async def test_resume_rejects_wrong_identity_and_request(database, app_config, a
     )
     accepted = await service.submit(agentic_request, background=False)
     clarification_id = UUID(events.events[-1].details["clarification_id"])
+    with pytest.raises(LookupError):
+        await service.get_task_status(
+            accepted.task_id,
+            TaskStatusRequest(
+                request_id=agentic_request.request_id,
+                session_id=agentic_request.session_id,
+                user_id="another-user",
+                tenant_id=agentic_request.tenant_id,
+            ),
+        )
     with pytest.raises(LookupError):
         await service.resume(
             accepted.task_id,

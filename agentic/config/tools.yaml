@@ -1,12 +1,78 @@
-tools: {}
-  # The tool provider may return only LangChain tools and define agent-level security
-  # metadata here. Alternatively it may return a ToolBundle containing both.
-  # tools:
-  #   transfer_funds:
-  #   risk: financial_action
-  #   required_scopes: [financial:write]
-  #   requires_confirmation: true
-  #   requires_receipt: true
-  #   requires_owner_metadata: true
-  #   idempotent: true
-  #   max_calls_per_task: 2
+tools:
+  get_balance:
+    risk: sensitive_read
+    intents: [account_information]
+    required_scopes: [financial:read]
+    requires_owner_metadata: true
+    max_calls_per_task: 3
+  search_transactions:
+    risk: sensitive_read
+    intents: [transaction_search]
+    required_scopes: [financial:read]
+    requires_owner_metadata: true
+    max_calls_per_task: 3
+  get_portfolio:
+    risk: sensitive_read
+    intents: [investment_research]
+    required_scopes: [financial:read]
+    requires_owner_metadata: true
+    max_calls_per_task: 3
+  transfer_funds:
+    risk: financial_action
+    intents: [money_transfer]
+    explicit_user_fields: [destination]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  pay_bill:
+    risk: financial_action
+    intents: [bill_payment]
+    explicit_user_fields: [biller]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  add_beneficiary:
+    risk: write
+    intents: [beneficiary_management]
+    explicit_user_fields: [name, account_reference]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: false
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  buy_investment:
+    risk: financial_action
+    intents: [investment_buy, portfolio_modification]
+    explicit_user_fields: [symbol]
+    required_scopes: [investment:trade]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  sell_investment:
+    risk: financial_action
+    intents: [investment_sell, portfolio_modification]
+    explicit_user_fields: [symbol]
+    required_scopes: [investment:trade]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  withdraw_funds:
+    risk: financial_action
+    intents: [money_transfer]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2

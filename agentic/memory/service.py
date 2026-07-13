@@ -1,3 +1,5 @@
+"""Tenant- and user-scoped persistence for curated long-term memory."""
+
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +16,8 @@ from agentic.security.identity import AuthContext
 
 
 class MemoryService:
+    """Store only policy-approved memories with provenance and expiration."""
+
     def __init__(self, session: AsyncSession, policy: MemoryPolicy) -> None:
         self.session = session
         self.policy = policy
@@ -32,6 +36,8 @@ class MemoryService:
         expires_at: datetime | None = None,
         verified: bool = False,
     ) -> MemoryItemRow:
+        """Validate, deduplicate, and stage one curated memory item."""
+
         if not 0 <= confidence <= 1:
             raise ValueError("memory confidence must be between 0 and 1")
         self.policy.validate(memory_type, value)
@@ -73,6 +79,8 @@ class MemoryService:
         memory_types: set[str] | None = None,
         limit: int = 50,
     ) -> list[MemoryItemRow]:
+        """Return unexpired memories from exactly one tenant/user namespace."""
+
         now = datetime.now(timezone.utc)
         statement = select(MemoryItemRow).where(
             MemoryItemRow.tenant_id == auth.tenant_id,
@@ -86,6 +94,8 @@ class MemoryService:
         return list(result)
 
     async def delete_for_user(self, *, auth: AuthContext) -> int:
+        """Delete every curated item belonging to the authenticated namespace."""
+
         statement = delete(MemoryItemRow).where(
             MemoryItemRow.tenant_id == auth.tenant_id,
             MemoryItemRow.user_id == auth.user_id,

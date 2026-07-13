@@ -1,3 +1,5 @@
+"""Signed, expiring, exact-argument authorization for financial actions."""
+
 from __future__ import annotations
 
 import base64
@@ -29,7 +31,17 @@ class ConfirmationClaims(BaseModel):
 
 
 def normalize_arguments(arguments: dict[str, Any]) -> str:
-    return json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """Return stable JSON across Pydantic, HTTP, and tool-call boundaries."""
+
+    # Tool arguments have already passed their Pydantic schema. ``default=str``
+    # preserves exact Decimal/UUID values when the same data crosses JSON boundaries.
+    return json.dumps(
+        arguments,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 def arguments_hash(arguments: dict[str, Any]) -> str:
@@ -128,4 +140,3 @@ class ConfirmationSigner:
         if not all(hmac.compare_digest(a, b) for a, b in zip(expected, actual, strict=True)):
             raise PermissionError("authorization does not match this exact action")
         return claims
-

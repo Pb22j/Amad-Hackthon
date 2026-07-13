@@ -17,7 +17,7 @@ class ExtractionModel:
     def __init__(self, result):
         self.result = result
 
-    def with_structured_output(self, _):
+    def with_structured_output(self, _, **__):
         return ExtractionRunnable(self.result)
 
 

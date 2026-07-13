@@ -1,3 +1,5 @@
+"""Trusted runtime identity and deterministic scope enforcement."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

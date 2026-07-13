@@ -1,3 +1,5 @@
+"""Special interrupting tool for questions routed through the interaction layer."""
+
 from typing import Annotated, Any
 from uuid import NAMESPACE_URL, uuid5
 

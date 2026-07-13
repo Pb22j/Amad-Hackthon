@@ -1,3 +1,5 @@
+"""Low-cardinality Prometheus metrics for tasks, tools, models, and policy."""
+
 from prometheus_client import Counter, Histogram
 
 

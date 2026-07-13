@@ -111,7 +111,7 @@ async def test_forged_receipt_in_report_fails_task(database, app_config, agentic
 
 @pytest.mark.integration
 @pytest.mark.security
-async def test_required_authoritative_receipt_cannot_be_omitted(
+async def test_omitted_receipt_is_attached_only_from_authoritative_execution(
     database, app_config, agentic_request
 ):
     async def graph_result(graph_input, config, context):
@@ -132,8 +132,11 @@ async def test_required_authoritative_receipt_cannot_be_omitted(
         return completed_result()
 
     instance = service(database, app_config, FakeGraph(graph_result))
-    with pytest.raises(ValueError, match="omitted"):
-        await instance.submit(agentic_request, background=False)
+    accepted = await instance.submit(agentic_request, background=False)
+    async with database.session() as session:
+        row = await session.get(AgentTaskRow, str(accepted.task_id))
+        assert row.status == TaskStatus.COMPLETED.value
+        assert row.final_report["receipt_ids"] == ["authoritative-receipt"]
 
 
 @pytest.mark.integration

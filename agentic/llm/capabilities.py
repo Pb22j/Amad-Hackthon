@@ -1,3 +1,5 @@
+"""Early validation of capabilities supported by configured model providers."""
+
 from __future__ import annotations
 
 
@@ -15,4 +17,3 @@ def validate_capabilities(provider: str, required: tuple[str, ...]) -> None:
     missing = set(required) - supported
     if missing:
         raise ValueError(f"provider {provider!r} lacks required capabilities: {sorted(missing)}")
-

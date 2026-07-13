@@ -5,7 +5,7 @@
 - Python 3.12 or 3.13.
 - PostgreSQL 16.
 - An interaction-layer webhook endpoint.
-- A configured LLM provider and tool provider.
+- A configured LLM provider and a non-empty `agentic.tools` list (or provider override).
 
 ## Database setup
 
@@ -32,7 +32,7 @@ runtime role only the DML and sequence permissions it needs. Encrypt database st
 - `APP_DATA_ENCRYPTION_KEY` with at least 32 random bytes, separate from checkpoint encryption
 - `INTERACTION_SHARED_SECRET` with at least 32 random bytes
 - `INTERACTION_EVENT_WEBHOOK_URL`
-- `AGENTIC_TOOL_PROVIDER`
+- `AGENTIC_TOOL_PROVIDER` only when tools are not exported by `agentic.tools`
 - The API key for every configured model provider
 
 Production startup rejects missing checkpoint encryption, webhook, or tool-provider configuration.
