@@ -42,7 +42,11 @@ async def clean_ledger(monkeypatch):
 
 
 def test_dummy_tools_are_discovered_with_security_metadata(app_config):
-    bundle = load_tool_bundle(None, app_config.tools.tools, require_tools=True)
+    # The default package now exposes the bank tools; the dummy sandbox stays
+    # available through the explicit provider override.
+    bundle = load_tool_bundle(
+        "agentic.tools.dummy:DUMMY_TOOLS", app_config.tools.tools, require_tools=True
+    )
 
     assert {tool.name for tool in DUMMY_TOOLS} == EXPECTED_TOOLS
     assert {tool.name for tool in bundle.tools} == EXPECTED_TOOLS
