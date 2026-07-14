@@ -1,5 +1,7 @@
 .env
 .venv/
+agentic/tools/data/
+chat_agent.db
 __pycache__/
 *.py[cod]
 .pytest_cache/

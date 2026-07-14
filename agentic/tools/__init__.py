@@ -1,14 +1,43 @@
 """Financial tool integration package.
 
 Teammate-owned functionality is exposed through ``TOOLS``. The agent discovers
-this list at startup and applies the guarded boundary to every item. Keeping an
-empty tuple is convenient for local graph tests; production rejects it.
+this list at startup and applies the guarded boundary to every item. The bank
+tools operate on the shared SQLite bank database (:mod:`agentic.tools.bank_db`).
+The in-memory ``DUMMY_TOOLS`` sandbox remains available through the
+``AGENTIC_TOOL_PROVIDER=agentic.tools.dummy:DUMMY_TOOLS`` override.
 """
 
+from agentic.tools.add_benefit import TOOL as ADD_BENEFIT_TOOL
 from agentic.tools.dummy import DUMMY_TOOLS
 from agentic.tools.guard import AgentRuntimeContext, GuardedToolFactory
 from agentic.tools.metadata import ToolMetadata, ToolResult
+from agentic.tools.monthly_report import TOOL as MONTHLY_REPORT_TOOL
+from agentic.tools.qatta import (
+    CANCEL_QATTA_TOOL,
+    CREATE_QATTA_TOOL,
+    LIST_QATTA_BILLS_TOOL,
+    PAY_QATTA_BILL_TOOL,
+)
+from agentic.tools.transfer_between_accounts import TOOL as TRANSFER_BETWEEN_ACCOUNTS_TOOL
 
-TOOLS = DUMMY_TOOLS
+BANK_TOOLS = (
+    ADD_BENEFIT_TOOL,
+    TRANSFER_BETWEEN_ACCOUNTS_TOOL,
+    MONTHLY_REPORT_TOOL,
+    CREATE_QATTA_TOOL,
+    PAY_QATTA_BILL_TOOL,
+    CANCEL_QATTA_TOOL,
+    LIST_QATTA_BILLS_TOOL,
+)
 
-__all__ = ["TOOLS", "AgentRuntimeContext", "GuardedToolFactory", "ToolMetadata", "ToolResult"]
+TOOLS = BANK_TOOLS
+
+__all__ = [
+    "TOOLS",
+    "BANK_TOOLS",
+    "DUMMY_TOOLS",
+    "AgentRuntimeContext",
+    "GuardedToolFactory",
+    "ToolMetadata",
+    "ToolResult",
+]

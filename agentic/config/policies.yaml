@@ -1,5 +1,10 @@
 financial_actions:
   require_exact_confirmation:
+    - transfer_between_accounts
+    - add_benefit
+    - create_qatta
+    - pay_qatta_bill
+    - cancel_qatta
     - transfer_funds
     - buy_investment
     - sell_investment
@@ -7,6 +12,10 @@ financial_actions:
     - pay_bill
     - add_beneficiary
   require_authoritative_receipt:
+    - transfer_between_accounts
+    - create_qatta
+    - pay_qatta_bill
+    - cancel_qatta
     - transfer_funds
     - pay_bill
     - buy_investment

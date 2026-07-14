@@ -1,4 +1,69 @@
 tools:
+  add_benefit:
+    risk: write
+    intents: [beneficiary_management]
+    explicit_user_fields: [full_name_of_benefit_account, benefit_account_number, short_name]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: false
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  transfer_between_accounts:
+    risk: financial_action
+    intents: [money_transfer]
+    explicit_user_fields: [destination_account]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  monthly_report:
+    risk: sensitive_read
+    intents: [transaction_search, account_information, financial_calculation]
+    required_scopes: [financial:read]
+    requires_owner_metadata: true
+    max_calls_per_task: 3
+  create_qatta:
+    # beneficiary_management included: qatta requests phrased as "add people
+    # to the qatta" classify there, and participants come from that list.
+    # financial_action: creation deducts the creator's share into the pot.
+    risk: financial_action
+    intents: [bill_payment, money_transfer, financial_calculation, beneficiary_management]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  pay_qatta_bill:
+    risk: financial_action
+    intents: [bill_payment, money_transfer]
+    explicit_user_fields: [qatta_name]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  cancel_qatta:
+    # financial_action: cancelling refunds every paid share from the pot.
+    risk: financial_action
+    intents: [bill_payment, money_transfer, beneficiary_management]
+    explicit_user_fields: [qatta_name]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  list_qatta_bills:
+    risk: sensitive_read
+    intents: [account_information, transaction_search, bill_payment, beneficiary_management]
+    required_scopes: [financial:read]
+    requires_owner_metadata: true
+    max_calls_per_task: 3
   get_balance:
     risk: sensitive_read
     intents: [account_information]
