@@ -1,4 +1,3 @@
-import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -6,6 +5,12 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from app.main import app
 
 client = TestClient(app)
+
+
+def authenticate(language="ar"):
+    response = client.post("/api/session", json={"language": language})
+    assert response.status_code == 200
+    return response.json()
 
 def test_health_endpoint():
     response = client.get("/api/health")
@@ -25,6 +30,7 @@ def test_config_endpoint():
 @patch("app.main.get_tts_service")
 @patch("app.main.audio_cache")
 def test_voice_chat_endpoint_success(mock_cache, mock_get_tts, mock_get_llm, mock_get_stt):
+    authenticate()
     # Set up mocks
     mock_stt = MagicMock()
     mock_stt.transcribe = AsyncMock(return_value="Hello assistant")
@@ -63,6 +69,7 @@ def test_voice_chat_endpoint_success(mock_cache, mock_get_tts, mock_get_llm, moc
 
 @patch("app.main.get_stt_service")
 def test_voice_chat_empty_transcript(mock_get_stt):
+    authenticate()
     mock_stt = MagicMock()
     mock_stt.transcribe = AsyncMock(return_value="")  # Empty transcription
     mock_get_stt.return_value = mock_stt
@@ -75,4 +82,3 @@ def test_voice_chat_empty_transcript(mock_get_stt):
     assert data["user_transcript"] == ""
     assert "try speaking again" in data["agent_text"]
     assert data["audio_base64"] == ""
-

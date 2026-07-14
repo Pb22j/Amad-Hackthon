@@ -1,7 +1,7 @@
 # Financial Tool Contract
 
-The agentic layer does not implement financial tools. A configured provider supplies LangChain
-`BaseTool` objects and agent-level `ToolMetadata`.
+The repository includes a SQLite-backed demo provider, while the agent boundary also accepts
+external LangChain `BaseTool` objects and agent-level `ToolMetadata`.
 
 ## Default tools package
 
@@ -19,8 +19,9 @@ value or callable result must be one of:
 - tools only, with matching entries in `agentic/config/tools.yaml`.
 
 Every tool must have a unique stable name and a strict Pydantic argument schema. User, tenant,
-permission, and confirmation values must not be accepted as model-controlled arguments. The tool
-implementation receives authoritative identity through its own trusted integration mechanism.
+permission, confirmation, and OTP values must not be accepted as model-controlled arguments. The
+guard binds authoritative request identity through an async-safe runtime context immediately around
+each invocation.
 
 ## Result envelope
 
@@ -50,7 +51,7 @@ tools:
   transfer_funds:
     risk: financial_action
     intents: [money_transfer]
-    explicit_user_fields: [destination]
+    explicit_user_fields: [destination, amount]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: true
@@ -61,7 +62,8 @@ tools:
 
 Read tools may be retried according to `limits.yaml`. Write and financial-action tools default to
 one attempt. All calls are scoped, audited, redacted, size-limited, and idempotency-protected by
-the agent boundary.
+the agent boundary. Financial confirmation requires both the exact signed authorization token and
+the dedicated demo OTP (`1111`). The OTP is never part of tool arguments, graph state, or audit data.
 
 `intents` is also a least-privilege boundary. After deterministic classification, external tools
 whose metadata does not match the classified intent are removed from the model request. Every

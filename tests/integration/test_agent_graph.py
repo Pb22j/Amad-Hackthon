@@ -472,6 +472,7 @@ async def test_financial_action_interrupts_for_exact_confirmation(database, app_
         tool_name="transfer_funds",
         arguments=arguments,
     )
+    context.otp_verified = True
     result = await graph.ainvoke(Command(resume=token), config=config, context=context)
     assert calls == 1
     assert result["final_report"]["receipt_ids"] == ["receipt-1"]
@@ -538,6 +539,7 @@ async def test_completed_financial_action_without_receipt_fails(database, app_co
         tool_name="transfer_funds",
         arguments=arguments,
     )
+    context.otp_verified = True
     with pytest.raises(ToolGuardError, match="receipt"):
         await graph.ainvoke(Command(resume=token), config=config, context=context)
 

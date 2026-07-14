@@ -154,7 +154,7 @@ const Visualizer = ({ status, audioManager }) => {
   return (
     <div className="visualizer-wrapper">
       <canvas ref={canvasRef} className="visualizer-canvas" />
-      <style jsx="true">{`
+      <style>{`
         .visualizer-wrapper {
           position: relative;
           width: 100%;

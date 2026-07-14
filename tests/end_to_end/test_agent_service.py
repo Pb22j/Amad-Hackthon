@@ -244,6 +244,22 @@ async def test_service_transfer_confirmation_and_receipt(
         tool_name="transfer_funds",
         arguments=arguments,
     )
+    with pytest.raises(PermissionError, match="invalid confirmation OTP"):
+        await service.resume(
+            accepted.task_id,
+            ResumeTaskRequest(
+                request_id=agentic_request.request_id,
+                session_id=agentic_request.session_id,
+                user_id=agentic_request.user_id,
+                tenant_id=agentic_request.tenant_id,
+                authorization_token=token,
+                otp_code="2222",
+            ),
+        )
+    assert calls == 0
+    async with database.session() as session:
+        pending = await session.get(AgentTaskRow, str(accepted.task_id))
+        assert pending.status == TaskStatus.WAITING_FOR_CONFIRMATION.value
     await service.resume(
         accepted.task_id,
         ResumeTaskRequest(
@@ -252,6 +268,7 @@ async def test_service_transfer_confirmation_and_receipt(
             user_id=agentic_request.user_id,
             tenant_id=agentic_request.tenant_id,
             authorization_token=token,
+            otp_code="1111",
         ),
     )
     assert calls == 1
@@ -259,6 +276,73 @@ async def test_service_transfer_confirmation_and_receipt(
         task = await session.get(AgentTaskRow, str(accepted.task_id))
         assert task.status == TaskStatus.COMPLETED.value
         assert task.final_report["receipt_ids"] == ["receipt-123"]
+
+
+@pytest.mark.integration
+@pytest.mark.security
+async def test_explicit_confirmation_rejection_terminates_without_tool_call(
+    database, app_config, agentic_request
+):
+    calls = 0
+
+    async def transfer(amount: int, destination: str):
+        nonlocal calls
+        calls += 1
+        return {"status": "completed"}
+
+    tool = StructuredTool.from_function(
+        coroutine=transfer,
+        name="transfer_funds",
+        description="Transfer funds.",
+        args_schema=TransferArgs,
+    )
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_funds",
+                        "args": {"amount": 500, "destination": "beneficiary-1"},
+                        "id": "transfer-rejected",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ]
+    )
+    service, _, events = build_service(
+        database=database,
+        app_config=app_config,
+        model=model,
+        intent=Intent.MONEY_TRANSFER,
+        tools=[tool],
+        metadata=[
+            ToolMetadata(
+                name="transfer_funds",
+                risk=ToolRisk.FINANCIAL_ACTION,
+                required_scopes=frozenset({"financial:write"}),
+                requires_confirmation=True,
+                requires_receipt=True,
+            )
+        ],
+    )
+    accepted = await service.submit(agentic_request, background=False)
+    await service.resume(
+        accepted.task_id,
+        ResumeTaskRequest(
+            request_id=agentic_request.request_id,
+            session_id=agentic_request.session_id,
+            user_id=agentic_request.user_id,
+            tenant_id=agentic_request.tenant_id,
+            confirmation_rejected=True,
+        ),
+    )
+    assert calls == 0
+    assert events.events[-1].event_type.value == "rejected"
+    async with database.session() as session:
+        task = await session.get(AgentTaskRow, str(accepted.task_id))
+        assert task.status == TaskStatus.REJECTED.value
 
 
 @pytest.mark.integration

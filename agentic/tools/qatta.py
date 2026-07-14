@@ -10,7 +10,7 @@ Money flows through the qatta pot (وعاء القطة):
 1. Creation splits the total equally over the participants plus the creator.
    The creator's own share is deducted immediately into the pot — a qatta
    cannot be created if the creator's balance cannot cover their share.
-   Qatta payments are exempt from the daily spend limit by design.
+   Qatta payments count toward the payer's daily spend limit.
 2. Each participant pays their bill into the pot; their bill becomes
    "تم الدفع". Every deduction is a real ledger entry.
 3. When the last bill is paid, the whole pot is transferred to the creator's
@@ -46,6 +46,7 @@ from agentic.tools.bank_db import (
     next_reference,
     owner_identity,
     run_in_bank_db,
+    spent_today,
     timestamp,
     tool_result,
 )
@@ -210,15 +211,23 @@ async def create_qatta(
                 error_code="not_enough_participants",
             )
 
-        # The creator shares the qatta too: total / (participants + creator).
+        # Split in integer halalah so the individual bills always sum exactly
+        # to the requested total. Any remainder is distributed deterministically.
         resolved[creator["uuid"]] = creator
-        share = money(total / len(resolved))
+        total_halalah = int(total * 100)
+        base_halalah, remainder = divmod(total_halalah, len(resolved))
+        shares = {
+            participant_id: money(
+                Decimal(base_halalah + (1 if index < remainder else 0)) / 100
+            )
+            for index, participant_id in enumerate(resolved)
+        }
+        share = money(Decimal(base_halalah) / 100)
+        creator_share = shares[creator["uuid"]]
 
-        # The creator's own share is paid into the pot right now. Qatta
-        # payments are exempt from the daily spend limit by design; only the
-        # balance must cover the share.
+        # The creator's own share is paid into the pot right now.
         balance = money(creator["Balance_SAR"])
-        if share > balance:
+        if creator_share > balance:
             return tool_result(
                 status="failed",
                 summary=(
@@ -226,16 +235,29 @@ async def create_qatta(
                     "qatta was not created."
                 ),
                 data={
-                    "share_per_person_sar": str(share),
+                    "creator_share_sar": str(creator_share),
                     "available_balance_sar": str(balance),
                 },
                 error_code="insufficient_funds",
+            )
+        daily_limit = money(creator["Daily_Spend_Limit_SAR"])
+        already_spent = spent_today(connection, creator["uuid"])
+        if already_spent + creator_share > daily_limit:
+            return tool_result(
+                status="failed",
+                summary="The creator's share would exceed the daily spend limit.",
+                data={
+                    "creator_share_sar": str(creator_share),
+                    "spent_today_sar": str(already_spent),
+                    "daily_limit_sar": str(daily_limit),
+                },
+                error_code="daily_limit_exceeded",
             )
 
         now = timestamp()
         qatta_id = str(uuid4())
         reference = next_reference(connection, "qatta")
-        balance_after = balance - share
+        balance_after = balance - creator_share
         connection.execute(
             "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
             (float(balance_after), now, creator["uuid"]),
@@ -245,7 +267,7 @@ async def create_qatta(
             user=creator,
             direction="debit",
             transaction_type="qatta_payment",
-            amount=share,
+            amount=creator_share,
             counterparty_name=f"وعاء {qatta_name.strip()}",
             counterparty_account=None,
             description=f"دفع حصة {qatta_name.strip()} إلى وعاء القطة",
@@ -271,7 +293,7 @@ async def create_qatta(
                     str(uuid4()),
                     qatta_id,
                     participant["uuid"],
-                    float(share),
+                    float(shares[participant["uuid"]]),
                     "paid" if is_creator else "unpaid",
                     now if is_creator else None,
                     now,
@@ -280,20 +302,22 @@ async def create_qatta(
         return tool_result(
             status="completed",
             summary=(
-                f"Qatta {qatta_name.strip()} created: {total} SAR split equally over "
-                f"{len(resolved)} participants ({share} SAR each). The creator's share "
-                f"was paid into the qatta pot."
+                f"Qatta {qatta_name.strip()} created: {total} SAR split over "
+                f"{len(resolved)} participants to the nearest halalah. The creator's "
+                f"{creator_share} SAR share was paid into the qatta pot."
             ),
             data={
                 "qatta": {
                     "name": qatta_name.strip(),
                     "total_sar": str(total),
                     "share_per_person_sar": str(share),
-                    "pot_collected_sar": str(share),
+                    "creator_share_sar": str(creator_share),
+                    "pot_collected_sar": str(creator_share),
                     "creator_new_balance_sar": str(balance_after),
                     "participants": [
                         {
                             "full_name": row["Full_Name_Ar"],
+                            "share_sar": str(shares[row["uuid"]]),
                             "status": (
                                 "تم الدفع" if row["uuid"] == creator["uuid"] else "غير مدفوعة"
                             ),
@@ -362,6 +386,19 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
                     "available_balance_sar": str(balance),
                 },
                 error_code="insufficient_funds",
+            )
+        daily_limit = money(payer["Daily_Spend_Limit_SAR"])
+        already_spent = spent_today(connection, payer["uuid"])
+        if already_spent + amount > daily_limit:
+            return tool_result(
+                status="failed",
+                summary="This Qatta payment would exceed the daily spend limit.",
+                data={
+                    "requested_amount_sar": str(amount),
+                    "spent_today_sar": str(already_spent),
+                    "daily_limit_sar": str(daily_limit),
+                },
+                error_code="daily_limit_exceeded",
             )
         creator = connection.execute(
             "SELECT * FROM users WHERE uuid = ?", (bill["creator_uuid"],)

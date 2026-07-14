@@ -1,86 +1,77 @@
-# دليل تشغيل وربط المساعد الصوتي (نافع) 🚀
+# Nafea voice interaction layer
 
-مرحباً بك! يحتوي هذا المجلد على المساعد الصوتي المالي "نافع" بواجهتيه الأمامية (Frontend) والخلفية (Backend).
-الهدف من هذا الدليل هو مساعدتك على تشغيل النظام وربطه مع **Execution Agent** الذي ستقوم بتجهيزه.
+Nafea is the authenticated user-facing boundary for the financial agent. The browser never receives
+provider API keys, interaction secrets, confirmation keys, user IDs, tenant IDs, or scopes.
 
----
+## Run locally
 
-## 🛠️ 1. متطلبات التشغيل (Prerequisites)
+Backend requirements: Python 3.10+.
 
-تحتاج إلى تثبيت البرامج التالية على جهازك:
-- **Node.js** (إصدار 18 أو أعلى) لتشغيل الواجهة الأمامية.
-- **Python** (إصدار 3.10 أو أعلى) لتشغيل الخادم الخلفي.
+```bash
+cd VoiceAssistant_Nafea/backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
----
+Frontend requirements: Node.js 20.19+ or 22.12+.
 
-## 🚀 2. طريقة التشغيل (How to Run)
+```bash
+cd VoiceAssistant_Nafea/frontend
+npm ci
+npm run dev
+```
 
-### أ. تشغيل الباك اند (Backend)
-يقوم الباك اند بإدارة الاتصال مع واجهة برمجة تطبيقات Gemini (Realtime API) وتمرير المهام عبر الـ Webhooks.
+The frontend runs at `http://localhost:5173` and proxies `/api` to the backend.
 
-1. افتح موجه الأوامر (Terminal) وادخل إلى مجلد `backend`.
-2. قم بإنشاء بيئة افتراضية (Virtual Environment) وتفعيلها:
-   ```bash
-   python -m venv .venv
-   # في الويندوز:
-   .\.venv\Scripts\activate
-   # في الماك/لينكس:
-   source .venv/bin/activate
-   ```
-3. قم بتثبيت المكتبات المطلوبة:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. إعداد ملف المتغيرات البيئية `.env`:
-   - انسخ ملف `.env.example` إلى `.env` (موجود بالفعل).
-   - تأكد من إضافة مفتاح `GEMINI_API_KEY` الخاص بك.
-5. تشغيل الخادم:
-   ```bash
-   uvicorn app.main:app --port 8000 --host 127.0.0.1
-   ```
-   *سيعمل الباك اند على الرابط: http://localhost:8000*
+## Required shared configuration
 
-### ب. تشغيل الفرونت اند (Frontend)
-واجهة المستخدم التي يتفاعل معها العميل للتحدث مع نافع.
+- `AGENTIC_BASE_URL` is the agent service origin, without `/agentic` appended.
+- `INTERACTION_SHARED_SECRET` must match both services and signs exact request/webhook bytes.
+- `CONFIRMATION_SIGNING_KEY` must match both services and is separate from the interaction secret.
+- `DEMO_CONFIRMATION_OTP=1111` must match both services for this demo only.
+- `GEMINI_API_KEY` stays only on the backend; `/api/realtime` proxies the provider WebSocket.
+- `FRONTEND_ORIGINS` is an explicit comma-separated allowlist.
+- Keep `SSL_VERIFY=true`. Production configuration rejects disabled verification.
 
-1. افتح موجه الأوامر وادخل إلى مجلد `frontend`.
-2. قم بتثبيت الحزم:
-   ```bash
-   npm install
-   ```
-3. تشغيل خادم التطوير:
-   ```bash
-   npm run dev
-   ```
-   *ستعمل الواجهة على الرابط: http://localhost:3000*
+The demo bootstrap endpoint derives identity and scopes from server configuration and issues an
+opaque HttpOnly session cookie. Set `ALLOW_DEMO_SESSION_BOOTSTRAP=false` in production and replace
+that endpoint with the platform's real authenticated identity adapter. Production startup rejects
+demo bootstrap.
 
----
+## Agentic communication
 
-## 🔗 3. أهم النقاط للربط مع Execution Agent (Integration)
+1. The interaction session supplies the stable request/session/user/tenant tuple and scopes.
+2. `/api/submit-task` signs and submits the exact agent request and durably records its task mapping.
+3. `/api/webhook` validates signature freshness before parsing, correlates the full identity tuple,
+   deduplicates the event, persists it, and routes it only to WebSockets for the matching session.
+4. `input_needed` resumes with the persisted clarification ID and full original identity.
+5. `confirmation_needed` displays exact arguments. Approval requires the dedicated on-screen demo
+   OTP (`1111`) and creates a short-lived single-use token bound to the tool and arguments hash.
+   The agent independently verifies both factors; rejection terminates the task without a tool call.
+6. Only signed terminal events may be communicated as financial outcomes.
 
-المساعد الصوتي "نافع" مبرمج ليقوم بتلقي الأوامر من المستخدم وإرسالها إلى **Execution Agent** ليتم تنفيذها فعلياً، ثم يستقبل التحديثات. لكي يتم هذا الربط بنجاح، يرجى الانتباه للنقاط التالية:
+Interaction task/event state is stored in the configured SQLite file for the demo. It is bounded and
+session-scoped; this adapter can later move to PostgreSQL without changing the agentic contract.
 
-### أ. المتغيرات البيئية المهمة في `backend/.env`
-- `AGENTIC_BASE_URL`: هذا هو رابط الـ Execution Agent الخاص بك. الافتراضي هو `http://127.0.0.1:9000/agentic`. إذا كان خادمك يعمل على منفذ آخر، قم بتغييره هنا.
-- `INTERACTION_SHARED_SECRET`: هذا هو **المفتاح السري** (Shared Secret) الذي نستخدمه لتوقيع الطلبات المرسلة إلى الـ Execution Agent عبر (HMAC SHA-256) لحمايتها. 
-  **يجب أن يكون هذا المفتاح متطابقاً تماماً** في ملف `.env` الخاص بالمساعد الصوتي وفي ملف `.env` الخاص بالـ Execution Agent (تحت اسم `CONFIRMATION_SIGNING_KEY` أو ما يعادله عندك).
+## Voice memory and grounding
 
-### ب. كيف يتم إرسال الطلبات (Submit Task)؟
-عندما يطلب المستخدم تحويل مبلغ ويؤكد العملية، سيقوم الباك اند الخاص بالمساعد الصوتي بإرسال طلب `POST` إلى:
-`{AGENTIC_BASE_URL}/request`
-وسيحمل الـ Payload تفاصيل العملية (`natural_language_request`).
+- Provider input/output transcription is enabled so the trusted backend, not the browser, observes
+  conversation turns.
+- Transcript text is encrypted at rest and scoped to the exact interaction session.
+- Credential-like, long-number, and instruction-injection text is refused admission.
+- Compaction is deterministic: it retains a bounded number of recent turns and never asks a model to
+  summarize or rewrite them.
+- Only explicit user statements are recalled, labeled as untrusted. Assistant responses are retained
+  briefly for audit continuity but are never recalled as facts.
+- Signed terminal agentic events are the only remembered financial outcomes. Balances, transactions,
+  and account status must always be refreshed through the agentic tools.
 
-### ج. كيف يستقبل المساعد الصوتي التحديثات (Webhooks)؟
-بمجرد أن يبدأ Execution Agent بمعالجة الطلب، يجب أن يقوم بإرسال تحديثات الحالة (Webhooks) إلى المساعد الصوتي على الرابط:
-`http://127.0.0.1:8000/api/webhook`
-**أنواع الحالات (event_type) التي يتعامل معها المساعد:**
-- `input_needed` أو `confirmation_needed`: إذا احتاج Execution Agent بيانات إضافية من المستخدم.
-- `completed`: إذا تمت العملية بنجاح.
-- `rejected` أو `failed`: إذا فشلت العملية.
+## Verification
 
-### د. اللغات المدعومة (Persona Language)
-الواجهة الأمامية تدعم الآن اختيار لغة المساعد الصوتي (عربي / إنجليزي) من خلال زر الإعدادات (⚙️). بناءً على هذا الاختيار، يتم توجيه الـ Backend لاستخدام الـ System Prompt المناسب للغة المطلوبة.
-
----
-
-بالتوفيق في عملية الربط وفالكم الفوز في الهاكاثون! 🏆
+```bash
+cd VoiceAssistant_Nafea/backend && PYTHONPATH=. .venv/bin/pytest -q app/tests
+cd VoiceAssistant_Nafea/frontend && npm run lint && npm run build && npm audit
+```

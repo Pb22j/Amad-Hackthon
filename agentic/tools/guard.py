@@ -9,8 +9,10 @@ the returned result before the model can observe it.
 import hashlib
 import json
 import asyncio
+import re
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -29,6 +31,7 @@ from agentic.security.confirmation import ConfirmationSigner, arguments_hash
 from agentic.security.identity import AuthContext
 from agentic.security.redaction import redact
 from agentic.tools.metadata import ToolMetadata, ToolResult
+from agentic.tools.runtime_identity import bind_tool_identity
 from agentic.telemetry.metrics import TOOL_CALLS, TOOL_DURATION
 
 
@@ -48,6 +51,7 @@ class AgentRuntimeContext:
     config: AppConfig
     confirmation_signer: ConfirmationSigner
     initial_authorization_token: str | None = None
+    otp_verified: bool = False
     original_request: str = ""
     explicit_user_values: tuple[Any, ...] = ()
 
@@ -68,8 +72,25 @@ def _argument_is_explicit(
 ) -> bool:
     """Check that a protected model argument appears in authenticated text."""
 
-    rendered = str(value).strip().casefold()
     evidence = (request, *(str(item) for item in explicit_user_values))
+    if isinstance(value, (list, tuple, set)):
+        return bool(value) and all(
+            _argument_is_explicit(item, request, explicit_user_values) for item in value
+        )
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        try:
+            expected = Decimal(str(value))
+        except InvalidOperation:
+            return False
+        for item in evidence:
+            for token in re.findall(r"(?<!\w)\d+(?:[.,]\d+)?", item):
+                try:
+                    if Decimal(token.replace(",", ".")) == expected:
+                        return True
+                except InvalidOperation:
+                    continue
+        return False
+    rendered = str(value).strip().casefold()
     return bool(rendered) and any(rendered in item.casefold() for item in evidence)
 
 
@@ -178,6 +199,8 @@ class GuardedToolFactory:
                             "expires_in_seconds": 300,
                         }
                     )
+                if not context.otp_verified:
+                    raise ToolGuardError("financial confirmation requires verified demo OTP")
                 claims = context.confirmation_signer.verify(
                     str(token),
                     auth=context.auth,
@@ -235,7 +258,11 @@ class GuardedToolFactory:
                 last_error: Exception | None = None
                 for attempt in range(attempts):
                     try:
-                        raw_result = await external_tool.ainvoke(arguments)
+                        with bind_tool_identity(
+                            user_id=context.auth.user_id,
+                            tenant_id=context.auth.tenant_id,
+                        ):
+                            raw_result = await external_tool.ainvoke(arguments)
                         break
                     except Exception as exc:
                         last_error = exc

@@ -1,53 +1,84 @@
-import os
+"""Bounded, expiring local audio cache; disabled by default for financial speech."""
+
+from __future__ import annotations
+
 import hashlib
+import os
+import tempfile
+import time
+from pathlib import Path
+
 from app.config import settings
 from app.utils.logger import logger
 
-class AudioCache:
-    def __init__(self, cache_dir: str = settings.CACHE_DIR, enabled: bool = settings.CACHE_ENABLED):
-        self.cache_dir = cache_dir
-        self.enabled = enabled
-        if self.enabled and not os.path.exists(self.cache_dir):
-            os.makedirs(self.cache_dir)
-            logger.info(f"Created audio cache directory at: {self.cache_dir}")
 
-    def _get_cache_key(self, provider: str, voice_id: str, text: str) -> str:
-        """Generate a unique cache key based on provider, voice_id, and text content."""
-        raw_key = f"{provider.lower()}:{voice_id.lower()}:{text.strip().lower()}"
-        hashed = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
-        return hashed
+class AudioCache:
+    def __init__(
+        self,
+        cache_dir: str = settings.CACHE_DIR,
+        enabled: bool = settings.CACHE_ENABLED,
+        *,
+        ttl_seconds: int = settings.CACHE_TTL_SECONDS,
+        max_entries: int = settings.CACHE_MAX_ENTRIES,
+        max_audio_bytes: int = settings.CACHE_MAX_AUDIO_BYTES,
+    ) -> None:
+        self.cache_dir = Path(cache_dir)
+        self.enabled = enabled
+        self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
+        self.max_audio_bytes = max_audio_bytes
+        if self.enabled:
+            self.cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    @staticmethod
+    def _get_cache_key(provider: str, voice_id: str, text: str) -> str:
+        raw_key = f"{provider.casefold()}:{voice_id.casefold()}:{text.strip().casefold()}"
+        return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+    def _path(self, provider: str, voice_id: str, text: str) -> Path:
+        return self.cache_dir / f"{self._get_cache_key(provider, voice_id, text)}.mp3"
 
     def get(self, provider: str, voice_id: str, text: str) -> bytes | None:
-        """Retrieve audio bytes from cache if exists."""
         if not self.enabled:
             return None
-        
-        cache_key = self._get_cache_key(provider, voice_id, text)
-        file_path = os.path.join(self.cache_dir, f"{cache_key}.mp3")
-        
-        if os.path.exists(file_path):
-            try:
-                with open(file_path, "rb") as f:
-                    logger.info(f"Cache hit for provider={provider}, voice_id={voice_id}")
-                    return f.read()
-            except Exception as e:
-                logger.error(f"Error reading audio cache file: {e}")
-        return None
+        path = self._path(provider, voice_id, text)
+        try:
+            stat = path.stat()
+            if time.time() - stat.st_mtime > self.ttl_seconds:
+                path.unlink(missing_ok=True)
+                return None
+            if stat.st_size > self.max_audio_bytes:
+                path.unlink(missing_ok=True)
+                return None
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            logger.warning("Audio cache read failed: %s", type(exc).__name__)
+            return None
+
+    def _evict(self) -> None:
+        files = sorted(
+            self.cache_dir.glob("*.mp3"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for path in files[self.max_entries :]:
+            path.unlink(missing_ok=True)
 
     def set(self, provider: str, voice_id: str, text: str, audio_bytes: bytes) -> None:
-        """Store audio bytes in cache."""
-        if not self.enabled:
+        if not self.enabled or len(audio_bytes) > self.max_audio_bytes:
             return
-        
-        cache_key = self._get_cache_key(provider, voice_id, text)
-        file_path = os.path.join(self.cache_dir, f"{cache_key}.mp3")
-        
+        path = self._path(provider, voice_id, text)
         try:
-            with open(file_path, "wb") as f:
-                f.write(audio_bytes)
-            logger.info(f"Cached audio bytes to {file_path}")
-        except Exception as e:
-            logger.error(f"Failed to write audio cache to file: {e}")
+            descriptor, temporary = tempfile.mkstemp(dir=self.cache_dir, prefix=".audio-")
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(audio_bytes)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            self._evict()
+        except OSError as exc:
+            logger.warning("Audio cache write failed: %s", type(exc).__name__)
 
-# Global cache instance
+
 audio_cache = AudioCache()

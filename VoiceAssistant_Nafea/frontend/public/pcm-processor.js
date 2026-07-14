@@ -6,7 +6,7 @@ class PCMProcessor extends AudioWorkletProcessor {
     this._framesWritten = 0;
   }
 
-  process(inputs, outputs, parameters) {
+  process(inputs) {
     const input = inputs[0];
     if (input.length > 0) {
       const channelData = input[0];

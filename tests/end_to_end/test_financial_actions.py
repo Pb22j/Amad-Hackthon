@@ -144,7 +144,7 @@ async def test_supported_financial_actions_require_confirmation_and_receipt(
         tool_name=tool_name,
         arguments=arguments,
     )
+    context.otp_verified = True
     result = await graph.ainvoke(Command(resume=token), config=graph_config, context=context)
     assert calls == 1
     assert result["final_report"]["receipt_ids"] == [f"receipt-{tool_name}"]
-

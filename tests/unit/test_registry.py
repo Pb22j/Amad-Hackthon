@@ -28,6 +28,17 @@ def test_registry_rejects_missing_and_unknown_metadata():
         ToolRegistry([], [ToolMetadata(name="operation", risk=ToolRisk.READ)])
 
 
+def test_financial_action_metadata_cannot_disable_confirmation_or_receipts():
+    with pytest.raises(ValueError, match="confirmation and OTP"):
+        ToolMetadata(name="unsafe", risk=ToolRisk.FINANCIAL_ACTION)
+    with pytest.raises(ValueError, match="authoritative receipt"):
+        ToolMetadata(
+            name="unsafe",
+            risk=ToolRisk.FINANCIAL_ACTION,
+            requires_confirmation=True,
+        )
+
+
 def test_registry_rejects_duplicate_tools_and_metadata():
     tool = make_tool()
     metadata = ToolMetadata(name="operation", risk=ToolRisk.READ)

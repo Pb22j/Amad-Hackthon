@@ -31,7 +31,8 @@ section 14. It is hidden from OpenAPI and returns `404` in production.
 - Verify signatures on every agent webhook before parsing or displaying it.
 - Preserve the original identity tuple across every resume call.
 - Present clarification questions and confirmation details to the same authenticated user/session.
-- Never collect or forward passwords, PINs, OTPs, CVVs, recovery codes, API keys, or access tokens.
+- Never collect credentials in conversation or forward them to a model/tool. The demo confirmation
+  form is the sole exception: it accepts the fixed action OTP `1111` over the authenticated backend.
 - Generate exact-action authorization tokens only after explicit user approval.
 - Treat duplicate webhook delivery as normal and process events idempotently.
 
@@ -280,9 +281,11 @@ The interaction layer must:
 1. Match the event to the stored task and currently authenticated session.
 2. Render a human-readable confirmation from the safe `tool_name` and `arguments` allowlist.
 3. Require an explicit approve/reject action; silence or a generic earlier consent is not approval.
-4. Reauthenticate or step up assurance when organizational policy requires it.
+4. Require the dedicated demo OTP (`1111`) in the confirmation form. Never ask for it by voice/chat.
 5. On approval, create a short-lived, single-use token bound to the event's `arguments_hash`.
-6. On rejection, do not create a token and tell the user the action was not executed.
+6. On rejection, do not create a token. Resume with the original identity tuple and
+   `"confirmation_rejected": true`; the agent transitions the task to `rejected` without invoking
+   the financial tool.
 
 Do not allow the client application to construct the token. Token creation belongs on the trusted
 interaction backend holding `CONFIRMATION_SIGNING_KEY`.
@@ -325,12 +328,14 @@ Resume request after approval:
   "session_id": "e374ab75-0137-4b5e-9d72-aa42d76dac24",
   "user_id": "user-123",
   "tenant_id": "tenant-456",
-  "authorization_token": "<signed exact-action token>"
+  "authorization_token": "<signed exact-action token>",
+  "otp_code": "1111"
 }
 ```
 
 The resume body must contain either the clarification pair (`clarification_id` and `answer`) or
-`authorization_token`, never both.
+the confirmation pair (`authorization_token` and `otp_code`), never both modes. The OTP is validated
+with constant-time comparison and is not persisted in task, graph, tool, or audit state.
 
 ## 9. Final Report
 

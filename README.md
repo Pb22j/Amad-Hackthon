@@ -58,21 +58,20 @@ Copy `evaluation/task.py` and `evaluation/.env.example` into any separate folder
 to `.env`, and use the same interaction and confirmation secrets as the running API. The file uses
 only Python's standard library and imports no agent code. It can also run directly as
 `python task.py "Show my balance"`. A signed status-polling endpoint supports this client only in
-non-production environments. Sandbox confirmations are auto-signed; missing required information
+non-production environments. Sandbox confirmations are auto-signed and use demo OTP `1111`; missing required information
 returns `needs_input` instead of inventing a value.
 
 ## Tool integration
 
-The repository currently exports deterministic in-memory sandbox tools from
-`agentic/tools/dummy.py`. They never contact a financial provider and reset when the process
-restarts. Their result ownership defaults to `evaluation-user` / `evaluation-tenant`; local signed
-requests must use those identities or set `DUMMY_TOOL_USER_ID` and `DUMMY_TOOL_TENANT_ID`.
+The default package exports SQLite-backed demo banking tools for balances, transaction search,
+beneficiaries, transfers, reports, Qatta, gifts, bill payments, financial analysis, and investment
+portfolio/trades. Guarded calls inject user and tenant identity from the authenticated task; the
+model cannot select identity. Direct local tool calls can use the `BANK_TOOL_*` fallback variables.
 
-When the teammates' tools are ready, replace the sandbox list in
-`agentic/tools/__init__.py` and the agent will discover it without changing orchestration code:
+The deterministic in-memory tools in `agentic/tools/dummy.py` remain available for isolated tests:
 
-```python
-TOOLS = [get_balance, transfer_funds, buy_investment]
+```text
+AGENTIC_TOOL_PROVIDER=agentic.tools.dummy:DUMMY_TOOLS
 ```
 
 Supported exports are `TOOLS`, `tools`, `get_tools()`, and `get_tool_bundle()`. To load a different
@@ -81,6 +80,9 @@ package, configure an explicit provider:
 ```text
 AGENTIC_TOOL_PROVIDER=your_package.tools:get_financial_tools
 ```
+
+Every configured write or financial action requires exact signed confirmation plus the fixed demo
+OTP `1111`; OTP input is accepted only by the confirmation endpoint and never enters model context.
 
 The export may return a `ToolBundle`, `(tools, metadata)`, or a sequence of LangChain tools whose
 security metadata is defined in `agentic/config/tools.yaml`. Production startup fails when the tool

@@ -157,6 +157,7 @@ async def test_encrypted_checkpoint_interrupt_resume_and_postgres_store(postgres
             tool_name="transfer_funds",
             arguments=arguments,
         )
+        context.otp_verified = True
         completed = await graph.ainvoke(
             Command(resume=token), config=graph_config, context=context
         )

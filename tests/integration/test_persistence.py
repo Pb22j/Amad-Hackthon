@@ -159,6 +159,71 @@ async def test_memory_is_tenant_and_user_scoped(database, memory_policy):
 
 
 @pytest.mark.integration
+async def test_memory_is_isolated_between_sessions(database, memory_policy):
+    first = AuthContext("user-1", "tenant-1", "session-1", frozenset())
+    second = AuthContext("user-1", "tenant-1", "session-2", frozenset())
+    async with database.session() as session:
+        service = MemoryService(session, memory_policy)
+        await service.put(
+            auth=first,
+            memory_type="report_format",
+            value={"format": "short"},
+            provenance="explicit",
+            confidence=1,
+            sensitivity="low",
+            consent_basis="explicit",
+        )
+        assert len(await service.list_for_session(auth=first)) == 1
+        assert await service.list_for_session(auth=second) == []
+
+
+@pytest.mark.integration
+async def test_memory_compaction_is_bounded_and_preserves_verified_items(
+    database, memory_policy
+):
+    auth = AuthContext("user-1", "tenant-1", "session-1", frozenset())
+    async with database.session() as session:
+        service = MemoryService(
+            session,
+            memory_policy,
+            max_items_per_session=3,
+            max_items_per_type=2,
+        )
+        for index in range(4):
+            await service.put(
+                auth=auth,
+                memory_type="user_constraint",
+                value={"label": f"preference-{index}"},
+                provenance="explicit",
+                confidence=index / 10,
+                sensitivity="low",
+                consent_basis="explicit",
+                verified=index == 0,
+            )
+        items = await service.list_for_session(auth=auth)
+        assert len(items) == 2
+        assert any(item.verified and item.value == {"label": "preference-0"} for item in items)
+        assert {item.value["label"] for item in items} == {"preference-0", "preference-3"}
+
+
+@pytest.mark.integration
+async def test_memory_rejects_oversized_values(database, memory_policy):
+    auth = AuthContext("user-1", "tenant-1", "session-1", frozenset())
+    async with database.session() as session:
+        service = MemoryService(session, memory_policy, max_value_characters=100)
+        with pytest.raises(ValueError, match="size limit"):
+            await service.put(
+                auth=auth,
+                memory_type="user_constraint",
+                value={"label": "x" * 200},
+                provenance="explicit",
+                confidence=1,
+                sensitivity="low",
+                consent_basis="explicit",
+            )
+
+
+@pytest.mark.integration
 async def test_memory_deduplicates_and_filters_types(database, memory_policy):
     auth = AuthContext("user-1", "tenant-1", "s", frozenset())
     async with database.session() as session:
@@ -257,7 +322,7 @@ async def test_retention_expires_tasks_and_deletes_memory(
     async with database.session() as session:
         task = await TaskRepository(session).create(agentic_request, config_hash="a" * 64)
         task.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-        await MemoryService(session, memory_policy).put(
+        memory = await MemoryService(session, memory_policy).put(
             auth=auth,
             memory_type="report_format",
             value={"format": "short"},
@@ -265,8 +330,9 @@ async def test_retention_expires_tasks_and_deletes_memory(
             confidence=1,
             sensitivity="low",
             consent_basis="explicit",
-            expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
         )
+        memory.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
         task_ids, deleted = await RetentionRepository(session).cleanup_expired()
         assert task_ids == [task.id]
         assert deleted == 1

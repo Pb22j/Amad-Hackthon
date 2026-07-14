@@ -150,6 +150,7 @@ async def _confirm(
             user_id=USER_ID,
             tenant_id=TENANT_ID,
             authorization_token=token,
+            otp_code="1111",
         ),
     )
 

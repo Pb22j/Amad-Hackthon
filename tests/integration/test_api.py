@@ -179,6 +179,7 @@ def test_resume_endpoint_success_and_validation_error(app_config, agentic_reques
         "user_id": agentic_request.user_id,
         "tenant_id": agentic_request.tenant_id,
         "authorization_token": "token",
+        "otp_code": "1111",
     }
     with TestClient(app) as client:
         accepted = client.post(
@@ -212,6 +213,7 @@ def test_safe_error_handlers(app_config, agentic_request):
                 "user_id": agentic_request.user_id,
                 "tenant_id": agentic_request.tenant_id,
                 "authorization_token": "token",
+                "otp_code": "1111",
             },
         )
     assert forbidden.status_code == 403

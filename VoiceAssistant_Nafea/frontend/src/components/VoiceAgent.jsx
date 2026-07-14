@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Mic, MicOff, Settings, VolumeX, Sparkles, Clock, RefreshCw, MessageSquare, Activity } from 'lucide-react';
+import { Mic, MicOff, Settings, Sparkles, MessageSquare, Activity } from 'lucide-react';
 import { AudioManager } from '../utils/audio';
 import StatusIndicator from './StatusIndicator';
 import Visualizer from './Visualizer';
@@ -40,7 +40,6 @@ function base64PcmToFloat32(base64) {
 const VoiceAgent = () => {
   const [status, setStatus] = useState('idle'); // idle, connecting, active, error
   const [errorMessage, setErrorMessage] = useState('');
-  const [config, setConfig] = useState(null);
   
   // Transcripts
   const [transcript, setTranscript] = useState('');
@@ -52,10 +51,11 @@ const VoiceAgent = () => {
     setAgentLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), msg }].slice(-10));
   };
   
-  // Custom system prompt
-  const [customSystemPrompt, setCustomSystemPrompt] = useState('');
   const [language, setLanguage] = useState('ar');
   const [showSettings, setShowSettings] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [pendingConfirmation, setPendingConfirmation] = useState(null);
+  const [confirmationOtp, setConfirmationOtp] = useState('');
 
   // Audio & WebSocket References
   const audioManagerRef = useRef(null);
@@ -70,60 +70,88 @@ const VoiceAgent = () => {
   const pcmProcessorRef = useRef(null);
   const pcmPlayerRef = useRef(null);
 
-  // Initialize Audio Manager and Backend WebSocket on mount
+  // Audio resources are process-local; financial identity is initialized separately per session.
   useEffect(() => {
     audioManagerRef.current = new AudioManager();
-    fetchConfig();
-
-    // Connect WebSocket to receive webhooks from Agentic Layer
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`);
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        console.log("Received Webhook via WS:", data);
-        addLog(`[Webhook] ${data.event_type} - ${data.user_safe_summary || ''}`);
-        
-        if (data.event_type === "input_needed" || data.event_type === "confirmation_needed") {
-          currentTaskIdRef.current = data.task_id;
-           if (geminiWsRef.current && geminiWsRef.current.readyState === WebSocket.OPEN) {
-             const promptEvent = {
-               clientContent: {
-                 turns: [{
-                   role: "user",
-                   parts: [{ text: `النظام الخلفي أرسل هذا التحديث بخصوص الطلب: "${data.user_safe_summary || 'أحتاج معلومات إضافية لتنفيذ العملية'}". الرجاء إخبار المستخدم بهذا التحديث بلهجة سعودية ودية، وسؤاله لتقديم المعلومات الناقصة.` }]
-                 }],
-                 turnComplete: true
-               }
-             };
-             geminiWsRef.current.send(JSON.stringify(promptEvent));
-          }
-        } else if (data.event_type === "completed" || data.event_type === "rejected") {
-           if (geminiWsRef.current && geminiWsRef.current.readyState === WebSocket.OPEN) {
-             const promptEvent = {
-               clientContent: {
-                 turns: [{
-                   role: "user",
-                   parts: [{ text: `النظام الخلفي أنهى تنفيذ الطلب. الحالة: ${data.event_type}. الملخص: "${data.user_safe_summary}". الرجاء إخبار المستخدم بذلك بلهجة سعودية ودية وبشكل مختصر.` }]
-                 }],
-                 turnComplete: true
-               }
-             };
-             geminiWsRef.current.send(JSON.stringify(promptEvent));
-           }
-        }
-      } catch(e) {}
-    };
-    backendWsRef.current = ws;
-
     return () => {
       stopSession();
-      if (audioManagerRef.current) {
-        audioManagerRef.current.close();
-      }
-      if (backendWsRef.current) backendWsRef.current.close();
+      if (audioManagerRef.current) audioManagerRef.current.close();
     };
   }, []);
+
+  // A language change starts a fresh authenticated interaction/memory session.
+  useEffect(() => {
+    let cancelled = false;
+    setSessionReady(false);
+    currentTaskIdRef.current = null;
+    setPendingConfirmation(null);
+    setHistory([]);
+    if (backendWsRef.current) backendWsRef.current.close();
+
+    const initializeSession = async () => {
+      try {
+        const response = await fetch('/api/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ language }),
+        });
+        if (!response.ok) throw new Error('Unable to establish a secure interaction session.');
+        if (cancelled) return;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`);
+        ws.onopen = () => setSessionReady(true);
+        ws.onmessage = handleAgenticEvent;
+        ws.onclose = () => { if (!cancelled) setSessionReady(false); };
+        backendWsRef.current = ws;
+      } catch (error) {
+        if (!cancelled) {
+          setStatus('error');
+          setErrorMessage(error.message);
+        }
+      }
+    };
+    initializeSession();
+    return () => {
+      cancelled = true;
+      if (backendWsRef.current) {
+        backendWsRef.current.close();
+        backendWsRef.current = null;
+      }
+    };
+  }, [language]);
+
+  const handleAgenticEvent = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      addLog(`[Agentic] ${data.event_type} - ${data.user_safe_summary || ''}`);
+      const isPending = data.event_type === 'input_needed' || data.event_type === 'confirmation_needed';
+      if (isPending) {
+        currentTaskIdRef.current = data.task_id;
+        if (data.event_type === 'confirmation_needed') {
+          setPendingConfirmation(data);
+          setConfirmationOtp('');
+        }
+      } else if (['completed', 'rejected', 'failed'].includes(data.event_type)) {
+        setPendingConfirmation(null);
+        setConfirmationOtp('');
+      }
+      if (geminiWsRef.current?.readyState !== WebSocket.OPEN) return;
+      let text;
+      if (data.event_type === 'input_needed') {
+        text = `Trusted backend clarification. Ask the user exactly this safe question: ${data.details?.question || data.user_safe_summary}`;
+      } else if (data.event_type === 'confirmation_needed') {
+        text = `Trusted backend confirmation. Present these exact action details and ask for fresh explicit approval: ${JSON.stringify(data.details?.arguments || {})}. Do not approve on the user's behalf.`;
+      } else {
+        text = `Trusted backend task update (${data.event_type}): ${data.user_safe_summary}. Briefly communicate only this result.`;
+      }
+      geminiWsRef.current.send(JSON.stringify({
+        clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true }
+      }));
+    } catch {
+      addLog('[Agentic] Ignored malformed event');
+    }
+  };
 
   const handleFunctionCall = async (fnCall) => {
     const fnName = fnCall.name;
@@ -137,8 +165,12 @@ const VoiceAgent = () => {
         const res = await fetch('/api/submit-task', {
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
-           body: JSON.stringify({ natural_language_request: args.request_details })
+           body: JSON.stringify({
+             natural_language_request: args.request_details,
+             idempotency_key: fnCall.id,
+           })
         });
+        if (!res.ok) throw new Error('The agentic layer did not accept the task.');
         result = await res.json();
         addLog(`[Tool Response] ${fnName}: ${JSON.stringify(result)}`);
         if (result.task_id) currentTaskIdRef.current = result.task_id;
@@ -148,6 +180,7 @@ const VoiceAgent = () => {
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({ task_id: currentTaskIdRef.current || 'unknown', user_answer: args.user_answer })
         });
+        if (!res.ok) throw new Error('The clarification could not be resumed securely.');
         result = await res.json();
         addLog(`[Tool Response] ${fnName}: ${JSON.stringify(result)}`);
       }
@@ -172,15 +205,26 @@ const VoiceAgent = () => {
     }
   };
 
-  const fetchConfig = async () => {
+  const handleConfirmationDecision = async (approved) => {
+    if (!pendingConfirmation) return;
     try {
-      const res = await fetch('/api/config');
-      if (res.ok) {
-        const data = await res.json();
-        setConfig(data);
-      }
-    } catch (e) {
-      console.error("Failed to fetch backend configuration:", e);
+      const response = await fetch('/api/confirm-task', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task_id: pendingConfirmation.task_id,
+          approved,
+          ...(approved ? { otp_code: confirmationOtp } : {}),
+        }),
+      });
+      if (!response.ok) throw new Error('The confirmation decision could not be recorded.');
+      const result = await response.json();
+      addLog(`[Confirmation] ${result.status}`);
+      setPendingConfirmation(null);
+      setConfirmationOtp('');
+    } catch (error) {
+      setErrorMessage(error.message);
+      setStatus('error');
     }
   };
 
@@ -195,7 +239,8 @@ const VoiceAgent = () => {
       const tokenResponse = await fetch('/api/realtime-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ custom_system_prompt: customSystemPrompt, language: language })
+        credentials: 'same-origin',
+        body: JSON.stringify({ language })
       });
       if (!tokenResponse.ok) {
         throw new Error("Failed to get connection details from backend.");
@@ -206,57 +251,25 @@ const VoiceAgent = () => {
         throw new Error("Backend is configured for OpenAI, but frontend is now running Gemini architecture.");
       }
 
-      // 2. Setup Gemini WebSocket
-      const API_KEY = data.api_key;
-      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${API_KEY}`;
+      // 2. Connect to the authenticated backend proxy; provider credentials stay server-side.
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}${data.websocket_url}`;
       const ws = new WebSocket(wsUrl);
       geminiWsRef.current = ws;
 
       ws.onopen = () => {
-        // Send Setup Message
-        const setupMessage = {
-          setup: {
-            model: `models/${data.model}`,
-            systemInstruction: {
-              parts: [{ text: data.instructions }]
-            },
-            generationConfig: {
-              responseModalities: ["AUDIO"]
-            },
-            tools: [{
-              functionDeclarations: [
-                {
-                  name: "submit_financial_task",
-                  description: "أرسل طلب مالي جديد من المستخدم إلى النظام الخلفي للتنفيذ.",
-                  parameters: {
-                    type: "OBJECT",
-                    properties: {
-                      request_details: { type: "STRING", description: "تفاصيل الطلب باللغة العربية" }
-                    },
-                    required: ["request_details"]
-                  }
-                },
-                {
-                  name: "resume_financial_task",
-                  description: "أرسل إجابة المستخدم على سؤال توضيحي طرحه النظام الخلفي.",
-                  parameters: {
-                    type: "OBJECT",
-                    properties: {
-                      user_answer: { type: "STRING", description: "إجابة المستخدم" }
-                    },
-                    required: ["user_answer"]
-                  }
-                }
-              ]
-            }]
-          }
-        };
-        ws.send(JSON.stringify(setupMessage));
         setStatus('active');
       };
 
       ws.onmessage = async (event) => {
         const msg = event.data instanceof Blob ? JSON.parse(await event.data.text()) : JSON.parse(event.data);
+
+        if (msg.serverContent?.inputTranscription?.text) {
+          setTranscript(prev => `${prev}${msg.serverContent.inputTranscription.text}`);
+        }
+        if (msg.serverContent?.outputTranscription?.text) {
+          setAgentResponse(prev => `${prev}${msg.serverContent.outputTranscription.text}`);
+        }
         
         // Handle server content (audio and text)
         if (msg.serverContent && msg.serverContent.modelTurn) {
@@ -413,13 +426,13 @@ const VoiceAgent = () => {
       <div className="card-header">
         <div className="title-area">
           <Sparkles className="spark-icon animate-pulse" size={20} />
-          <h2>AURA Realtime (Gemini)</h2>
+          <h2>Nafea Secure Voice</h2>
         </div>
         <div className="actions">
           <button 
             className={`settings-toggle ${showSettings ? 'active' : ''}`}
             onClick={() => setShowSettings(!showSettings)}
-            title="Configure System Prompt"
+            title="Voice session settings"
           >
             <Settings size={18} />
           </button>
@@ -436,25 +449,16 @@ const VoiceAgent = () => {
               className="input select" 
               value={language} 
               onChange={(e) => setLanguage(e.target.value)} 
+              disabled={status === 'active' || status === 'connecting'}
               style={{ padding: '8px', borderRadius: '8px', background: 'rgba(255,255,255,0.1)', color: 'white', border: '1px solid rgba(255,255,255,0.2)', marginBottom: '10px', width: '100%' }}
             >
               <option value="ar" style={{ color: 'black' }}>Arabic (Saudi) - نافع العربي</option>
               <option value="en" style={{ color: 'black' }}>English - Nafea English</option>
             </select>
           </div>
-          <div className="input-group">
-            <label>Custom System Prompt</label>
-            <textarea
-              className="input textarea"
-              value={customSystemPrompt}
-              onChange={(e) => setCustomSystemPrompt(e.target.value)}
-              placeholder="e.g. Act as a pirate assistant who gives short replies."
-              rows={3}
-            />
-          </div>
           <div className="config-grid">
-            <span className="config-label">Architecture:</span>
-            <span className="config-value">Gemini Live API</span>
+            <span className="config-label">Secure session:</span>
+            <span className="config-value">{sessionReady ? 'Ready' : 'Connecting'}</span>
           </div>
         </div>
       )}
@@ -475,7 +479,7 @@ const VoiceAgent = () => {
             status === 'connecting' ? 'mic-connecting' : 'mic-idle'
           }`}
           onClick={toggleSession}
-          disabled={status === 'connecting'}
+          disabled={status === 'connecting' || !sessionReady}
         >
           {status === 'active' ? (
             <MicOff size={36} className="mic-icon" />
@@ -499,6 +503,40 @@ const VoiceAgent = () => {
         </div>
       )}
 
+      {pendingConfirmation && (
+        <div className="confirmation-card" role="alertdialog" aria-label="Financial action confirmation">
+          <h3>Confirm exact financial action</h3>
+          <p>{pendingConfirmation.user_safe_summary}</p>
+          <pre>{JSON.stringify(pendingConfirmation.details?.arguments || {}, null, 2)}</pre>
+          <label htmlFor="confirmation-otp">Demo OTP</label>
+          <input
+            id="confirmation-otp"
+            type="password"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={4}
+            value={confirmationOtp}
+            onChange={(event) =>
+              setConfirmationOtp(event.target.value.replace(/\D/g, '').slice(0, 4))
+            }
+            aria-describedby="confirmation-otp-help"
+          />
+          <small id="confirmation-otp-help">For this demo, enter 1111.</small>
+          <div className="confirmation-actions">
+            <button
+              className="btn approve"
+              disabled={confirmationOtp.length !== 4}
+              onClick={() => handleConfirmationDecision(true)}
+            >
+              Approve exact action
+            </button>
+            <button className="btn reject" onClick={() => handleConfirmationDecision(false)}>
+              Reject
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Current Turn Transcription */}
       {(transcript || agentResponse) && (
         <div className="transcripts-card">
@@ -510,7 +548,7 @@ const VoiceAgent = () => {
           )}
           {agentResponse && (
             <div className="transcript-row agent-bubble">
-              <span className="speaker-label">AURA</span>
+                <span className="speaker-label">Nafea</span>
               <p>{agentResponse}</p>
             </div>
           )}
@@ -535,7 +573,7 @@ const VoiceAgent = () => {
         </div>
       )}
 
-      <style jsx="true">{`
+      <style>{`
         .agent-card { width: 100%; padding: 2rem; margin-top: 1.5rem; display: flex; flex-direction: column; }
         .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border-color); padding-bottom: 1rem; }
         .title-area { display: flex; align-items: center; gap: 0.5rem; }
@@ -565,6 +603,12 @@ const VoiceAgent = () => {
         .btn-sm { padding: 0.4rem 1rem; font-size: 0.8rem; border-radius: 8px; }
         .error-card { background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 12px; padding: 1rem; margin-bottom: 1.5rem; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; text-align: center; }
         .error-card p { color: #fca5a5; font-size: 0.9rem; }
+        .confirmation-card { width: 100%; margin-bottom: 1rem; padding: 1rem; border-radius: 12px; border: 1px solid rgba(251, 191, 36, 0.45); background: rgba(120, 53, 15, 0.22); }
+        .confirmation-card h3 { margin-bottom: 0.5rem; color: #fde68a; }
+        .confirmation-card pre { margin: 0.75rem 0; padding: 0.75rem; overflow: auto; border-radius: 8px; background: rgba(0, 0, 0, 0.25); color: #f8fafc; }
+        .confirmation-actions { display: flex; gap: 0.75rem; }
+        .confirmation-actions .approve { background: #15803d; color: white; }
+        .confirmation-actions .reject { background: #b91c1c; color: white; }
         .transcripts-card { display: flex; flex-direction: column; gap: 1rem; background: rgba(0, 0, 0, 0.1); border-radius: 14px; padding: 1.25rem; border: 1px solid rgba(255, 255, 255, 0.02); margin-top: 1rem; }
         .transcript-row { display: flex; flex-direction: column; gap: 0.25rem; }
         .speaker-label { font-family: var(--font-display); font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }

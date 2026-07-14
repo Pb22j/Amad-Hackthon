@@ -1,8 +1,8 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from app.services.stt_service import OpenAIWhisperService, DeepgramSTTService, STTException
-from app.services.llm_service import OpenAIConversationalService, GeminiConversationalService, LLMException
-from app.services.tts_service import OpenAITTSService, ElevenLabsTTSService, TTSException
+from app.services.llm_service import OpenAIConversationalService, GeminiConversationalService
+from app.services.tts_service import OpenAITTSService, ElevenLabsTTSService
 
 # ----------------- STT Service Tests -----------------
 
@@ -67,11 +67,13 @@ async def test_openai_llm_success(mock_openai_class):
     assert result == "llm response text"
 
 @pytest.mark.asyncio
-@patch("google.generativeai.GenerativeModel")
-async def test_gemini_llm_success(mock_gemini_model_class):
-    mock_model = MagicMock()
-    mock_gemini_model_class.return_value = mock_model
-    mock_model.generate_content.return_value = MagicMock(text="gemini response text")
+@patch("app.services.llm_service.genai.Client")
+async def test_gemini_llm_success(mock_client_class):
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(
+        return_value=MagicMock(text="gemini response text")
+    )
+    mock_client_class.return_value = mock_client
 
     service = GeminiConversationalService(api_key="fake-key")
     result = await service.generate_response("hello")

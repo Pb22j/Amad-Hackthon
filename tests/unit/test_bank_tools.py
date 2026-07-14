@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 
 import pytest
 
 from agentic.tools.add_benefit import add_benefit
+from agentic.tools.accounts import get_balance, search_transactions
 from agentic.tools.analyze_finances import analyze_finances
 from agentic.tools.bank_db import reset_bank_state
 from agentic.tools.fatoorah import list_fatoorahs, pay_fatoorah
 from agentic.tools.gift import send_gift
+from agentic.tools.investments import buy_investment, get_portfolio, sell_investment
 from agentic.tools.metadata import ToolResult
 from agentic.tools.monthly_report import monthly_report
 from agentic.tools.qatta import (
@@ -20,6 +23,7 @@ from agentic.tools.qatta import (
     pay_qatta_bill,
 )
 from agentic.tools.transfer_between_accounts import transfer_between_accounts
+from agentic.tools.runtime_identity import bind_tool_identity
 
 # Seeded fixture accounts (see agentic/tools/bank_db.py).
 LATIFA_ACCOUNT = "SA98000068368508501525"  # active, pre-registered beneficiary
@@ -40,6 +44,60 @@ def _validated(result: dict) -> ToolResult:
     """Every tool response must satisfy the shared result envelope."""
 
     return ToolResult.model_validate(result)
+
+
+async def test_balance_and_transaction_search_are_bank_backed():
+    balance = _validated(await get_balance())
+    assert balance.status == "completed"
+    assert balance.data["balance_sar"] == "25431.50"
+    assert "*" in balance.data["masked_account_number"]
+
+    transactions = _validated(await search_transactions(query="راتب", limit=5))
+    assert transactions.status == "completed"
+    assert transactions.data["transactions"]
+    assert all("راتب" in item["description"] for item in transactions.data["transactions"])
+
+
+async def test_request_scoped_bank_identity_is_concurrency_safe():
+    async def read_as(user_id: str) -> ToolResult:
+        with bind_tool_identity(user_id=user_id, tenant_id="evaluation-tenant"):
+            return _validated(await get_balance())
+
+    evaluation, admin = await asyncio.gather(
+        read_as("evaluation-user"),
+        read_as("admin"),
+    )
+    assert evaluation.user_id == "evaluation-user"
+    assert admin.user_id == "admin"
+    assert evaluation.data["balance_sar"] != admin.data["balance_sar"]
+
+
+async def test_portfolio_buy_and_sell_update_bank_balance_and_holdings():
+    before = _validated(await get_portfolio())
+    aramco = next(item for item in before.data["holdings"] if item["symbol"] == "ARAMCO")
+    assert aramco["quantity"] == "20"
+
+    purchase = _validated(await buy_investment(symbol="SABIC", quantity=2))
+    assert purchase.status == "completed"
+    assert purchase.receipt_id
+    assert purchase.data["total_sar"] == "122.40"
+
+    sale = _validated(await sell_investment(symbol="SABIC", quantity=1))
+    assert sale.status == "completed"
+    assert sale.data["remaining_quantity"] == "1"
+
+    after = _validated(await get_portfolio())
+    sabic = next(item for item in after.data["holdings"] if item["symbol"] == "SABIC")
+    assert sabic["quantity"] == "1"
+
+
+async def test_investment_trade_rejects_unknown_symbols_and_excess_sales():
+    unknown = _validated(await buy_investment(symbol="UNKNOWN", quantity=1))
+    assert unknown.error_code == "investment_not_found"
+    excess = _validated(await sell_investment(symbol="ARAMCO", quantity=999))
+    assert excess.error_code == "insufficient_holdings"
+    over_limit = _validated(await buy_investment(symbol="SABIC", quantity=100))
+    assert over_limit.error_code == "daily_limit_exceeded"
 
 
 async def test_add_benefit_activates_verified_account():
@@ -261,16 +319,14 @@ async def test_pay_fatoorah_rejects_unknown_digits_and_insufficient_funds(monkey
     assert broke.error_code == "insufficient_funds"
 
 
-async def test_pay_fatoorah_is_exempt_from_the_daily_spend_limit():
-    # Pay a 348.60 bill, then transfer 4,950 with a 5,000 limit: if the bill
-    # counted toward the limit the transfer would be rejected.
+async def test_pay_fatoorah_counts_toward_the_daily_spend_limit():
     _validated(await pay_fatoorah(last_four_digits="1234"))
     transfer = _validated(
         await transfer_between_accounts(
             destination_account=LATIFA_ACCOUNT, amount=Decimal("4950.00")
         )
     )
-    assert transfer.status == "completed"
+    assert transfer.error_code == "daily_limit_exceeded"
 
 
 async def test_send_gift_delivers_message_with_sender_full_name(monkeypatch):
@@ -315,22 +371,13 @@ async def test_send_gift_rejects_non_beneficiary_and_insufficient_funds():
     assert broke.error_code == "insufficient_funds"
 
 
-async def test_send_gift_is_exempt_from_the_daily_spend_limit():
-    # 7,000 SAR gift with a 5,000 daily limit: allowed, and it must not consume
-    # the transfer allowance afterwards.
+async def test_send_gift_enforces_the_daily_spend_limit():
     gift = _validated(
         await send_gift(
             recipient="لطيفة", amount=Decimal("7000.00"), gift_message="هدية زواج"
         )
     )
-    assert gift.status == "completed"
-
-    transfer = _validated(
-        await transfer_between_accounts(
-            destination_account=LATIFA_ACCOUNT, amount=Decimal("4950.00")
-        )
-    )
-    assert transfer.status == "completed"
+    assert gift.error_code == "daily_limit_exceeded"
 
 
 async def test_create_qatta_splits_equally_and_deducts_creator_share():
@@ -361,6 +408,26 @@ async def test_create_qatta_splits_equally_and_deducts_creator_share():
     assert statuses["محمد ناصر القحطاني"] == "غير مدفوعة"
 
 
+async def test_qatta_rounding_preserves_the_exact_requested_total():
+    _validated(
+        await add_benefit(
+            full_name_of_benefit_account="محمد ناصر القحطاني",
+            benefit_account_number=MOHAMMED_ACCOUNT,
+            short_name="محمد",
+        )
+    )
+    result = _validated(
+        await create_qatta(
+            qatta_name="قطة دقيقة",
+            total_amount=100,
+            participants=["لطيفة", "محمد"],
+        )
+    )
+    shares = [Decimal(item["share_sar"]) for item in result.data["qatta"]["participants"]]
+    assert sum(shares) == Decimal("100.00")
+    assert max(shares) - min(shares) <= Decimal("0.01")
+
+
 async def test_create_qatta_rejects_share_beyond_balance():
     # 10,000,000 / 2 = 5,000,000 per person — far beyond the 25,431.50 balance.
     broke = _validated(
@@ -372,37 +439,23 @@ async def test_create_qatta_rejects_share_beyond_balance():
     assert broke.error_code == "insufficient_funds"
 
 
-async def test_qatta_payments_do_not_consume_the_transfer_daily_limit():
-    # Pay a 100 SAR qatta bill, then transfer 4,950 SAR: if the qatta payment
-    # counted toward the 5,000 daily limit this transfer would be rejected
-    # (100 + 4,950 > 5,000). It must succeed.
+async def test_qatta_payments_count_toward_the_transfer_daily_limit():
     _validated(await pay_qatta_bill(qatta_name="قطة عشاء الجمعة"))
     transfer = _validated(
         await transfer_between_accounts(
             destination_account=LATIFA_ACCOUNT, amount=Decimal("4950.00")
         )
     )
-    assert transfer.status == "completed"
-
-    # Regular transfers still cap at the limit on their own.
-    over = _validated(
-        await transfer_between_accounts(
-            destination_account=LATIFA_ACCOUNT, amount=Decimal("100.00")
-        )
-    )
-    assert over.error_code == "daily_limit_exceeded"
+    assert transfer.error_code == "daily_limit_exceeded"
 
 
-async def test_qatta_is_exempt_from_the_daily_spend_limit():
-    # 30,000 / 2 = 15,000 per person — over the 5,000 daily limit, but qatta
-    # payments deliberately bypass it; only the balance matters.
+async def test_qatta_creation_enforces_the_daily_spend_limit():
     result = _validated(
         await create_qatta(
             qatta_name="قطة رحلة", total_amount=30_000, participants=["لطيفة"]
         )
     )
-    assert result.status == "completed"
-    assert result.data["qatta"]["creator_new_balance_sar"] == "10431.50"
+    assert result.error_code == "daily_limit_exceeded"
 
 
 async def test_create_qatta_rejects_non_beneficiary_participant():

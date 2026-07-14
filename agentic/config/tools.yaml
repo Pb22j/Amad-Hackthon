@@ -12,7 +12,7 @@ tools:
   transfer_between_accounts:
     risk: financial_action
     intents: [money_transfer]
-    explicit_user_fields: [destination_account]
+    explicit_user_fields: [destination_account, amount]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: true
@@ -37,6 +37,7 @@ tools:
     # financial_action: creation deducts the creator's share into the pot.
     risk: financial_action
     intents: [bill_payment, money_transfer, financial_calculation, beneficiary_management]
+    explicit_user_fields: [qatta_name, total_amount, participants]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: true
@@ -56,7 +57,7 @@ tools:
   send_gift:
     risk: financial_action
     intents: [money_transfer]
-    explicit_user_fields: [recipient]
+    explicit_user_fields: [recipient, amount, gift_message]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: true
@@ -117,7 +118,7 @@ tools:
   transfer_funds:
     risk: financial_action
     intents: [money_transfer]
-    explicit_user_fields: [destination]
+    explicit_user_fields: [destination, amount]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: true
@@ -127,7 +128,7 @@ tools:
   pay_bill:
     risk: financial_action
     intents: [bill_payment]
-    explicit_user_fields: [biller]
+    explicit_user_fields: [biller, amount]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: true
@@ -147,7 +148,7 @@ tools:
   buy_investment:
     risk: financial_action
     intents: [investment_buy, portfolio_modification]
-    explicit_user_fields: [symbol]
+    explicit_user_fields: [symbol, quantity]
     required_scopes: [investment:trade]
     requires_confirmation: true
     requires_receipt: true
@@ -157,7 +158,7 @@ tools:
   sell_investment:
     risk: financial_action
     intents: [investment_sell, portfolio_modification]
-    explicit_user_fields: [symbol]
+    explicit_user_fields: [symbol, quantity]
     required_scopes: [investment:trade]
     requires_confirmation: true
     requires_receipt: true
@@ -167,6 +168,7 @@ tools:
   withdraw_funds:
     risk: financial_action
     intents: [money_transfer]
+    explicit_user_fields: [amount]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: true

@@ -32,6 +32,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
+from agentic.tools.runtime_identity import current_tool_identity
+
 T = TypeVar("T")
 
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "bank.db"
@@ -53,9 +55,9 @@ def db_path() -> str:
 
 
 def owner_identity() -> tuple[str, str]:
-    """Read the authenticated owner from the trusted environment channel."""
+    """Read the request-scoped owner, with an explicit local-demo fallback."""
 
-    return (
+    return current_tool_identity() or (
         os.getenv("BANK_TOOL_USER_ID", "evaluation-user"),
         os.getenv("BANK_TOOL_TENANT_ID", "evaluation-tenant"),
     )
@@ -187,6 +189,26 @@ CREATE TABLE IF NOT EXISTS transactions (
 );
 CREATE INDEX IF NOT EXISTS ix_transactions_user_created
     ON transactions (user_uuid, createdAt);
+
+CREATE TABLE IF NOT EXISTS investment_assets (
+    symbol TEXT PRIMARY KEY,
+    Name TEXT NOT NULL,
+    Price_SAR REAL NOT NULL CHECK (Price_SAR > 0),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+    updatedAt TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS investment_holdings (
+    uuid TEXT PRIMARY KEY,
+    user_uuid TEXT NOT NULL REFERENCES users (uuid),
+    symbol TEXT NOT NULL REFERENCES investment_assets (symbol),
+    Quantity REAL NOT NULL CHECK (Quantity >= 0),
+    Average_Cost_SAR REAL NOT NULL CHECK (Average_Cost_SAR >= 0),
+    updatedAt TEXT NOT NULL,
+    UNIQUE (user_uuid, symbol)
+);
+CREATE INDEX IF NOT EXISTS ix_investment_holdings_user
+    ON investment_holdings (user_uuid);
 """
 
 
@@ -222,6 +244,7 @@ def _ensure_ready(path: str) -> None:
             # existed still receive its demo rows.
             _transaction(connection, _seed_qatta_if_empty)
             _transaction(connection, _seed_fatoorahs_if_empty)
+            _transaction(connection, _seed_investments_if_empty)
         finally:
             connection.close()
         _seeded_paths.add(path)
@@ -616,6 +639,34 @@ def _seed_fatoorahs_if_empty(connection: sqlite3.Connection) -> None:
         )
 
 
+def _seed_investments_if_empty(connection: sqlite3.Connection) -> None:
+    """Seed deterministic demo prices and a small authenticated-user portfolio."""
+
+    now = timestamp()
+    assets = (
+        ("ARAMCO", "Saudi Aramco", 27.80),
+        ("ALRAJHI", "Al Rajhi Bank", 96.40),
+        ("SABIC", "SABIC", 61.20),
+    )
+    for symbol, name, price in assets:
+        connection.execute(
+            "INSERT OR IGNORE INTO investment_assets"
+            " (symbol, Name, Price_SAR, status, updatedAt)"
+            " VALUES (?, ?, ?, 'active', ?)",
+            (symbol, name, price, now),
+        )
+    owner = connection.execute(
+        "SELECT uuid FROM users WHERE Username = 'evaluation-user'"
+    ).fetchone()
+    if owner is not None:
+        connection.execute(
+            "INSERT OR IGNORE INTO investment_holdings"
+            " (uuid, user_uuid, symbol, Quantity, Average_Cost_SAR, updatedAt)"
+            " VALUES (?, ?, 'ARAMCO', 20, 26.50, ?)",
+            (str(uuid4()), owner["uuid"], now),
+        )
+
+
 # --------------------------------------------------------------------------
 # Shared queries
 # --------------------------------------------------------------------------
@@ -656,17 +707,14 @@ def find_beneficiary(
 def spent_today(connection: sqlite3.Connection, user_uuid: str) -> Decimal:
     """Total debited today, used to enforce ``Daily_Spend_Limit_SAR``.
 
-    Qatta payments, gifts, and fatoorah payments are fully exempt from the
-    daily limit by design: their tools skip the check, and they are excluded
-    here so they never consume the allowance of other payments either. The
-    day window follows Riyadh time, so the allowance resets at Saudi midnight.
+    Every outgoing financial debit contributes to the same limit. The day
+    window follows Riyadh time, so the allowance resets at Saudi midnight.
     """
 
     day_start = riyadh_now().strftime("%Y-%m-%d 00:00:00")
     total = connection.execute(
         "SELECT COALESCE(SUM(Amount_SAR), 0) FROM transactions"
-        " WHERE user_uuid = ? AND direction = 'debit' AND createdAt >= ?"
-        "   AND Transaction_Type NOT IN ('qatta_payment', 'gift_out', 'fatoorah_payment')",
+        " WHERE user_uuid = ? AND direction = 'debit' AND createdAt >= ?",
         (user_uuid, day_start),
     ).fetchone()[0]
     return money(total)

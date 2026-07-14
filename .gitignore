@@ -18,3 +18,6 @@ build/
 .github/
 .idea/
 .vscode/
+VoiceAssistant_Nafea/backend/cache_dir/
+VoiceAssistant_Nafea/backend/app.log
+VoiceAssistant_Nafea/frontend/node_modules/

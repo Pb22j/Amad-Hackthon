@@ -52,6 +52,13 @@ class AgentEventType(StrEnum):
 
 class ConfirmationMetadata(StrictSchema):
     authorization_token: str | None = Field(default=None, repr=False)
+    otp_code: str | None = Field(default=None, min_length=4, max_length=4, pattern=r"^\d{4}$", repr=False)
+
+    @model_validator(mode="after")
+    def token_and_otp_are_paired(self) -> "ConfirmationMetadata":
+        if (self.authorization_token is None) != (self.otp_code is None):
+            raise ValueError("authorization_token and otp_code must be provided together")
+        return self
 
 
 class AuthorizationContext(StrictSchema):
@@ -94,15 +101,24 @@ class ResumeTaskRequest(StrictSchema):
     clarification_id: UUID | None = None
     answer: Any | None = None
     authorization_token: str | None = Field(default=None, repr=False)
+    otp_code: str | None = Field(
+        default=None, min_length=4, max_length=4, pattern=r"^\d{4}$", repr=False
+    )
+    confirmation_rejected: Literal[True] | None = None
 
     @model_validator(mode="after")
     def exactly_one_resume_value(self) -> "ResumeTaskRequest":
         has_answer = self.clarification_id is not None and self.answer is not None
-        has_confirmation = self.authorization_token is not None
+        has_confirmation = self.authorization_token is not None and self.otp_code is not None
+        has_rejection = self.confirmation_rejected is True
         if (self.clarification_id is None) != (self.answer is None):
             raise ValueError("clarification_id and answer must be provided together")
-        if has_answer == has_confirmation:
-            raise ValueError("provide either a clarification answer or an authorization token")
+        if (self.authorization_token is None) != (self.otp_code is None):
+            raise ValueError("authorization_token and otp_code must be provided together")
+        if sum((has_answer, has_confirmation, has_rejection)) != 1:
+            raise ValueError(
+                "provide one clarification answer, authorization token, or confirmation rejection"
+            )
         return self
 
 

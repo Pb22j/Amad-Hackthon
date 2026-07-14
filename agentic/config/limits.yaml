@@ -8,6 +8,9 @@ task:
   max_request_characters: 20000
 memory:
   recent_messages: 20
+  max_items_per_session: 50
+  max_items_per_type: 5
+  max_value_characters: 4000
   task_checkpoint_ttl_days: 30
   semantic_top_k: 5
   minimum_similarity: 0.78

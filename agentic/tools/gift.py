@@ -8,9 +8,8 @@ full name — so the gift shows up in their transactions and monthly report as
 
 Rules: the recipient must be an active beneficiary, the amount must be above
 zero and covered by the sender's balance, and the action requires
-confirmation and returns a receipt. Gifts are fully exempt from the daily
-spend limit by design — they are neither checked against it nor counted
-toward it (see ``spent_today``).
+confirmation and returns a receipt. Gift debits count toward the same daily
+spend limit as every other outgoing financial action.
 """
 
 from __future__ import annotations
@@ -32,6 +31,7 @@ from agentic.tools.bank_db import (
     next_reference,
     owner_identity,
     run_in_bank_db,
+    spent_today,
     timestamp,
     tool_result,
 )
@@ -114,7 +114,6 @@ async def send_gift(
                 error_code="beneficiary_not_active",
             )
 
-        # Gifts bypass the daily spend limit by design; only the balance rules.
         balance = money(sender["Balance_SAR"])
         if amount > balance:
             return tool_result(
@@ -125,6 +124,19 @@ async def send_gift(
                     "available_balance_sar": str(balance),
                 },
                 error_code="insufficient_funds",
+            )
+        daily_limit = money(sender["Daily_Spend_Limit_SAR"])
+        already_spent = spent_today(connection, sender["uuid"])
+        if already_spent + amount > daily_limit:
+            return tool_result(
+                status="failed",
+                summary="This gift would exceed the daily spend limit.",
+                data={
+                    "requested_amount_sar": str(amount),
+                    "spent_today_sar": str(already_spent),
+                    "daily_limit_sar": str(daily_limit),
+                },
+                error_code="daily_limit_exceeded",
             )
 
         receiver = find_user_by_account_number(connection, beneficiary["Account_Number"])
@@ -223,8 +235,7 @@ TOOL: BaseTool = StructuredTool.from_function(
         "Send a money gift (هدية) to an activated beneficiary after confirmation. "
         "Takes the recipient, the amount (must be above 0.0 SAR), and a dedication "
         "message; the amount is deducted from the sender and delivered to the "
-        "recipient together with the message and the sender's full name. Gifts are "
-        "exempt from the daily spend limit."
+        "recipient together with the message and the sender's full name."
     ),
     args_schema=SendGiftArgs,
 )

@@ -57,7 +57,7 @@ const StatusIndicator = ({ status }) => {
       <span className="status-icon-wrapper">{config.icon}</span>
       <span className="status-text">{config.text}</span>
 
-      <style jsx="true">{`
+      <style>{`
         .status-badge-container {
           display: inline-flex;
           align-items: center;

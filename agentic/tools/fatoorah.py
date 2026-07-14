@@ -6,8 +6,7 @@ and pay their own bills. To pay, the user must state the **last four digits**
 of the bill number — that is how the bill is selected. Payment deducts the
 bill amount from the user's balance (rejected if the balance cannot cover it)
 and records a ledger entry under the "فواتير" category, so it appears in the
-monthly report. Fatoorah payments are fully exempt from the daily spend limit
-by design — neither checked against it nor counted toward it.
+monthly report. Bill-payment debits count toward the customer's daily limit.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ from agentic.tools.bank_db import (
     next_reference,
     owner_identity,
     run_in_bank_db,
+    spent_today,
     timestamp,
     tool_result,
 )
@@ -133,7 +133,6 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
         fatoorah = unpaid[0]
         amount = money(fatoorah["Amount_SAR"])
 
-        # Fatoorah payments bypass the daily spend limit; only the balance rules.
         balance = money(payer["Balance_SAR"])
         if amount > balance:
             return tool_result(
@@ -144,6 +143,19 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
                     "available_balance_sar": str(balance),
                 },
                 error_code="insufficient_funds",
+            )
+        daily_limit = money(payer["Daily_Spend_Limit_SAR"])
+        already_spent = spent_today(connection, payer["uuid"])
+        if already_spent + amount > daily_limit:
+            return tool_result(
+                status="failed",
+                summary="This bill payment would exceed the daily spend limit.",
+                data={
+                    "bill_amount_sar": str(amount),
+                    "spent_today_sar": str(already_spent),
+                    "daily_limit_sar": str(daily_limit),
+                },
+                error_code="daily_limit_exceeded",
             )
 
         reference = next_reference(connection, "fatoorah")
@@ -242,8 +254,7 @@ PAY_FATOORAH_TOOL: BaseTool = StructuredTool.from_function(
         "Pay one of the authenticated user's assigned bills (فاتورة) after "
         "confirmation. The user must state the last four digits of the numeric bill "
         "number to select which bill to pay. The amount is deducted from the balance "
-        "and appears in the monthly report; fatoorah payments are exempt from the "
-        "daily spend limit."
+        "and appears in the monthly report."
     ),
     args_schema=PayFatoorahArgs,
 )

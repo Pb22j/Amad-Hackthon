@@ -148,6 +148,7 @@ async def drive_task(
                     user_id=user_id,
                     tenant_id=TENANT_ID,
                     authorization_token=token,
+                    otp_code=input("🔐 demo OTP [1111]> ").strip(),
                 ),
             )
             continue

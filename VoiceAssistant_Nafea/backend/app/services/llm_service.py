@@ -1,7 +1,8 @@
 import abc
 import asyncio
 from openai import OpenAI
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from app.config import settings
 from app.utils.logger import logger, log_duration
 
@@ -49,28 +50,23 @@ class GeminiConversationalService(LLMService):
         "gemini-2.0-flash",
         "gemini-2.5-flash-lite",
         "gemini-2.0-flash-lite",
-        "gemini-3.5-flash",
     ]
 
     def __init__(self, api_key: str = settings.GEMINI_API_KEY, model: str = "gemini-2.5-flash"):
         if not api_key:
             logger.warning("Gemini API Key is missing. Gemini LLM service will fail.")
-        # Use REST transport instead of gRPC to respect system root cert overrides
-        genai.configure(api_key=api_key, transport='rest')
+        self.client = genai.Client(api_key=api_key)
         self.model_name = model
 
-    def _try_generate(self, model_name: str, prompt: str, system_prompt: str) -> str:
-        """Synchronous helper that attempts generation with a specific model."""
-        model = genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=system_prompt
-        )
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
+    async def _try_generate(self, model_name: str, prompt: str, system_prompt: str) -> str:
+        response = await self.client.aio.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
                 max_output_tokens=150,
                 temperature=0.7
-            )
+            ),
         )
         return response.text.strip()
 
@@ -81,16 +77,12 @@ class GeminiConversationalService(LLMService):
             if m not in models_to_try:
                 models_to_try.append(m)
 
-        loop = asyncio.get_event_loop()
         last_error = None
 
         for model_name in models_to_try:
             try:
                 with log_duration(f"Gemini LLM Response ({model_name})"):
-                    result = await loop.run_in_executor(
-                        None,
-                        lambda mn=model_name: self._try_generate(mn, prompt, system_prompt)
-                    )
+                    result = await self._try_generate(model_name, prompt, system_prompt)
                     return result
             except Exception as e:
                 error_str = str(e)
@@ -105,7 +97,7 @@ class GeminiConversationalService(LLMService):
 
         # All models exhausted
         logger.error(f"All Gemini model fallbacks exhausted. Last error: {last_error}")
-        raise LLMException(f"Gemini LLM failed: All models rate-limited. Please wait a minute and try again.")
+        raise LLMException("Gemini LLM failed: All models rate-limited. Please wait and try again.")
 
 def get_llm_service() -> LLMService:
     provider = settings.LLM_PROVIDER.lower()

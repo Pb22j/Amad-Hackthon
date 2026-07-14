@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -83,9 +84,20 @@ class AgentService:
         ).hexdigest()
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
+    def _valid_demo_otp(self, otp_code: str | None) -> bool:
+        """Validate the demo OTP without placing it in graph state or audit data."""
+
+        if otp_code is None:
+            return False
+        expected = self.config.secrets.demo_confirmation_otp.get_secret_value()
+        return hmac.compare_digest(otp_code, expected)
+
     async def submit(self, request: AgenticRequest, *, background: bool = True) -> AcceptedTask:
         """Accept an idempotent request and optionally execute it in the background."""
 
+        if request.confirmation and request.confirmation.authorization_token:
+            if not self._valid_demo_otp(request.confirmation.otp_code):
+                raise PermissionError("invalid confirmation OTP")
         if len(request.natural_language_request) > self.config.limits.task.max_request_characters:
             raise ValueError("request exceeds configured maximum length")
         await self.rate_limiter.acquire(tenant_id=request.tenant_id, user_id=request.user_id)
@@ -194,10 +206,21 @@ class AgentService:
             initial_authorization_token=(
                 request.confirmation.authorization_token if request.confirmation else None
             ),
+            otp_verified=(
+                self._valid_demo_otp(request.confirmation.otp_code)
+                if request.confirmation
+                else False
+            ),
             original_request=request.natural_language_request,
         )
         async with self.database.session() as session:
-            memories = await MemoryService(session, self.memory_policy).list_for_user(
+            memories = await MemoryService(
+                session,
+                self.memory_policy,
+                max_items_per_session=self.config.limits.memory.max_items_per_session,
+                max_items_per_type=self.config.limits.memory.max_items_per_type,
+                max_value_characters=self.config.limits.memory.max_value_characters,
+            ).list_for_session(
                 auth=auth, limit=self.config.limits.memory.recent_messages
             )
         state["relevant_context"].extend(
@@ -256,6 +279,26 @@ class AgentService:
             else:
                 if current != TaskStatus.WAITING_FOR_CONFIRMATION:
                     raise ValueError("task is not waiting for confirmation")
+                if request.confirmation_rejected:
+                    await repository.transition(
+                        row,
+                        TaskStatus.REJECTED,
+                        payload={"reason_code": "user_rejected_confirmation"},
+                    )
+                    await self.events.publish(
+                        AgentEvent(
+                            task_id=task_id,
+                            request_id=UUID(row.request_id),
+                            session_id=UUID(row.session_id),
+                            event_type=AgentEventType.REJECTED,
+                            user_safe_summary="The user declined the requested financial action.",
+                            details={"reason_code": "user_rejected_confirmation"},
+                        )
+                    )
+                    TASKS.labels(outcome=TaskStatus.REJECTED.value, language=row.language).inc()
+                    return
+                if not self._valid_demo_otp(request.otp_code):
+                    raise PermissionError("invalid confirmation OTP")
                 resume_value = request.authorization_token
             explicit_user_values = await clarifications.answered_values(task_id_str)
             await repository.transition(row, TaskStatus.RUNNING)
@@ -285,6 +328,7 @@ class AgentService:
             session_factory=self.database.session_factory,
             config=self.config,
             confirmation_signer=self.confirmation_signer,
+            otp_verified=request.authorization_token is not None,
             original_request=original.natural_language_request,
             explicit_user_values=explicit_user_values,
         )
@@ -300,7 +344,13 @@ class AgentService:
 
         auth = AuthContext(user_id, tenant_id, session_id, frozenset())
         async with self.database.session() as session:
-            return await MemoryService(session, self.memory_policy).delete_for_user(auth=auth)
+            return await MemoryService(
+                session,
+                self.memory_policy,
+                max_items_per_session=self.config.limits.memory.max_items_per_session,
+                max_items_per_type=self.config.limits.memory.max_items_per_type,
+                max_value_characters=self.config.limits.memory.max_value_characters,
+            ).delete_for_session(auth=auth)
 
     async def get_task_status(
         self, task_id: UUID, request: TaskStatusRequest
@@ -441,7 +491,13 @@ class AgentService:
             request.authorization.scopes,
         )
         async with self.database.session() as session:
-            service = MemoryService(session, self.memory_policy)
+            service = MemoryService(
+                session,
+                self.memory_policy,
+                max_items_per_session=self.config.limits.memory.max_items_per_session,
+                max_items_per_type=self.config.limits.memory.max_items_per_type,
+                max_value_characters=self.config.limits.memory.max_value_characters,
+            )
             for candidate in candidates:
                 try:
                     await service.put(

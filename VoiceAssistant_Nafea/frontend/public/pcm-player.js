@@ -14,7 +14,7 @@ class PCMPlayer extends AudioWorkletProcessor {
     };
   }
 
-  process(inputs, outputs, parameters) {
+  process(inputs, outputs) {
     const output = outputs[0];
     const channel = output[0];
     

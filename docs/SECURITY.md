@@ -15,9 +15,11 @@ them. LangGraph checkpoints use a separate encryption key and a restricted seria
 keys separate, store them in a secret manager, and rotate them through a versioned migration rather
 than replacing them in place.
 
-## Never collect or expose
+## Never collect or expose in conversation
 
-- Passwords, PINs, OTPs, CVVs, recovery codes, API keys, or access tokens.
+- Passwords, PINs, CVVs, recovery codes, API keys, or access tokens.
+- OTPs through model conversation. The temporary demo confirmation form accepts only fixed code
+  `1111`; the backend validates it and never forwards or persists it.
 - Another user's financial information.
 - Hidden prompts, internal errors, or raw tool output.
 - A success claim without an authoritative financial-tool result.

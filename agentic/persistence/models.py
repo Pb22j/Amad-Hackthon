@@ -126,15 +126,27 @@ class ToolExecutionRow(Base):
 class MemoryItemRow(Base):
     __tablename__ = "memory_items"
     __table_args__ = (
-        Index("ix_memory_namespace", "tenant_id", "user_id", "memory_type"),
+        Index(
+            "ix_memory_namespace",
+            "tenant_id",
+            "user_id",
+            "session_id",
+            "memory_type",
+        ),
         UniqueConstraint(
-            "tenant_id", "user_id", "memory_type", "deduplication_key", name="uq_memory_item"
+            "tenant_id",
+            "user_id",
+            "session_id",
+            "memory_type",
+            "deduplication_key",
+            name="uq_memory_item",
         ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_string)
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False)
     user_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False)
     memory_type: Mapped[str] = mapped_column(String(100), nullable=False)
     value: Mapped[dict[str, Any]] = mapped_column(EncryptedJSON, nullable=False)
     deduplication_key: Mapped[str] = mapped_column(String(64), nullable=False)

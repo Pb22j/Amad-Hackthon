@@ -103,6 +103,9 @@ class TaskLimits(StrictModel):
 
 class MemoryLimits(StrictModel):
     recent_messages: int = Field(ge=1, le=200)
+    max_items_per_session: int = Field(default=50, ge=5, le=500)
+    max_items_per_type: int = Field(default=5, ge=1, le=50)
+    max_value_characters: int = Field(default=4000, ge=100, le=50_000)
     task_checkpoint_ttl_days: int = Field(ge=1, le=3650)
     semantic_top_k: int = Field(ge=1, le=100)
     minimum_similarity: float = Field(ge=0, le=1)
@@ -170,6 +173,7 @@ class SecretsConfig(StrictModel):
     interaction_shared_secret: SecretStr
     interaction_event_webhook_url: str | None = None
     application_encryption_key: SecretStr
+    demo_confirmation_otp: SecretStr = SecretStr("1111")
 
     @model_validator(mode="after")
     def secure_keys(self) -> "SecretsConfig":
@@ -181,6 +185,9 @@ class SecretsConfig(StrictModel):
             value = getattr(self, name).get_secret_value()
             if len(value.encode()) < 32:
                 raise ValueError(f"{name} must contain at least 32 bytes")
+        otp = self.demo_confirmation_otp.get_secret_value()
+        if len(otp) != 4 or not otp.isdigit():
+            raise ValueError("demo_confirmation_otp must contain exactly four digits")
         return self
 
 
@@ -199,6 +206,8 @@ class AppConfig(StrictModel):
                 raise ValueError("checkpoint encryption is required in production")
             if not self.secrets.interaction_event_webhook_url:
                 raise ValueError("interaction event webhook is required in production")
+            if self.secrets.demo_confirmation_otp.get_secret_value() == "1111":
+                raise ValueError("fixed demo OTP must be replaced for production")
         return self
 
 
@@ -222,6 +231,7 @@ def load_config(config_dir: str | Path | None = None) -> AppConfig:
         interaction_shared_secret=os.environ["INTERACTION_SHARED_SECRET"],
         interaction_event_webhook_url=os.getenv("INTERACTION_EVENT_WEBHOOK_URL"),
         application_encryption_key=os.environ["APP_DATA_ENCRYPTION_KEY"],
+        demo_confirmation_otp=os.getenv("DEMO_CONFIRMATION_OTP", "1111"),
     )
     app_file = AgentFileConfig.model_validate(_read_yaml(root / "agent.yaml"))
     if provider := os.getenv("AGENTIC_TOOL_PROVIDER"):

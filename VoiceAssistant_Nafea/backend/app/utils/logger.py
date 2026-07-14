@@ -3,14 +3,17 @@ import time
 import sys
 from contextlib import contextmanager
 
+from app.config import settings
+
 # Set up logging format
+handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+if settings.LOG_FILE:
+    handlers.append(logging.FileHandler(settings.LOG_FILE, encoding="utf-8"))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("app.log", encoding="utf-8")
-    ]
+    handlers=handlers,
 )
 
 logger = logging.getLogger("voice-ai-agent")

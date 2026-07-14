@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ToolRisk(StrEnum):
@@ -32,6 +32,14 @@ class ToolMetadata(BaseModel):
     requires_owner_metadata: bool = True
     idempotent: bool = False
     max_calls_per_task: int = Field(default=5, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def financial_actions_are_always_gated(self) -> "ToolMetadata":
+        if self.risk == ToolRisk.FINANCIAL_ACTION and not self.requires_confirmation:
+            raise ValueError("financial_action tools must require confirmation and OTP")
+        if self.risk == ToolRisk.FINANCIAL_ACTION and not self.requires_receipt:
+            raise ValueError("financial_action tools must require an authoritative receipt")
+        return self
 
 
 class ToolResult(BaseModel):

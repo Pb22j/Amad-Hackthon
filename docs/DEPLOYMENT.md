@@ -28,6 +28,7 @@ runtime role only the DML and sequence permissions it needs. Encrypt database st
 - `DATABASE_URL`
 - `LANGGRAPH_DATABASE_URL`
 - `CONFIRMATION_SIGNING_KEY` with at least 32 random bytes
+- A production step-up authentication adapter; fixed `DEMO_CONFIRMATION_OTP=1111` is rejected
 - `CHECKPOINT_ENCRYPTION_KEY` with exactly 16, 24, or 32 random bytes
 - `APP_DATA_ENCRYPTION_KEY` with at least 32 random bytes, separate from checkpoint encryption
 - `INTERACTION_SHARED_SECRET` with at least 32 random bytes

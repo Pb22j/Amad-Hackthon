@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import VoiceAgent from './components/VoiceAgent';
-import { Cpu, Github, Radio } from 'lucide-react';
+import { Cpu, Radio } from 'lucide-react';
 
 function App() {
   const [serverOnline, setServerOnline] = useState(false);
@@ -74,7 +74,7 @@ function App() {
         </div>
       </footer>
 
-      <style jsx="true">{`
+      <style>{`
         /* Navbar Styling */
         .navbar {
           display: flex;

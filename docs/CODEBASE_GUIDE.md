@@ -41,18 +41,18 @@ code owns identity, authorization, confirmation, isolation, persistence, and rep
 8. Missing information or confirmation produces a LangGraph interrupt. The service persists it and
    emits an event to the interaction layer, which asks the user.
 9. `POST /agentic/tasks/{task_id}/resume` verifies the same task/user/tenant/session relationship and
-   resumes the checkpoint with the answer or exact authorization token.
+   resumes with a clarification answer or the exact authorization token plus dedicated demo OTP.
 10. The final `AgentReport` is validated against authoritative tool executions before it is stored
     and emitted. A financial action cannot be reported as completed without its receipt.
 
 ## Tool integration
 
-`agentic/tools/dummy.py` provides the initial in-memory evaluation tools. They simulate a cash
-balance, transaction history, beneficiaries, and fixed-price investment positions. No external
-financial system is called, state resets with the process, and ownership comes from the
-`DUMMY_TOOL_USER_ID` / `DUMMY_TOOL_TENANT_ID` environment values rather than model arguments.
+`agentic/tools` now exports SQLite-backed demo tools for accounts, transactions, beneficiaries,
+transfers, reports, financial analysis, gifts, bills, Qatta, and investments. The guard binds the
+authenticated user and tenant with a request-scoped context, including across SQLite worker threads.
+The older in-memory provider remains available through an explicit `AGENTIC_TOOL_PROVIDER` override.
 
-The tool team adds its production implementations to `agentic/tools/`. The simplest replacement is:
+A future PostgreSQL/Open Banking provider can replace the default without changing orchestration:
 
 ```python
 # agentic/tools/__init__.py
@@ -112,6 +112,8 @@ when their metadata requires one.
 - Tool and memory content is untrusted even when it came from an internal system.
 - Another user's or tenant's result is rejected before it reaches the model.
 - Exact confirmation binds user, tenant, task, tool name, normalized arguments, expiry, and nonce.
+- Every financial action also requires the dedicated OTP; the fixed `1111` value is demo-only and
+  never enters model, graph, tool, memory, or audit context.
 - A consumed confirmation cannot be replayed and cannot authorize modified arguments.
 - Financial writes are not blindly retried; idempotency keys prevent duplicate execution.
 - Completed configured actions require authoritative receipts.
@@ -136,11 +138,12 @@ Application tables track tasks, events, clarification requests, exact authorizat
 curated memories, audit decisions, and evaluation runs. Alembic owns these tables. LangGraph owns
 its checkpoint and store tables, which Alembic intentionally ignores.
 
-Working memory is the encrypted task checkpoint. Cross-task memory is not a raw transcript: the
+Working memory is the encrypted task checkpoint. Curated memory is not a raw transcript: the
 extractor proposes small candidates, deterministic policy rejects secrets/instructions/unsupported
 types, and the service stores provenance, confidence, consent, expiry, and verification state.
-Every query includes both tenant and user identifiers. `DELETE /agentic/memory` removes a user's
-curated memory.
+Every query includes the exact tenant, user, and interaction session. Compaction never asks a model
+to rewrite facts: it removes expired data and lower-ranked unverified overflow while preserving all
+verified items. `DELETE /agentic/memory` removes only the authenticated session's curated memory.
 
 ## Models
 
