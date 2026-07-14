@@ -157,6 +157,19 @@ CREATE TABLE IF NOT EXISTS qatta_bills (
 CREATE INDEX IF NOT EXISTS ix_qatta_bills_participant
     ON qatta_bills (participant_uuid, status);
 
+CREATE TABLE IF NOT EXISTS fatoorahs (
+    uuid TEXT PRIMARY KEY,
+    user_uuid TEXT NOT NULL REFERENCES users (uuid),
+    Bill_Number TEXT NOT NULL UNIQUE CHECK (Bill_Number NOT GLOB '*[^0-9]*'),
+    Biller_Name_Ar TEXT NOT NULL,
+    Amount_SAR REAL NOT NULL CHECK (Amount_SAR > 0),
+    status TEXT NOT NULL DEFAULT 'unpaid' CHECK (status IN ('unpaid', 'paid')),
+    dueDate TEXT,
+    paidAt TEXT,
+    createdAt TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_fatoorahs_user_status ON fatoorahs (user_uuid, status);
+
 CREATE TABLE IF NOT EXISTS transactions (
     uuid TEXT PRIMARY KEY,
     user_uuid TEXT NOT NULL REFERENCES users (uuid),
@@ -205,9 +218,10 @@ def _ensure_ready(path: str) -> None:
         try:
             connection.executescript(_SCHEMA)
             _transaction(connection, _seed_if_empty)
-            # Runs separately so databases created before the qatta feature
-            # existed still receive the demo qatta.
+            # These run separately so databases created before each feature
+            # existed still receive its demo rows.
             _transaction(connection, _seed_qatta_if_empty)
+            _transaction(connection, _seed_fatoorahs_if_empty)
         finally:
             connection.close()
         _seeded_paths.add(path)
@@ -553,6 +567,55 @@ def _seed_qatta_if_empty(connection: sqlite3.Connection) -> None:
         )
 
 
+# SADAD-style numeric bill numbers; the last four digits identify the bill
+# for payment, so they are distinct per user.
+_SEED_FATOORAHS: tuple[dict[str, Any], ...] = (
+    {"owner_username": "evaluation-user", "Bill_Number": "30012345671234",
+     "Biller_Name_Ar": "الشركة السعودية للكهرباء", "Amount_SAR": 348.60},
+    {"owner_username": "evaluation-user", "Bill_Number": "20098765435678",
+     "Biller_Name_Ar": "شركة المياه الوطنية", "Amount_SAR": 86.25},
+    {"owner_username": "evaluation-user", "Bill_Number": "96655544439012",
+     "Biller_Name_Ar": "STC", "Amount_SAR": 129.00},
+    {"owner_username": "admin", "Bill_Number": "30011122238888",
+     "Biller_Name_Ar": "الشركة السعودية للكهرباء", "Amount_SAR": 512.40},
+    # Deliberately larger than وليد's 15,000 balance to demo the rejection.
+    {"owner_username": "waleed", "Bill_Number": "40077766624444",
+     "Biller_Name_Ar": "المرور - رسوم مخالفات", "Amount_SAR": 20000.00},
+)
+
+
+def _seed_fatoorahs_if_empty(connection: sqlite3.Connection) -> None:
+    """Seed unpaid demo bills, each assigned to a specific bank customer."""
+
+    if connection.execute("SELECT COUNT(*) FROM fatoorahs").fetchone()[0]:
+        return
+    now = riyadh_now()
+    created = timestamp(now)
+    due = timestamp(now + timedelta(days=14))
+    for fatoorah in _SEED_FATOORAHS:
+        owner = connection.execute(
+            "SELECT uuid FROM users WHERE Username = ?",
+            (fatoorah["owner_username"],),
+        ).fetchone()
+        if owner is None:
+            continue
+        connection.execute(
+            "INSERT INTO fatoorahs"
+            " (uuid, user_uuid, Bill_Number, Biller_Name_Ar, Amount_SAR, status,"
+            "  dueDate, paidAt, createdAt)"
+            " VALUES (?, ?, ?, ?, ?, 'unpaid', ?, NULL, ?)",
+            (
+                str(uuid4()),
+                owner["uuid"],
+                fatoorah["Bill_Number"],
+                fatoorah["Biller_Name_Ar"],
+                fatoorah["Amount_SAR"],
+                due,
+                created,
+            ),
+        )
+
+
 # --------------------------------------------------------------------------
 # Shared queries
 # --------------------------------------------------------------------------
@@ -593,17 +656,17 @@ def find_beneficiary(
 def spent_today(connection: sqlite3.Connection, user_uuid: str) -> Decimal:
     """Total debited today, used to enforce ``Daily_Spend_Limit_SAR``.
 
-    Qatta payments are fully exempt from the daily limit by design: their
-    tools skip the check, and they are excluded here so they never consume
-    the allowance of other payments either. The day window follows Riyadh
-    time, so the allowance resets at Saudi midnight.
+    Qatta payments, gifts, and fatoorah payments are fully exempt from the
+    daily limit by design: their tools skip the check, and they are excluded
+    here so they never consume the allowance of other payments either. The
+    day window follows Riyadh time, so the allowance resets at Saudi midnight.
     """
 
     day_start = riyadh_now().strftime("%Y-%m-%d 00:00:00")
     total = connection.execute(
         "SELECT COALESCE(SUM(Amount_SAR), 0) FROM transactions"
         " WHERE user_uuid = ? AND direction = 'debit' AND createdAt >= ?"
-        "   AND Transaction_Type != 'qatta_payment'",
+        "   AND Transaction_Type NOT IN ('qatta_payment', 'gift_out', 'fatoorah_payment')",
         (user_uuid, day_start),
     ).fetchone()[0]
     return money(total)

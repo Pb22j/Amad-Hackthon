@@ -7,7 +7,10 @@ from decimal import Decimal
 import pytest
 
 from agentic.tools.add_benefit import add_benefit
+from agentic.tools.analyze_finances import analyze_finances
 from agentic.tools.bank_db import reset_bank_state
+from agentic.tools.fatoorah import list_fatoorahs, pay_fatoorah
+from agentic.tools.gift import send_gift
 from agentic.tools.metadata import ToolResult
 from agentic.tools.monthly_report import monthly_report
 from agentic.tools.qatta import (
@@ -174,6 +177,160 @@ async def test_monthly_report_for_empty_month_is_valid():
     assert result.data["total_paid_sar"] == "0.00"
     assert result.data["total_received_sar"] == "0.00"
     assert result.data["transactions"] == []
+
+
+async def test_analyze_finances_computes_deterministic_insights():
+    result = _validated(await analyze_finances())
+    assert result.status == "completed"
+    data = result.data
+    assert data["period_months"] == 3
+    assert len(data["monthly"]) == 3
+
+    # The oldest analyzed month is fully seeded: salary 15,500 + 750 received,
+    # and 6,591.15 spent across the fixed activity template.
+    oldest = data["monthly"][0]
+    assert oldest["income_sar"] == "16250.00"
+    assert oldest["spent_sar"] == "6591.15"
+
+    assert data["top_counterparties"][0]["name"] == "شركة الفيصلية العقارية"
+    recurring_names = {item["name"] for item in data["recurring_commitments"]}
+    assert "شركة الفيصلية العقارية" in recurring_names
+    assert "راتب" in data["category_trends"]
+
+    projection = data["current_month_projection"]
+    assert projection["balance_covers_projection"] is True
+    assert projection["days_elapsed"] >= 1
+
+    assert data["unpaid_fatoorahs"]["count"] == 3
+    assert data["unpaid_fatoorahs"]["total_sar"] == "563.85"
+    flag_codes = {flag["code"] for flag in data["flags"]}
+    assert "unpaid_bills_due_soon" in flag_codes
+
+
+async def test_analyze_finances_focus_category_and_single_month():
+    result = _validated(await analyze_finances(months=1, focus_category="فواتير"))
+    assert result.status == "completed"
+    assert len(result.data["monthly"]) == 1
+    focus = result.data["focus_category"]
+    assert focus["category"] == "فواتير"
+    assert all(
+        item["counterparty"] in {"الشركة السعودية للكهرباء", "STC"}
+        for item in focus["transactions"]
+    )
+
+
+async def test_list_fatoorahs_shows_only_the_users_bills():
+    result = _validated(await list_fatoorahs())
+    assert result.status == "completed"
+    billers = {item["biller"] for item in result.data["fatoorahs"]}
+    assert billers == {"الشركة السعودية للكهرباء", "شركة المياه الوطنية", "STC"}
+    assert result.data["unpaid_total_sar"] == "563.85"  # 348.60 + 86.25 + 129.00
+    assert all(item["bill_number"].isdigit() for item in result.data["fatoorahs"])
+
+
+async def test_pay_fatoorah_by_last_four_digits_shows_in_monthly_report():
+    result = _validated(await pay_fatoorah(last_four_digits="1234"))
+    assert result.status == "completed"
+    assert result.receipt_id and result.receipt_id.startswith("receipt-")
+    assert result.data["biller"] == "الشركة السعودية للكهرباء"
+    assert result.data["bill_status"] == "مدفوعة"
+    assert result.data["new_balance_sar"] == "25082.90"  # 25431.50 - 348.60
+
+    again = _validated(await pay_fatoorah(last_four_digits="1234"))
+    assert again.error_code == "already_paid"
+
+    report = _validated(await monthly_report())
+    entry = next(
+        item for item in report.data["transactions"]
+        if item["type"] == "fatoorah_payment"
+    )
+    assert entry["description"] == "سداد فاتورة الشركة السعودية للكهرباء رقم 30012345671234"
+    assert entry["category"] == "فواتير"
+
+
+async def test_pay_fatoorah_rejects_unknown_digits_and_insufficient_funds(monkeypatch):
+    unknown = _validated(await pay_fatoorah(last_four_digits="0000"))
+    assert unknown.error_code == "fatoorah_not_found"
+
+    invalid = _validated(await pay_fatoorah(last_four_digits="12x4"))
+    assert invalid.error_code == "invalid_bill_digits"
+
+    # وليد's seeded traffic-fines bill (20,000) exceeds his 15,000 balance.
+    monkeypatch.setenv("BANK_TOOL_USER_ID", "waleed")
+    broke = _validated(await pay_fatoorah(last_four_digits="4444"))
+    assert broke.error_code == "insufficient_funds"
+
+
+async def test_pay_fatoorah_is_exempt_from_the_daily_spend_limit():
+    # Pay a 348.60 bill, then transfer 4,950 with a 5,000 limit: if the bill
+    # counted toward the limit the transfer would be rejected.
+    _validated(await pay_fatoorah(last_four_digits="1234"))
+    transfer = _validated(
+        await transfer_between_accounts(
+            destination_account=LATIFA_ACCOUNT, amount=Decimal("4950.00")
+        )
+    )
+    assert transfer.status == "completed"
+
+
+async def test_send_gift_delivers_message_with_sender_full_name(monkeypatch):
+    result = _validated(
+        await send_gift(
+            recipient="لطيفة",
+            amount=Decimal("250.00"),
+            gift_message="مبروك التخرج يا لطيفة",
+        )
+    )
+    assert result.status == "completed"
+    assert result.receipt_id and result.receipt_id.startswith("receipt-")
+    assert result.data["from"] == "أحمد فهد العتيبي"
+    assert result.data["gift_message"] == "مبروك التخرج يا لطيفة"
+    assert result.data["new_balance_sar"] == "25181.50"
+
+    # The recipient's statement shows the gift with the dedication and the
+    # sender's full name.
+    monkeypatch.setenv("BANK_TOOL_USER_ID", "user_69491")
+    report = _validated(await monthly_report())
+    gift_entry = next(
+        item for item in report.data["transactions"] if item["type"] == "gift_in"
+    )
+    assert gift_entry["counterparty"] == "أحمد فهد العتيبي"
+    assert gift_entry["description"] == "هدية من أحمد فهد العتيبي: مبروك التخرج يا لطيفة"
+    assert report.data["current_balance_sar"] == "32966.00"  # 32716 + 250
+
+
+async def test_send_gift_rejects_non_beneficiary_and_insufficient_funds():
+    stranger = _validated(
+        await send_gift(
+            recipient="محمد", amount=Decimal("50.00"), gift_message="عيدية"
+        )
+    )
+    assert stranger.error_code == "beneficiary_not_found"
+
+    broke = _validated(
+        await send_gift(
+            recipient="لطيفة", amount=Decimal("999999.00"), gift_message="هدية"
+        )
+    )
+    assert broke.error_code == "insufficient_funds"
+
+
+async def test_send_gift_is_exempt_from_the_daily_spend_limit():
+    # 7,000 SAR gift with a 5,000 daily limit: allowed, and it must not consume
+    # the transfer allowance afterwards.
+    gift = _validated(
+        await send_gift(
+            recipient="لطيفة", amount=Decimal("7000.00"), gift_message="هدية زواج"
+        )
+    )
+    assert gift.status == "completed"
+
+    transfer = _validated(
+        await transfer_between_accounts(
+            destination_account=LATIFA_ACCOUNT, amount=Decimal("4950.00")
+        )
+    )
+    assert transfer.status == "completed"
 
 
 async def test_create_qatta_splits_equally_and_deducts_creator_share():

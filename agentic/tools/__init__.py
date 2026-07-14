@@ -8,7 +8,10 @@ The in-memory ``DUMMY_TOOLS`` sandbox remains available through the
 """
 
 from agentic.tools.add_benefit import TOOL as ADD_BENEFIT_TOOL
+from agentic.tools.analyze_finances import TOOL as ANALYZE_FINANCES_TOOL
 from agentic.tools.dummy import DUMMY_TOOLS
+from agentic.tools.fatoorah import LIST_FATOORAHS_TOOL, PAY_FATOORAH_TOOL
+from agentic.tools.gift import TOOL as SEND_GIFT_TOOL
 from agentic.tools.guard import AgentRuntimeContext, GuardedToolFactory
 from agentic.tools.metadata import ToolMetadata, ToolResult
 from agentic.tools.monthly_report import TOOL as MONTHLY_REPORT_TOOL
@@ -28,6 +31,10 @@ BANK_TOOLS = (
     PAY_QATTA_BILL_TOOL,
     CANCEL_QATTA_TOOL,
     LIST_QATTA_BILLS_TOOL,
+    SEND_GIFT_TOOL,
+    PAY_FATOORAH_TOOL,
+    LIST_FATOORAHS_TOOL,
+    ANALYZE_FINANCES_TOOL,
 )
 
 TOOLS = BANK_TOOLS

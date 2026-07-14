@@ -19,6 +19,12 @@ tools:
     requires_owner_metadata: true
     idempotent: true
     max_calls_per_task: 2
+  analyze_finances:
+    risk: sensitive_read
+    intents: [financial_calculation, account_information, transaction_search]
+    required_scopes: [financial:read]
+    requires_owner_metadata: true
+    max_calls_per_task: 3
   monthly_report:
     risk: sensitive_read
     intents: [transaction_search, account_information, financial_calculation]
@@ -47,6 +53,32 @@ tools:
     requires_owner_metadata: true
     idempotent: true
     max_calls_per_task: 2
+  send_gift:
+    risk: financial_action
+    intents: [money_transfer]
+    explicit_user_fields: [recipient]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  pay_fatoorah:
+    risk: financial_action
+    intents: [bill_payment]
+    explicit_user_fields: [last_four_digits]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
+  list_fatoorahs:
+    risk: sensitive_read
+    intents: [bill_payment, account_information, transaction_search]
+    required_scopes: [financial:read]
+    requires_owner_metadata: true
+    max_calls_per_task: 3
   cancel_qatta:
     # financial_action: cancelling refunds every paid share from the pot.
     risk: financial_action

@@ -2,6 +2,8 @@ financial_actions:
   require_exact_confirmation:
     - transfer_between_accounts
     - add_benefit
+    - send_gift
+    - pay_fatoorah
     - create_qatta
     - pay_qatta_bill
     - cancel_qatta
@@ -13,6 +15,8 @@ financial_actions:
     - add_beneficiary
   require_authoritative_receipt:
     - transfer_between_accounts
+    - send_gift
+    - pay_fatoorah
     - create_qatta
     - pay_qatta_bill
     - cancel_qatta
