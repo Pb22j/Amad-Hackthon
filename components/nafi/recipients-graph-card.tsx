@@ -5,7 +5,7 @@ import { ArrowRight, Users } from "lucide-react";
 import { BentoCard, CardTitle } from "@/components/nafi/bento-card";
 import { BankLogo } from "@/components/nafi/bank-logo";
 import { useLang, useLocalize } from "@/lib/i18n";
-import { contactsCount, recipients, type Recipient } from "@/lib/nafiData";
+import { recipients, type Recipient } from "@/lib/nafiData";
 
 const ROW_Y = [16, 50, 84]; // vertical centres (%)
 
@@ -41,7 +41,7 @@ export function RecipientsGraphCard({ className }: { className?: string }) {
 
   return (
     <BentoCard className={className}>
-      <CardTitle title={t("favoriteRecipients")} tag={`[${contactsCount}]`} />
+      <CardTitle title={t("favoriteRecipients")} />
 
       {/* Desktop node graph */}
       <div className="relative hidden h-[280px] sm:block">

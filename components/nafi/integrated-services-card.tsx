@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import { Plus } from "lucide-react";
 
 import { BentoCard, CardTitle } from "@/components/nafi/bento-card";
@@ -10,6 +11,7 @@ import { integratedServices } from "@/lib/nafiData";
 export function IntegratedServicesCard({ className }: { className?: string }) {
   const { t } = useLang();
   const loc = useLocalize();
+  const [scanComplete, setScanComplete] = React.useState(false);
   return (
     <BentoCard className={className}>
       <CardTitle
@@ -17,6 +19,8 @@ export function IntegratedServicesCard({ className }: { className?: string }) {
         action={
           <button
             type="button"
+            onClick={() => setScanComplete(true)}
+            aria-describedby={scanComplete ? "bank-scan-status" : undefined}
             className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
           >
             <Plus className="size-3.5" aria-hidden />
@@ -40,6 +44,11 @@ export function IntegratedServicesCard({ className }: { className?: string }) {
           </div>
         ))}
       </div>
+      {scanComplete && (
+        <p id="bank-scan-status" role="status" className="mt-3 text-xs text-positive">
+          {t("scanComplete")}
+        </p>
+      )}
     </BentoCard>
   );
 }

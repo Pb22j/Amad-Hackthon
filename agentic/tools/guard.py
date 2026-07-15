@@ -11,7 +11,8 @@ import json
 import asyncio
 import re
 import time
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 from uuid import NAMESPACE_URL, uuid5
@@ -53,7 +54,7 @@ class AgentRuntimeContext:
     initial_authorization_token: str | None = None
     otp_verified: bool = False
     original_request: str = ""
-    explicit_user_values: tuple[Any, ...] = ()
+    explicit_user_field_values: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     resuming_from_clarification: bool = False
 
 
@@ -69,14 +70,24 @@ def _serialized_size(value: Any) -> int:
 
 
 def _argument_is_explicit(
-    value: Any, request: str, explicit_user_values: tuple[Any, ...]
+    value: Any,
+    request: str,
+    explicit_user_values: tuple[Any, ...],
+    *,
+    field_name: str | None = None,
 ) -> bool:
     """Check that a protected model argument appears in authenticated text."""
 
     evidence = (request, *(str(item) for item in explicit_user_values))
     if isinstance(value, (list, tuple, set)):
         return bool(value) and all(
-            _argument_is_explicit(item, request, explicit_user_values) for item in value
+            _argument_is_explicit(
+                item,
+                request,
+                explicit_user_values,
+                field_name=field_name,
+            )
+            for item in value
         )
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
         try:
@@ -86,18 +97,106 @@ def _argument_is_explicit(
         for item in evidence:
             # Preserve an explicit sign. Matching only the magnitude would let a
             # model turn a user-stated negative amount into a positive action.
-            for token in re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?", item):
-                try:
-                    if Decimal(token.replace(",", ".")) == expected:
-                        return True
-                except InvalidOperation:
-                    continue
+            for token in re.findall(
+                r"(?<!\w)[+-]?\d+(?:[,\u066c]\d+)*(?:[.\u066b]\d+)?(?!\w)",
+                item,
+            ):
+                parsed = _parse_numeric_token(token)
+                if parsed == expected:
+                    return True
             for word_value in _word_number_values(item):
                 if word_value == expected:
                     return True
         return False
     rendered = str(value).strip().casefold()
-    return bool(rendered) and any(rendered in item.casefold() for item in evidence)
+    if not rendered:
+        return False
+    exact = re.compile(rf"(?<!\w){re.escape(rendered)}(?!\w)", re.IGNORECASE)
+    if any(exact.search(item) is not None for item in evidence):
+        return True
+    if field_name == "symbol":
+        # Investment tools intentionally accept a small, server-owned alias
+        # table. The model may choose the canonical symbol while the user says
+        # the Arabic company name (for example, ARAMCO vs أرامكو). Treat only
+        # those configured aliases as equivalent; arbitrary translations stay
+        # blocked by the exact-provenance rule above.
+        from agentic.tools.investments import SYMBOL_ALIASES, normalize_investment_symbol
+
+        canonical = normalize_investment_symbol(rendered)
+        for alias, alias_canonical in SYMBOL_ALIASES.items():
+            if alias_canonical != canonical:
+                continue
+            alias_pattern = re.compile(rf"(?<!\w){re.escape(alias)}(?!\w)", re.IGNORECASE)
+            if any(alias_pattern.search(item) is not None for item in evidence):
+                return True
+    return False
+
+
+_ARABIC_FIELD_LABELS = {
+    "account_reference": "مرجع الحساب",
+    "amount": "المبلغ",
+    "biller": "مقدم الخدمة",
+    "benefit_account_number": "رقم حساب المستفيد",
+    "destination": "الوجهة",
+    "destination_account": "الحساب المستلم",
+    "full_name_of_benefit_account": "اسم المستفيد الكامل",
+    "gift_message": "رسالة الهدية",
+    "last_four_digits": "آخر أربعة أرقام",
+    "name": "الاسم",
+    "participants": "المشاركون",
+    "qatta_name": "اسم القطة",
+    "quantity": "عدد الأسهم",
+    "recipient": "المستلم",
+    "short_name": "الاسم المختصر",
+    "symbol": "رمز الاستثمار أو اسم الشركة",
+    "total_amount": "المبلغ الإجمالي",
+}
+
+
+def _clarification_copy(field_name: str, request: str) -> tuple[str, str]:
+    """Return a user-facing clarification question and label in request language."""
+
+    if not re.search(r"[\u0600-\u06ff]", request):
+        label = field_name.replace("_", " ").title()
+        return f"What value should be used for {field_name}?", label
+    label = _ARABIC_FIELD_LABELS.get(field_name, field_name.replace("_", " "))
+    questions = {
+        "amount": "ما المبلغ المطلوب؟",
+        "destination": "إلى من تريد التحويل؟",
+        "destination_account": "ما الحساب الذي تريد التحويل إليه؟",
+        "quantity": "كم عدد الأسهم المطلوب؟",
+        "symbol": "ما رمز الاستثمار أو اسم الشركة المطلوب؟",
+    }
+    return questions.get(field_name, f"ما القيمة المطلوبة لحقل {label}؟"), label
+
+
+def _parse_numeric_token(token: str) -> Decimal | None:
+    """Parse grouped/decimal Western or Arabic digits without changing magnitude."""
+
+    normalized_chars: list[str] = []
+    for character in token:
+        if character.isdecimal():
+            normalized_chars.append(str(unicodedata.decimal(character)))
+        elif character == "\u066c":
+            normalized_chars.append(",")
+        elif character == "\u066b":
+            normalized_chars.append(".")
+        else:
+            normalized_chars.append(character)
+    normalized = "".join(normalized_chars)
+    if "," in normalized and "." in normalized:
+        normalized = normalized.replace(",", "")
+    elif "," in normalized:
+        unsigned = normalized.lstrip("+-")
+        groups = unsigned.split(",")
+        if len(groups) > 2 or (len(groups) == 2 and len(groups[1]) == 3):
+            normalized = normalized.replace(",", "")
+        else:
+            normalized = normalized.replace(",", ".")
+    try:
+        return Decimal(normalized)
+    except InvalidOperation:
+        return None
 
 
 _EN_NUMBER_WORDS = {
@@ -137,6 +236,77 @@ _EN_SCALES = {
     "thousands": 1_000,
     "million": 1_000_000,
     "millions": 1_000_000,
+}
+
+_AR_NUMBER_WORDS = {
+    "صفر": 0,
+    "واحد": 1,
+    "واحدة": 1,
+    "اثنان": 2,
+    "اثنين": 2,
+    "اثنتان": 2,
+    "اثنتين": 2,
+    "ثلاثة": 3,
+    "ثلاث": 3,
+    "أربعة": 4,
+    "اربعة": 4,
+    "أربع": 4,
+    "اربع": 4,
+    "خمسة": 5,
+    "خمس": 5,
+    "ستة": 6,
+    "ست": 6,
+    "سبعة": 7,
+    "سبع": 7,
+    "ثمانية": 8,
+    "ثمان": 8,
+    "تسعة": 9,
+    "تسع": 9,
+    "عشرة": 10,
+    "عشر": 10,
+    "عشرون": 20,
+    "عشرين": 20,
+    "ثلاثون": 30,
+    "ثلاثين": 30,
+    "أربعون": 40,
+    "اربعون": 40,
+    "أربعين": 40,
+    "اربعين": 40,
+    "خمسون": 50,
+    "خمسين": 50,
+    "ستون": 60,
+    "ستين": 60,
+    "سبعون": 70,
+    "سبعين": 70,
+    "ثمانون": 80,
+    "ثمانين": 80,
+    "تسعون": 90,
+    "تسعين": 90,
+    "مئة": 100,
+    "مائة": 100,
+    "مئتين": 200,
+    "مائتين": 200,
+    "ثلاثمائة": 300,
+    "أربعمائة": 400,
+    "اربعمائة": 400,
+    "خمسمائة": 500,
+    "ستمائة": 600,
+    "سبعمائة": 700,
+    "ثمانمائة": 800,
+    "تسعمائة": 900,
+    "ألفين": 2_000,
+    "الفين": 2_000,
+    "ألفان": 2_000,
+    "الفان": 2_000,
+    "مليونين": 2_000_000,
+}
+_AR_SCALES = {
+    "ألف": 1_000,
+    "الف": 1_000,
+    "آلاف": 1_000,
+    "الاف": 1_000,
+    "مليون": 1_000_000,
+    "ملايين": 1_000_000,
 }
 
 
@@ -187,6 +357,28 @@ def _word_number_values(text: str) -> tuple[Decimal, ...]:
             if parsed is not None:
                 values.append(parsed)
             phrase = []
+    arabic_tokens = re.findall(r"[\u0600-\u06ff]+", text)
+    arabic_allowed = set(_AR_NUMBER_WORDS) | set(_AR_SCALES)
+    arabic_phrase: list[str] = []
+    for raw_token in (*arabic_tokens, ""):
+        token = raw_token
+        if token.startswith("و") and token[1:] in arabic_allowed:
+            token = token[1:]
+        if token in arabic_allowed:
+            arabic_phrase.append(token)
+            continue
+        if arabic_phrase:
+            total = 0
+            current = 0
+            for word in arabic_phrase:
+                if word in _AR_NUMBER_WORDS:
+                    current += _AR_NUMBER_WORDS[word]
+                else:
+                    scale = _AR_SCALES[word]
+                    total += (current or 1) * scale
+                    current = 0
+            values.append(Decimal(total + current))
+            arabic_phrase = []
     return tuple(values)
 
 
@@ -214,9 +406,7 @@ class GuardedToolFactory:
                     **dict(args_schema.model_config), arbitrary_types_allowed=True
                 ),
                 "__annotations__": {
-                    "runtime": Annotated[
-                        ToolRuntime, InjectedToolArg, Field(exclude=True)
-                    ],
+                    "runtime": Annotated[ToolRuntime, InjectedToolArg, Field(exclude=True)],
                 },
                 "runtime": ...,
             },
@@ -239,8 +429,10 @@ class GuardedToolFactory:
                 if not _argument_is_explicit(
                     arguments[field_name],
                     context.original_request,
-                    context.explicit_user_values,
+                    context.explicit_user_field_values.get(field_name, ()),
+                    field_name=field_name,
                 ):
+                    question, label = _clarification_copy(field_name, context.original_request)
                     arguments[field_name] = interrupt(
                         {
                             "kind": "clarification",
@@ -250,12 +442,12 @@ class GuardedToolFactory:
                                     f"{context.task_id}:{metadata.name}:{field_name}",
                                 )
                             ),
-                            "question": f"What value should be used for {field_name}?",
+                            "question": question,
                             "reason_code": f"missing_explicit_{field_name}",
                             "expected_answer": {
                                 "type": "string",
                                 "field": field_name,
-                                "label": field_name.replace("_", " ").title(),
+                                "label": label,
                                 "minLength": 1,
                                 "maxLength": 500,
                             },
@@ -265,9 +457,28 @@ class GuardedToolFactory:
             # Answers returned through interrupts cross an untyped HTTP boundary;
             # re-run the original strict schema before using or hashing them.
             arguments = args_schema.model_validate(arguments).model_dump()
-            tool_call_id = runtime.tool_call_id or hashlib.sha256(
-                json.dumps(arguments, sort_keys=True, default=str).encode()
-            ).hexdigest()[:24]
+
+            # This write has read-only eligibility checks that must pass before
+            # a signed confirmation is shown. Users should never approve an
+            # impossible transfer (unknown beneficiary, unavailable account,
+            # insufficient funds, or exceeded limit).
+            if metadata.name == "transfer_between_accounts":
+                from agentic.tools.transfer_between_accounts import (
+                    preflight_transfer_between_accounts,
+                )
+
+                preflight = ToolResult.model_validate(
+                    await preflight_transfer_between_accounts(**arguments)
+                )
+                if preflight.status != "completed":
+                    return preflight.model_dump_json()
+
+            tool_call_id = (
+                runtime.tool_call_id
+                or hashlib.sha256(
+                    json.dumps(arguments, sort_keys=True, default=str).encode()
+                ).hexdigest()[:24]
+            )
             key = _idempotency_key(context.task_id, metadata.name, arguments)
 
             # Stage 2: converge retries/replays before any external side effect.
@@ -340,7 +551,10 @@ class GuardedToolFactory:
                     category="tool_authorization",
                     decision="allowed",
                     reason_code="scopes_and_confirmation_valid",
-                    details={"tool_name": metadata.name, "arguments_hash": arguments_hash(arguments)},
+                    details={
+                        "tool_name": metadata.name,
+                        "arguments_hash": arguments_hash(arguments),
+                    },
                 )
                 execution, created = await ToolExecutionRepository(session).start(
                     task_id=context.task_id,
@@ -433,9 +647,7 @@ class GuardedToolFactory:
         )
 
     @staticmethod
-    def _validate_result(
-        result: ToolResult, metadata: ToolMetadata, auth: AuthContext
-    ) -> None:
+    def _validate_result(result: ToolResult, metadata: ToolMetadata, auth: AuthContext) -> None:
         """Reject cross-principal data and unsupported financial success claims."""
 
         if metadata.requires_owner_metadata:

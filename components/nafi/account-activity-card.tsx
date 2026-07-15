@@ -15,7 +15,7 @@ export function AccountActivityCard({ className }: { className?: string }) {
 
   return (
     <BentoCard className={className}>
-      <CardTitle title={t("accountActivity")} tag={`[${activity.cite}]`} />
+      <CardTitle title={t("accountActivity")} />
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {/* Recent — orange */}
@@ -33,7 +33,6 @@ export function AccountActivityCard({ className }: { className?: string }) {
                   </span>
                   <span className="leading-tight">
                     {label}
-                    <span className="mx-1 font-mono text-[10px] opacity-70" dir="ltr">[cite: {r.cite}]</span>
                   </span>
                 </li>
               );

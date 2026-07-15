@@ -3,10 +3,10 @@ const configuredBaseUrl = process.env.NEXT_PUBLIC_NAFEA_API_URL?.trim();
 /**
  * The exported Next.js app cannot use server-side rewrites, so its browser API
  * target is selected at build time. Local development defaults to the voice
- * interaction service on port 8000.
+ * interaction service on port 8001.
  */
 export const NAFEA_API_BASE_URL = (
-  configuredBaseUrl || "http://localhost:8000"
+  configuredBaseUrl || "http://localhost:8001"
 ).replace(/\/$/, "");
 
 export class NafeaApiError extends Error {
@@ -20,7 +20,20 @@ export class NafeaApiError extends Error {
 }
 
 function endpoint(path: string): string {
-  return `${NAFEA_API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+  let baseUrl = NAFEA_API_BASE_URL;
+  if (typeof window !== "undefined") {
+    const configured = new URL(baseUrl);
+    const browserHost = window.location.hostname;
+    const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+    if (loopbackHosts.has(configured.hostname) && loopbackHosts.has(browserHost)) {
+      // Keep the API on the same loopback site as the page. Otherwise a page
+      // opened at 127.0.0.1 would call localhost and Strict session cookies
+      // would correctly be withheld as cross-site.
+      configured.hostname = browserHost;
+      baseUrl = configured.toString().replace(/\/$/, "");
+    }
+  }
+  return `${baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 export function nafeaWebSocketUrl(path: string): string {

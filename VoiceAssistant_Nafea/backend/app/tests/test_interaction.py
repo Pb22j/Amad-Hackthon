@@ -78,6 +78,16 @@ def webhook(event: dict, *, timestamp: int | None = None):
     )
 
 
+def test_signed_webhook_is_not_blocked_by_browser_rate_limit():
+    for _ in range(settings.RATE_LIMIT_PER_MIN):
+        assert limiter.is_allowed("testclient")
+    assert not limiter.is_allowed("testclient")
+
+    response = webhook({})
+
+    assert response.status_code != 429
+
+
 @patch("app.main._agentic_post", new_callable=AsyncMock)
 def test_submit_uses_server_owned_session_identity(mock_post):
     session = create_session("en")
@@ -244,27 +254,30 @@ def test_clarification_resume_normalizes_number_from_voice(mock_post):
         "/api/submit-task", json={"natural_language_request": "Buy Aramco"}
     ).json()
     clarification_id = str(uuid4())
-    assert webhook(
-        {
-            "task_id": accepted["task_id"],
-            "request_id": accepted["request_id"],
-            "session_id": session["session_id"],
-            "event_type": "input_needed",
-            "user_safe_summary": "How many shares?",
-            "details": {
-                "kind": "clarification",
-                "clarification_id": clarification_id,
-                "question": "How many shares?",
-                "expected_answer": {
-                    "type": "integer",
-                    "field": "quantity",
-                    "label": "Number of shares",
-                    "minimum": 1,
+    assert (
+        webhook(
+            {
+                "task_id": accepted["task_id"],
+                "request_id": accepted["request_id"],
+                "session_id": session["session_id"],
+                "event_type": "input_needed",
+                "user_safe_summary": "How many shares?",
+                "details": {
+                    "kind": "clarification",
+                    "clarification_id": clarification_id,
+                    "question": "How many shares?",
+                    "expected_answer": {
+                        "type": "integer",
+                        "field": "quantity",
+                        "label": "Number of shares",
+                        "minimum": 1,
+                    },
                 },
-            },
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-    ).status_code == 200
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).status_code
+        == 200
+    )
 
     response = client.post(
         "/api/resume-task",
@@ -286,26 +299,29 @@ def test_clarification_resume_rejects_invalid_choice_before_agentic(mock_post):
     accepted = client.post(
         "/api/submit-task", json={"natural_language_request": "Select an account"}
     ).json()
-    assert webhook(
-        {
-            "task_id": accepted["task_id"],
-            "request_id": accepted["request_id"],
-            "session_id": session["session_id"],
-            "event_type": "input_needed",
-            "user_safe_summary": "Which account?",
-            "details": {
-                "kind": "clarification",
-                "clarification_id": str(uuid4()),
-                "question": "Which account?",
-                "expected_answer": {
-                    "type": "string",
-                    "field": "account",
-                    "enum": ["Checking", "Savings"],
+    assert (
+        webhook(
+            {
+                "task_id": accepted["task_id"],
+                "request_id": accepted["request_id"],
+                "session_id": session["session_id"],
+                "event_type": "input_needed",
+                "user_safe_summary": "Which account?",
+                "details": {
+                    "kind": "clarification",
+                    "clarification_id": str(uuid4()),
+                    "question": "Which account?",
+                    "expected_answer": {
+                        "type": "string",
+                        "field": "account",
+                        "enum": ["Checking", "Savings"],
+                    },
                 },
-            },
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-    ).status_code == 200
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).status_code
+        == 200
+    )
 
     response = client.post(
         "/api/resume-task",
@@ -518,6 +534,34 @@ def test_webhook_is_deduplicated_and_rejects_stale_signatures(mock_post):
     assert webhook(event).json()["status"] == "received"
     assert webhook(event).json()["status"] == "duplicate"
     assert webhook(event, timestamp=1).status_code == 401
+
+
+@patch("app.main._agentic_post", new_callable=AsyncMock)
+def test_latest_task_event_replays_only_the_current_sessions_event(mock_post):
+    session = create_session()
+
+    async def respond(_url, payload):
+        return accepted_response(payload)
+
+    mock_post.side_effect = respond
+    accepted = client.post(
+        "/api/submit-task", json={"natural_language_request": "Show balance"}
+    ).json()
+    event = {
+        "task_id": accepted["task_id"],
+        "request_id": accepted["request_id"],
+        "session_id": session["session_id"],
+        "event_type": "completed",
+        "user_safe_summary": "Done",
+        "details": {},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    assert webhook(event).status_code == 200
+    replay = client.get(f"/api/tasks/{accepted['task_id']}/latest-event")
+
+    assert replay.status_code == 200
+    assert replay.json()["event"]["event_type"] == "completed"
+    assert TestClient(app).get(f"/api/tasks/{accepted['task_id']}/latest-event").status_code == 401
 
 
 @patch("app.main._agentic_post", new_callable=AsyncMock)

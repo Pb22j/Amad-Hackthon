@@ -24,7 +24,6 @@ export function NetWorthCard({ className }: { className?: string }) {
       <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2">
         <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
           {t("aggregatedFunds")}
-          <span className="mx-1.5 font-mono text-faint" dir="ltr">[cite: {netWorth.cite}]</span>
         </p>
         <span className="inline-flex items-center gap-1 rounded-full bg-positive/10 px-2 py-0.5 text-xs font-medium text-positive" dir="ltr">
           <TrendingUp className="size-3" aria-hidden />

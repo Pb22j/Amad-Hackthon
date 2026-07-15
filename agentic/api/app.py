@@ -40,6 +40,7 @@ from agentic.security.rate_limit import RateLimitError
 from agentic.telemetry.events import InMemoryEventPublisher, WebhookEventPublisher
 from agentic.telemetry.logging import configure_logging
 from agentic.tools.metadata import ToolMetadata
+from agentic.tools.guard import ToolGuardError
 from agentic.tools.provider import load_tool_bundle
 
 
@@ -233,6 +234,12 @@ def create_app(
             await service_instance.resume(task_id, payload)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ToolGuardError:
+            # The service has already persisted a terminal failed state and
+            # delivered its user-safe event. A resume remains accepted from the
+            # interaction layer's perspective; surfacing the internal guard as
+            # a 500/502 only creates a duplicate, misleading transport failure.
+            pass
         return Response(status_code=status.HTTP_202_ACCEPTED)
 
     @app.post(

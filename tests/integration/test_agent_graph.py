@@ -573,9 +573,7 @@ async def test_financial_action_interrupts_for_exact_confirmation(database, app_
 
 @pytest.mark.integration
 @pytest.mark.security
-async def test_financial_action_separates_clarification_from_confirmation(
-    database, app_config
-):
+async def test_financial_action_separates_clarification_from_confirmation(database, app_config):
     await add_task(database)
     observed = []
 
@@ -654,7 +652,7 @@ async def test_financial_action_separates_clarification_from_confirmation(
     assert clarification_payload["kind"] == "clarification"
     assert clarification_payload["expected_answer"]["field"] == "destination"
 
-    context.explicit_user_values = ("Yousef",)
+    context.explicit_user_field_values = {"destination": ("Yousef",)}
     context.resuming_from_clarification = True
     confirmation = await graph.ainvoke(
         Command(resume="Yousef"), config=graph_config, context=context
@@ -671,9 +669,7 @@ async def test_financial_action_separates_clarification_from_confirmation(
         arguments=clarified_arguments,
     )
     context.otp_verified = True
-    result = await graph.ainvoke(
-        Command(resume=token), config=graph_config, context=context
-    )
+    result = await graph.ainvoke(Command(resume=token), config=graph_config, context=context)
 
     assert observed == [clarified_arguments]
     assert result["final_report"]["receipt_ids"] == ["receipt-1"]

@@ -120,6 +120,11 @@ async def secure_http_boundary(request: Request, call_next: Any) -> Response:
     if request.url.path.startswith("/api/") and request.url.path not in {
         "/api/health",
         "/api/config",
+        # Agent events are authenticated with an HMAC signature and must not
+        # compete with browser traffic for the per-client bucket. Otherwise a
+        # normal task consumes the user's quota again for every event and can
+        # strand the UI without its clarification or terminal result.
+        "/api/webhook",
     }:
         client_ip = request.client.host if request.client else "unknown"
         if not limiter.is_allowed(client_ip):
@@ -315,6 +320,37 @@ async def create_session(payload: SessionRequest, response: Response) -> Session
         language=session.language,
         expires_at=session.expires_at,
     )
+
+
+@app.get("/api/active-task")
+async def get_active_task(request: Request) -> dict[str, Any]:
+    """Return only the current session's resumable task for UI recovery."""
+
+    session = require_session(request)
+    task = interaction_store.get_active_task(session_id=session.session_id)
+    if task is None:
+        return {"active_task": None}
+    return {
+        "active_task": {
+            "task_id": task.task_id,
+            "request_id": task.request_id,
+            "status": task.status,
+            "pending_event": task.pending_event,
+        }
+    }
+
+
+@app.get("/api/tasks/{task_id}/latest-event")
+async def get_latest_task_event(task_id: str, request: Request) -> dict[str, Any]:
+    """Replay a durable task event when a browser WebSocket frame was missed."""
+
+    session = require_session(request)
+    task = interaction_store.get_task(task_id=task_id, session_id=session.session_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found in this session")
+    return {
+        "event": interaction_store.latest_task_event(task_id=task_id, session_id=session.session_id)
+    }
 
 
 @app.post("/api/realtime-token")

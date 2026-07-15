@@ -7,6 +7,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from agentic.agent.graph import build_financial_agent
 from agentic.agent.service import AgentService
 from agentic.api.app import create_app
+from agentic.tools.guard import ToolGuardError
 from agentic.api.schemas import TaskStatus, TaskStatusResponse
 from agentic.policy.models import Intent
 from agentic.security.confirmation import ConfirmationSigner
@@ -53,9 +54,7 @@ def test_agentic_request_is_accepted(database, app_config, agentic_request):
     service = make_service(database, app_config)
     app = create_app(service=service, config=app_config)
     with TestClient(app) as client:
-        response = client.post(
-            "/agentic/request", content=agentic_request.model_dump_json()
-        )
+        response = client.post("/agentic/request", content=agentic_request.model_dump_json())
     assert response.status_code == 202
     assert response.json()["status"] == "accepted"
 
@@ -182,9 +181,7 @@ def test_resume_endpoint_success_and_validation_error(app_config, agentic_reques
         "otp_code": "1111",
     }
     with TestClient(app) as client:
-        accepted = client.post(
-            f"/agentic/tasks/{agentic_request.request_id}/resume", json=payload
-        )
+        accepted = client.post(f"/agentic/tasks/{agentic_request.request_id}/resume", json=payload)
         invalid = client.post(
             f"/agentic/tasks/{agentic_request.request_id}/resume",
             json=payload | {"answer": "also supplied"},
@@ -192,6 +189,22 @@ def test_resume_endpoint_success_and_validation_error(app_config, agentic_reques
     assert accepted.status_code == 202
     assert service.resumed
     assert invalid.status_code == 409
+
+
+def test_resume_endpoint_accepts_already_reported_guard_failure(app_config, agentic_request):
+    service = StubService(app_config, error=ToolGuardError("internal guard detail"))
+    app = create_app(service=service, config=app_config)
+    payload = {
+        "request_id": str(agentic_request.request_id),
+        "session_id": str(agentic_request.session_id),
+        "user_id": agentic_request.user_id,
+        "tenant_id": agentic_request.tenant_id,
+        "authorization_token": "token",
+        "otp_code": "1111",
+    }
+    with TestClient(app) as client:
+        response = client.post(f"/agentic/tasks/{agentic_request.request_id}/resume", json=payload)
+    assert response.status_code == 202
 
 
 def test_safe_error_handlers(app_config, agentic_request):
@@ -284,9 +297,7 @@ def test_non_production_evaluation_status_endpoint(app_config, agentic_request):
         "tenant_id": agentic_request.tenant_id,
     }
     with TestClient(app) as client:
-        response = client.post(
-            f"/agentic/tasks/{agentic_request.request_id}/status", json=payload
-        )
+        response = client.post(f"/agentic/tasks/{agentic_request.request_id}/status", json=payload)
 
     assert response.status_code == 200
     assert response.json()["status"] == "completed"

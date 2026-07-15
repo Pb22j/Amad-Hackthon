@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import { Bell } from "lucide-react";
 
 import { BrandLogo } from "@/components/nafi/brand-logo";
@@ -9,6 +10,26 @@ import { useLang } from "@/lib/i18n";
 
 export function TopHeader() {
   const { t, lang } = useLang();
+  const [notificationsOpen, setNotificationsOpen] = React.useState(false);
+  const notificationsRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    function dismiss(event: MouseEvent) {
+      if (!notificationsRef.current?.contains(event.target as Node)) {
+        setNotificationsOpen(false);
+      }
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setNotificationsOpen(false);
+    }
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
   return (
     <header className="flex items-center justify-between">
       <div className="flex items-center gap-2.5">
@@ -18,14 +39,29 @@ export function TopHeader() {
 
       <div className="flex items-center gap-2.5">
         <LanguageToggle />
-        <button
-          type="button"
-          aria-label={t("notifications")}
-          className="relative grid size-9 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <Bell className="size-4" aria-hidden />
-          <span className="absolute end-2 top-2 size-1.5 rounded-full bg-orange" />
-        </button>
+        <div ref={notificationsRef} className="relative">
+          <button
+            type="button"
+            aria-label={t("notifications")}
+            aria-expanded={notificationsOpen}
+            aria-haspopup="true"
+            onClick={() => setNotificationsOpen((open) => !open)}
+            className="relative grid size-9 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <Bell className="size-4" aria-hidden />
+            {!notificationsOpen && (
+              <span className="absolute end-2 top-2 size-1.5 rounded-full bg-orange" />
+            )}
+          </button>
+          {notificationsOpen && (
+            <div
+              role="status"
+              className="absolute end-0 top-11 z-40 w-56 rounded-xl border border-white/10 bg-card px-4 py-3 text-xs text-muted-foreground shadow-xl"
+            >
+              {t("noNotifications")}
+            </div>
+          )}
+        </div>
         <UserMenu />
       </div>
     </header>

@@ -17,7 +17,12 @@ import {
 
 import { cn } from "@/lib/utils";
 import { useLang } from "@/lib/i18n";
-import { nafeaPost, nafeaWebSocketUrl } from "@/lib/nafea-api";
+import {
+  NafeaApiError,
+  nafeaPost,
+  nafeaRequest,
+  nafeaWebSocketUrl,
+} from "@/lib/nafea-api";
 import { BrandLogo } from "@/components/nafi/brand-logo";
 import { LanguageToggle } from "@/components/i18n/language-toggle";
 
@@ -51,6 +56,15 @@ type AcceptedTask = {
   task_id: string;
   status: "accepted" | "rejected";
   user_safe_message?: string;
+};
+
+type ActiveTaskResponse = {
+  active_task: {
+    task_id: string;
+    request_id: string;
+    status: string;
+    pending_event: unknown;
+  } | null;
 };
 
 type RealtimeConnection = {
@@ -177,6 +191,13 @@ function newRequestKey(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
+function normalizeDecimalDigits(value: string): string {
+  return value.replace(/[٠-٩۰-۹]/g, (digit) => {
+    const code = digit.charCodeAt(0);
+    return String(code >= 0x06f0 ? code - 0x06f0 : code - 0x0660);
+  });
+}
+
 function eventText(event: AgentEvent): string {
   if (event.event_type === "input_needed") {
     const question = event.details.question;
@@ -189,7 +210,7 @@ function eventText(event: AgentEvent): string {
   return event.user_safe_summary;
 }
 
-function clarificationSchema(event: AgentEvent): ClarificationSchema {
+function clarificationSchema(event: AgentEvent, t: Translate): ClarificationSchema {
   const schema = record(event.details.expected_answer);
   const rawType = schema?.type;
   const type =
@@ -198,9 +219,10 @@ function clarificationSchema(event: AgentEvent): ClarificationSchema {
       : "string";
   const rawField = typeof schema?.field === "string" ? schema.field : "answer";
   const label =
-    typeof schema?.label === "string"
+    knownArgumentLabel(rawField, t) ??
+    (typeof schema?.label === "string"
       ? schema.label
-      : rawField.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+      : rawField.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()));
   const choices = Array.isArray(schema?.enum)
     ? schema.enum.filter(
         (value): value is string | number | boolean =>
@@ -254,15 +276,32 @@ function safeArguments(details: Record<string, unknown>): Array<[string, string]
     });
 }
 
-function argumentLabel(key: string, t: Translate): string {
+function knownArgumentLabel(key: string, t: Translate): string | undefined {
   const labels: Record<string, string> = {
+    account_reference: t("accountReference"),
+    biller: t("biller"),
+    benefit_account_number: t("beneficiaryAccountNumber"),
+    beneficiary_short_name: t("shortName"),
+    full_name_of_benefit_account: t("beneficiaryFullName"),
     symbol: t("investmentSymbol"),
     quantity: t("quantity"),
     amount: t("amount"),
     destination: t("destination"),
-    destination_account: t("destination"),
+    destination_account: t("destinationAccount"),
+    gift_message: t("giftMessage"),
+    last_four_digits: t("lastFourDigits"),
+    name: t("name"),
+    participants: t("participants"),
+    qatta_name: t("qattaName"),
+    recipient: t("recipient"),
+    short_name: t("shortName"),
+    total_amount: t("totalAmount"),
   };
-  return labels[key] ?? key.replaceAll("_", " ");
+  return labels[key];
+}
+
+function argumentLabel(key: string, t: Translate): string {
+  return knownArgumentLabel(key, t) ?? key.replaceAll("_", " ");
 }
 
 function reportMetadata(event: AgentEvent): { warnings: string[]; receipts: string[] } {
@@ -537,6 +576,59 @@ export function ChatScreen() {
       if (requestId === event.request_id) processEventRef.current?.(event);
       else queuedEventsRef.current.push(event);
     }
+    void pollTaskUntilActionable(accepted);
+  }
+
+  async function pollTaskUntilActionable(accepted: AcceptedTask) {
+    // WebSockets provide the fast path. Durable polling closes the race where
+    // a reconnect or language switch misses the terminal frame and would
+    // otherwise leave the composer disabled forever.
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      if (currentTaskIdRef.current !== accepted.task_id) return;
+      try {
+        const replay = await nafeaRequest<{ event: unknown }>(
+          `/api/tasks/${encodeURIComponent(accepted.task_id)}/latest-event`
+        );
+        if (!isAgentEvent(replay.event) || replay.event.request_id !== accepted.request_id) {
+          continue;
+        }
+        processEventRef.current?.(replay.event);
+        if (
+          TERMINAL_EVENTS.has(replay.event.event_type) ||
+          replay.event.event_type === "input_needed" ||
+          replay.event.event_type === "confirmation_needed"
+        ) {
+          return;
+        }
+      } catch {
+        // The socket can still complete the task; retry within the bounded window.
+      }
+    }
+  }
+
+  function restoreActiveTask(task: NonNullable<ActiveTaskResponse["active_task"]>) {
+    knownTasksRef.current.set(task.task_id, task.request_id);
+    currentTaskIdRef.current = task.task_id;
+    setActiveTaskId(task.task_id);
+    if (isAgentEvent(task.pending_event)) {
+      processEventRef.current?.(task.pending_event);
+      return;
+    }
+    setMessages((current) =>
+      current.some((message) => message.taskId === task.task_id)
+        ? current
+        : [
+            ...current,
+            {
+              id: nextMessageId(),
+              role: "nafi",
+              text: t("chatThinking"),
+              taskId: task.task_id,
+              pending: true,
+            },
+          ]
+    );
   }
 
   async function submitFinancialTask(
@@ -820,18 +912,23 @@ export function ChatScreen() {
     }
 
     function connectSession() {
-      void bootstrapSession(lang).then((session) => {
-        if (disposed) return;
-        sessionIdRef.current = session.session_id;
-        setErrorMessage("");
-        connectEvents();
-      }).catch(() => {
-        if (disposed) return;
-        if (sessionBootstrap?.language === lang) sessionBootstrap = undefined;
-        setSessionStatus("offline");
-        setErrorMessage(t("sessionError"));
-        reconnectTimer = setTimeout(connectSession, 1_500);
-      });
+      void bootstrapSession(lang)
+        .then(async (session) => {
+          if (disposed) return;
+          sessionIdRef.current = session.session_id;
+          const recovered = await nafeaRequest<ActiveTaskResponse>("/api/active-task");
+          if (disposed) return;
+          if (recovered.active_task) restoreActiveTask(recovered.active_task);
+          setErrorMessage("");
+          connectEvents();
+        })
+        .catch(() => {
+          if (disposed) return;
+          if (sessionBootstrap?.language === lang) sessionBootstrap = undefined;
+          setSessionStatus("offline");
+          setErrorMessage(t("sessionError"));
+          reconnectTimer = setTimeout(connectSession, 1_500);
+        });
     }
 
     connectSession();
@@ -877,7 +974,13 @@ export function ChatScreen() {
       setMessages((current) =>
         current.filter((message) => message.id !== optimisticMessageId)
       );
-      setErrorMessage(error instanceof Error ? error.message : t("requestError"));
+      setErrorMessage(
+        error instanceof NafeaApiError && error.status >= 500
+          ? t("requestError")
+          : error instanceof Error
+            ? error.message
+            : t("requestError")
+      );
     } finally {
       setSubmitting(false);
     }
@@ -887,25 +990,43 @@ export function ChatScreen() {
     const clarification = pendingEventRef.current;
     if (clarification?.event_type !== "input_needed" || submitting) return;
     const displayAnswer = typeof answer === "boolean" ? (answer ? t("yes") : t("no")) : String(answer);
+    const answerMessageId = nextMessageId();
     setSubmitting(true);
     setErrorMessage("");
+    clearPendingIfCurrent(clarification);
+    setMessages((current) => [
+      ...current.map((message) =>
+        message.taskId === clarification.task_id &&
+        message.event?.details.clarification_id === clarification.details.clarification_id
+          ? { ...message, taskId: undefined }
+          : message
+      ),
+      { id: answerMessageId, role: "user", text: displayAnswer },
+    ]);
     try {
       await nafeaPost("/api/resume-task", {
         task_id: clarification.task_id,
         user_answer: answer,
       });
-      setMessages((current) => [
-        ...current.map((message) =>
-          message.taskId === clarification.task_id &&
-          message.event?.details.clarification_id === clarification.details.clarification_id
-            ? { ...message, text: t("answerRecorded") }
-            : message
-        ),
-        { id: nextMessageId(), role: "user", text: displayAnswer },
-      ]);
-      clearPendingIfCurrent(clarification);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : t("requestError"));
+      setMessages((current) =>
+        current
+          .filter((message) => message.id !== answerMessageId)
+          .map((message) =>
+            !message.taskId &&
+            message.event?.details.clarification_id === clarification.details.clarification_id
+              ? { ...message, taskId: clarification.task_id }
+              : message
+          )
+      );
+      setPending(clarification);
+      setErrorMessage(
+        error instanceof NafeaApiError && error.status >= 500
+          ? t("requestError")
+          : error instanceof Error
+            ? error.message
+            : t("requestError")
+      );
     } finally {
       setSubmitting(false);
     }
@@ -922,16 +1043,25 @@ export function ChatScreen() {
         approved,
         ...(approved ? { otp_code: confirmationOtp } : {}),
       });
-      setPending(null);
+      clearPendingIfCurrent(confirmation);
       setMessages((current) =>
         current.map((message) =>
-          message.taskId === confirmation.task_id
-            ? { ...message, text: t("decisionRecorded") }
+          message.taskId === confirmation.task_id &&
+          message.event?.event_type === "confirmation_needed"
+            ? { ...message, text: t("decisionRecorded"), event: undefined, pending: false }
             : message
         )
       );
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : t("requestError"));
+      setErrorMessage(
+        error instanceof NafeaApiError && error.status === 403
+          ? t("invalidOtp")
+          : error instanceof NafeaApiError
+            ? t("requestError")
+            : error instanceof Error
+            ? error.message
+            : t("requestError")
+      );
     } finally {
       setSubmitting(false);
     }
@@ -1000,7 +1130,7 @@ export function ChatScreen() {
             message.taskId === pendingEvent.task_id
               ? pendingEvent
               : null;
-          const answerSchema = clarification ? clarificationSchema(clarification) : null;
+          const answerSchema = clarification ? clarificationSchema(clarification, t) : null;
           return (
             <div
               key={message.id}
@@ -1178,7 +1308,9 @@ export function ChatScreen() {
                       maxLength={4}
                       value={confirmationOtp}
                       onChange={(event) =>
-                        setConfirmationOtp(event.target.value.replace(/\D/g, "").slice(0, 4))
+                        setConfirmationOtp(
+                          normalizeDecimalDigits(event.target.value).replace(/\D/g, "").slice(0, 4)
+                        )
                       }
                       className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 font-mono outline-none focus:border-primary/50"
                     />

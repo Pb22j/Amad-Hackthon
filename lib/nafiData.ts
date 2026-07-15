@@ -1,6 +1,6 @@
 /**
  * Mock data for the Nafi bento dashboard.
- * Every user-facing string carries an EN + AR pair. Amounts are illustrative (USD).
+ * Every user-facing string carries an EN + AR pair. Amounts are illustrative (SAR).
  */
 
 export type BankId =

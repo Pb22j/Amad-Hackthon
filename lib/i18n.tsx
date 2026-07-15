@@ -12,8 +12,12 @@ const en: Dict = {
   aggregatedFunds: "Aggregated Funds",
   asOf: "as of",
   connectedBanks: "Connected Banks",
+  dashboardDataNotice:
+    "Illustrative dashboard snapshot — ask Nafi for current balances, transactions, and portfolio data.",
   integratedServices: "Integrated Bank Services",
   scanAll: "Scan all",
+  scanComplete: "All demo bank connections are up to date.",
+  noNotifications: "No new notifications.",
   portfolio: "My Stock Portfolio",
   privateIndex: "Private index",
   today: "Today",
@@ -88,6 +92,7 @@ const en: Dict = {
   approve: "Approve exact action",
   reject: "Reject",
   decisionRecorded: "Your decision was recorded securely.",
+  invalidOtp: "That demo OTP is invalid. Try again or reject the action.",
   answerRecorded: "Your answer was sent securely.",
   missingInformationTitle: "Information needed",
   missingInformationHint: "This answer goes securely to the active request.",
@@ -99,6 +104,19 @@ const en: Dict = {
   quantity: "Quantity",
   amount: "Amount",
   destination: "Destination",
+  accountReference: "Account reference",
+  biller: "Biller",
+  beneficiaryAccountNumber: "Beneficiary account number",
+  beneficiaryFullName: "Beneficiary full name",
+  destinationAccount: "Destination account",
+  giftMessage: "Gift message",
+  lastFourDigits: "Last four digits",
+  name: "Name",
+  participants: "Participants",
+  qattaName: "Qatta name",
+  recipient: "Recipient",
+  shortName: "Short name",
+  totalAmount: "Total amount",
   receipts: "Receipts",
   warnings: "Warnings",
   unsafeClarification: "Nafi blocked a clarification that requested sensitive credentials.",
@@ -113,8 +131,12 @@ const ar: Dict = {
   aggregatedFunds: "إجمالي الأموال",
   asOf: "كما في",
   connectedBanks: "البنوك المرتبطة",
+  dashboardDataNotice:
+    "بيانات اللوحة توضيحية — اسأل نافع عن الأرصدة والعمليات والمحفظة الحالية.",
   integratedServices: "الخدمات المصرفية المدمجة",
   scanAll: "مسح الكل",
+  scanComplete: "جميع اتصالات البنوك التجريبية محدّثة.",
+  noNotifications: "لا توجد إشعارات جديدة.",
   portfolio: "محفظتي للأسهم",
   privateIndex: "مؤشر خاص",
   today: "اليوم",
@@ -189,6 +211,7 @@ const ar: Dict = {
   approve: "الموافقة على العملية",
   reject: "رفض",
   decisionRecorded: "تم تسجيل قرارك بأمان.",
+  invalidOtp: "رمز العرض التجريبي غير صحيح. حاول مجدداً أو ارفض العملية.",
   answerRecorded: "تم إرسال إجابتك بأمان.",
   missingInformationTitle: "معلومات مطلوبة",
   missingInformationHint: "ستُرسل هذه الإجابة بأمان إلى الطلب الحالي.",
@@ -200,6 +223,19 @@ const ar: Dict = {
   quantity: "الكمية",
   amount: "المبلغ",
   destination: "الوجهة",
+  accountReference: "مرجع الحساب",
+  biller: "مقدم الخدمة",
+  beneficiaryAccountNumber: "رقم حساب المستفيد",
+  beneficiaryFullName: "اسم المستفيد الكامل",
+  destinationAccount: "الحساب المستلم",
+  giftMessage: "رسالة الهدية",
+  lastFourDigits: "آخر أربعة أرقام",
+  name: "الاسم",
+  participants: "المشاركون",
+  qattaName: "اسم القطة",
+  recipient: "المستلم",
+  shortName: "الاسم المختصر",
+  totalAmount: "المبلغ الإجمالي",
   receipts: "الإيصالات",
   warnings: "تنبيهات",
   unsafeClarification: "حظر نافع سؤالاً طلب بيانات اعتماد حساسة.",
@@ -209,6 +245,24 @@ const ar: Dict = {
 };
 
 const DICTS: Record<Lang, Dict> = { en, ar };
+const LANGUAGE_STORAGE_KEY = "nafi.language";
+
+function readStoredLanguage(): Lang | null {
+  try {
+    const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
+    return stored === "ar" || stored === "en" ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeLanguage(lang: Lang) {
+  try {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, lang);
+  } catch {
+    // Storage can be unavailable in private/sandboxed browser contexts.
+  }
+}
 
 type Ctx = {
   lang: Lang;
@@ -221,8 +275,18 @@ type Ctx = {
 const LanguageContext = React.createContext<Ctx | null>(null);
 
 export function LanguageProvider({ children }: { children: React.ReactNode }) {
-  const [lang, setLang] = React.useState<Lang>("en");
+  const [lang, setLangState] = React.useState<Lang>("en");
   const dir = lang === "ar" ? "rtl" : "ltr";
+
+  React.useEffect(() => {
+    const stored = readStoredLanguage();
+    if (stored) setLangState(stored);
+  }, []);
+
+  const setLang = React.useCallback((next: Lang) => {
+    storeLanguage(next);
+    setLangState(next);
+  }, []);
 
   React.useEffect(() => {
     const html = document.documentElement;
@@ -242,7 +306,7 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
         return s;
       },
     }),
-    [lang, dir]
+    [lang, dir, setLang]
   );
 
   return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>;
@@ -254,13 +318,18 @@ export function useLang() {
   return ctx;
 }
 
-/** Localized formatters. Money keeps a leading "$" with locale-grouped digits. */
+/** Localized formatters for the Saudi financial demo. */
 export function useFormat() {
   const { locale } = useLang();
   return React.useMemo(
     () => ({
       money: (n: number) =>
-        "$" + new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(n),
+        new Intl.NumberFormat(locale, {
+          style: "currency",
+          currency: "SAR",
+          currencyDisplay: "narrowSymbol",
+          maximumFractionDigits: 0,
+        }).format(n),
       num: (n: number) => new Intl.NumberFormat(locale).format(n),
       pct: (n: number) =>
         (n >= 0 ? "+" : "") + new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(n) + "%",

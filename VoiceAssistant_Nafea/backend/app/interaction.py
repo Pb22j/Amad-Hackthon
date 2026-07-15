@@ -577,6 +577,24 @@ class InteractionStore:
                 self._close(connection)
         return [json.loads(row["payload_json"]) for row in reversed(rows)]
 
+    def latest_task_event(self, *, task_id: str, session_id: str) -> dict[str, Any] | None:
+        """Return the newest durable event for one task in its owning session."""
+
+        with self._lock:
+            connection = self._connect()
+            try:
+                row = connection.execute(
+                    """
+                    SELECT payload_json FROM interaction_events
+                    WHERE task_id = %s AND session_id = %s
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (task_id, session_id),
+                ).fetchone()
+            finally:
+                self._close(connection)
+        return json.loads(row["payload_json"]) if row is not None else None
+
     @staticmethod
     def _memory_text_is_safe(text: str) -> bool:
         forbidden = re.compile(

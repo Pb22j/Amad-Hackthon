@@ -29,7 +29,10 @@ from agentic.tools.qatta import (
     list_qatta_bills,
     pay_qatta_bill,
 )
-from agentic.tools.transfer_between_accounts import transfer_between_accounts
+from agentic.tools.transfer_between_accounts import (
+    preflight_transfer_between_accounts,
+    transfer_between_accounts,
+)
 from agentic.tools.runtime_identity import bind_tool_identity
 
 # Seeded fixture accounts (see agentic/tools/bank_db.py).
@@ -258,6 +261,32 @@ async def test_transfer_rejects_unregistered_destination():
     )
     assert result.status == "failed"
     assert result.error_code == "beneficiary_not_found"
+    assert result.receipt_id is None
+
+
+async def test_transfer_preflight_rejects_ineligible_action_without_mutation():
+    before = _validated(await get_balance())
+    result = _validated(
+        await preflight_transfer_between_accounts(
+            destination_account=MOHAMMED_ACCOUNT, amount=Decimal("50.00")
+        )
+    )
+    after = _validated(await get_balance())
+
+    assert result.status == "failed"
+    assert result.error_code == "beneficiary_not_found"
+    assert result.receipt_id is None
+    assert after.data["balance_sar"] == before.data["balance_sar"]
+
+
+async def test_transfer_preflight_accepts_existing_active_beneficiary():
+    result = _validated(
+        await preflight_transfer_between_accounts(
+            destination_account="لطيفة", amount=Decimal("1.00")
+        )
+    )
+
+    assert result.status == "completed"
     assert result.receipt_id is None
 
 

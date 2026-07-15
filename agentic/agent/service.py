@@ -64,7 +64,9 @@ _NUMBER_TOKEN = re.compile(r"(?<!\w)[+-]?\d[\d,]*(?:\.\d+)?")
 
 
 def _numbers_in(value: Any) -> set[Decimal]:
-    rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    rendered = (
+        value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    )
     numbers: set[Decimal] = set()
     for token in _NUMBER_TOKEN.findall(rendered):
         try:
@@ -168,14 +170,10 @@ class AgentService:
                 sanitized_request, request_fingerprint=request_fingerprint
             )
         except Exception:
-            await self.rate_limiter.release(
-                tenant_id=request.tenant_id, user_id=request.user_id
-            )
+            await self.rate_limiter.release(tenant_id=request.tenant_id, user_id=request.user_id)
             raise
         if not should_run:
-            await self.rate_limiter.release(
-                tenant_id=request.tenant_id, user_id=request.user_id
-            )
+            await self.rate_limiter.release(tenant_id=request.tenant_id, user_id=request.user_id)
             return accepted
         if background:
             task_handle = asyncio.create_task(
@@ -241,16 +239,16 @@ class AgentService:
         try:
             await self._run_new(task_id, request)
         finally:
-            await self.rate_limiter.release(
-                tenant_id=request.tenant_id, user_id=request.user_id
-            )
+            await self.rate_limiter.release(tenant_id=request.tenant_id, user_id=request.user_id)
 
     async def _run_new(self, task_id: str, request: AgenticRequest) -> None:
         """Build trusted graph context and invoke a newly accepted task once."""
 
         async with self.database.session() as session:
             repository = TaskRepository(session)
-            row = await repository.get(task_id, tenant_id=request.tenant_id, user_id=request.user_id)
+            row = await repository.get(
+                task_id, tenant_id=request.tenant_id, user_id=request.user_id
+            )
             if row is None:
                 raise LookupError("task not found")
             if TaskStatus(row.status) != TaskStatus.RECEIVED:
@@ -266,7 +264,12 @@ class AgentService:
             language=request.language,
             request=request.natural_language_request,
             context=(
-                [{"type": "interaction_summary", "text": request.metadata.conversation_context_summary}]
+                [
+                    {
+                        "type": "interaction_summary",
+                        "text": request.metadata.conversation_context_summary,
+                    }
+                ]
                 if request.metadata.conversation_context_summary
                 else []
             ),
@@ -302,9 +305,7 @@ class AgentService:
                 max_items_per_session=self.config.limits.memory.max_items_per_session,
                 max_items_per_type=self.config.limits.memory.max_items_per_type,
                 max_value_characters=self.config.limits.memory.max_value_characters,
-            ).list_for_session(
-                auth=auth, limit=self.config.limits.memory.recent_messages
-            )
+            ).list_for_session(auth=auth, limit=self.config.limits.memory.recent_messages)
         state["relevant_context"].extend(
             {
                 "type": item.memory_type,
@@ -334,9 +335,7 @@ class AgentService:
         try:
             await self._resume(task_id, request)
         finally:
-            await self.rate_limiter.release(
-                tenant_id=request.tenant_id, user_id=request.user_id
-            )
+            await self.rate_limiter.release(tenant_id=request.tenant_id, user_id=request.user_id)
 
     async def _resume(self, task_id: UUID, request: ResumeTaskRequest) -> None:
         task_id_str = str(task_id)
@@ -386,14 +385,14 @@ class AgentService:
                     rejection_outbox_id = outbox.id
                     rejection_language = row.language
                     resume_value = None
-                    explicit_user_values = ()
+                    explicit_user_field_values = {}
                     original = None
                 else:
                     if not self._valid_demo_otp(request.otp_code):
                         raise PermissionError("invalid confirmation OTP")
                     resume_value = request.authorization_token
             if rejection_outbox_id is None:
-                explicit_user_values = await clarifications.answered_values(task_id_str)
+                explicit_user_field_values = await clarifications.answered_field_values(task_id_str)
                 await repository.transition(row, TaskStatus.RUNNING)
                 original = AgenticRequest(
                     request_id=UUID(row.request_id),
@@ -431,7 +430,7 @@ class AgentService:
             confirmation_signer=self.confirmation_signer,
             otp_verified=request.authorization_token is not None,
             original_request=original.natural_language_request,
-            explicit_user_values=explicit_user_values,
+            explicit_user_field_values=explicit_user_field_values,
             resuming_from_clarification=request.clarification_id is not None,
         )
         await self._invoke(
@@ -561,7 +560,9 @@ class AgentService:
                     expires_in_seconds=payload["expires_in_seconds"],
                 )
             repository = TaskRepository(session)
-            row = await repository.get(task_id, tenant_id=request.tenant_id, user_id=request.user_id)
+            row = await repository.get(
+                task_id, tenant_id=request.tenant_id, user_id=request.user_id
+            )
             if row is None:
                 raise LookupError("task not found")
             await repository.transition(row, target, payload=payload)
@@ -674,7 +675,9 @@ class AgentService:
         }[target]
         async with self.database.session() as session:
             repository = TaskRepository(session)
-            row = await repository.get(task_id, tenant_id=request.tenant_id, user_id=request.user_id)
+            row = await repository.get(
+                task_id, tenant_id=request.tenant_id, user_id=request.user_id
+            )
             if row is None:
                 raise LookupError("task not found")
             row.final_report = report.model_dump(mode="json")
@@ -697,13 +700,13 @@ class AgentService:
         if target in {TaskStatus.COMPLETED, TaskStatus.PARTIALLY_COMPLETED}:
             await self._extract_memories(request, task_id)
 
-    async def _record_failure(
-        self, task_id: str, request: AgenticRequest, error_code: str
-    ) -> None:
+    async def _record_failure(self, task_id: str, request: AgenticRequest, error_code: str) -> None:
         outbox_id: str | None = None
         async with self.database.session() as session:
             repository = TaskRepository(session)
-            row = await repository.get(task_id, tenant_id=request.tenant_id, user_id=request.user_id)
+            row = await repository.get(
+                task_id, tenant_id=request.tenant_id, user_id=request.user_id
+            )
             if row is not None and TaskStatus(row.status) not in {
                 TaskStatus.COMPLETED,
                 TaskStatus.PARTIALLY_COMPLETED,

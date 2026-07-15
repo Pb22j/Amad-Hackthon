@@ -80,3 +80,21 @@ class ClarificationRepository:
             .order_by(ClarificationRow.answered_at)
         )
         return tuple(await self.session.scalars(statement))
+
+    async def answered_field_values(self, task_id: str) -> dict[str, tuple[Any, ...]]:
+        """Return authenticated clarification answers bound to their requested field."""
+
+        statement = (
+            select(ClarificationRow.expected_answer, ClarificationRow.answer)
+            .where(
+                ClarificationRow.task_id == task_id,
+                ClarificationRow.status == "answered",
+            )
+            .order_by(ClarificationRow.answered_at)
+        )
+        values: dict[str, list[Any]] = {}
+        for expected_answer, answer in await self.session.execute(statement):
+            field_name = expected_answer.get("field") if isinstance(expected_answer, dict) else None
+            if isinstance(field_name, str) and field_name:
+                values.setdefault(field_name, []).append(answer)
+        return {name: tuple(answers) for name, answers in values.items()}
