@@ -11,20 +11,26 @@ tools:
     max_calls_per_task: 2
   list_beneficiaries:
     risk: sensitive_read
-    intents: [beneficiary_management, money_transfer]
+    intents: [beneficiary_management, saved_beneficiary_transfer, money_transfer]
     required_scopes: [financial:read]
     requires_owner_metadata: true
-    max_calls_per_task: 3
+    max_calls_per_task: 5
   transfer_between_accounts:
-    risk: financial_action
-    intents: [money_transfer]
-    explicit_user_fields: [destination_account, amount]
+    # Hackathon demo mode: execute an eligible transfer immediately. The bank
+    # tool still enforces authenticated ownership, active-beneficiary status,
+    # balance, daily limit, atomic ledger updates, and an authoritative receipt.
+    risk: write
+    intents: [saved_beneficiary_transfer, money_transfer]
+    # Hackathon UX: the model may resolve a user-stated beneficiary name to an
+    # account number from list_beneficiaries. Database preflight still limits
+    # the destination to this user's active beneficiary list.
+    explicit_user_fields: [amount]
     required_scopes: [financial:write]
-    requires_confirmation: true
+    requires_confirmation: false
     requires_receipt: true
     requires_owner_metadata: true
     idempotent: true
-    max_calls_per_task: 2
+    max_calls_per_task: 8
   analyze_finances:
     risk: sensitive_read
     intents: [financial_calculation, account_information, transaction_search]
@@ -62,7 +68,7 @@ tools:
     max_calls_per_task: 2
   send_gift:
     risk: financial_action
-    intents: [money_transfer]
+    intents: [gift_transfer]
     explicit_user_fields: [recipient, amount, gift_message]
     required_scopes: [financial:write]
     requires_confirmation: true

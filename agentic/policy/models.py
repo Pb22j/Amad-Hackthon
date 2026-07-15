@@ -12,6 +12,8 @@ class Intent(StrEnum):
     TRANSACTION_SEARCH = "transaction_search"
     FINANCIAL_CALCULATION = "financial_calculation"
     MONEY_TRANSFER = "money_transfer"
+    SAVED_BENEFICIARY_TRANSFER = "saved_beneficiary_transfer"
+    GIFT_TRANSFER = "gift_transfer"
     BILL_PAYMENT = "bill_payment"
     BENEFICIARY_MANAGEMENT = "beneficiary_management"
     INVESTMENT_RESEARCH = "investment_research"

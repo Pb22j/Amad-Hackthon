@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 import unicodedata
 from calendar import monthrange
@@ -238,20 +239,33 @@ def find_beneficiary(
         return row
     requested_name = normalize_beneficiary_name(destination)
     requested_key = beneficiary_name_key(destination)
+    requested_token_keys = {
+        beneficiary_name_key(token)
+        for token in re.findall(r"[^\W\d_]+", destination, flags=re.UNICODE)
+    }
     transliterated_matches: list[BankRow] = []
+    short_name_matches: list[BankRow] = []
     for beneficiary in connection.execute(
         "SELECT * FROM beneficiaries WHERE owner_uuid = %s", (owner_uuid,)
     ).fetchall():
-        raw_names = {
-            str(beneficiary["Short_Name"]),
-            str(beneficiary["Full_Name"]),
-        }
+        short_name = str(beneficiary["Short_Name"])
+        full_name = str(beneficiary["Full_Name"])
+        raw_names = {short_name, full_name}
         if requested_name in {normalize_beneficiary_name(name) for name in raw_names}:
             return beneficiary
+        normalized_short_name = normalize_beneficiary_name(short_name)
+        short_key = beneficiary_name_key(short_name)
+        if (
+            normalized_short_name
+            and re.search(rf"(?<!\w){re.escape(normalized_short_name)}(?!\w)", requested_name)
+        ) or (len(short_key) >= 2 and short_key in requested_token_keys):
+            short_name_matches.append(beneficiary)
         if len(requested_key) >= 2 and requested_key in {
             beneficiary_name_key(name) for name in raw_names
         }:
             transliterated_matches.append(beneficiary)
+    if len(short_name_matches) == 1:
+        return short_name_matches[0]
     return transliterated_matches[0] if len(transliterated_matches) == 1 else None
 
 

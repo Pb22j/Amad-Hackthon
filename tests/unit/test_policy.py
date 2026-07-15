@@ -40,7 +40,13 @@ def test_credential_and_cross_user_requests_are_blocked(policy, text):
 
 @pytest.mark.parametrize(
     "intent",
-    [Intent.MONEY_TRANSFER, Intent.INVESTMENT_BUY, Intent.INVESTMENT_SELL],
+    [
+        Intent.MONEY_TRANSFER,
+        Intent.SAVED_BENEFICIARY_TRANSFER,
+        Intent.GIFT_TRANSFER,
+        Intent.INVESTMENT_BUY,
+        Intent.INVESTMENT_SELL,
+    ],
 )
 def test_financial_actions_are_allowed_but_high_risk(policy, intent):
     classification = IntentClassification(

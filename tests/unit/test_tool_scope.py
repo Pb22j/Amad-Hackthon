@@ -1,6 +1,7 @@
 """Tests for deterministic intent-based model tool visibility."""
 
 from langchain.agents.middleware import ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 
 from agentic.middleware.tool_scope import IntentToolScopeMiddleware
@@ -28,6 +29,20 @@ def internal_response_tool() -> str:
     return "response"
 
 
+@tool
+def list_beneficiaries() -> str:
+    """Resolve live beneficiaries."""
+
+    return "beneficiaries"
+
+
+@tool
+def transfer_between_accounts() -> str:
+    """Execute a resolved transfer."""
+
+    return "transferred"
+
+
 async def test_tool_scope_removes_unrelated_external_tools():
     middleware = IntentToolScopeMiddleware({"allowed_tool", "unrelated_tool"})
     request = ModelRequest(
@@ -40,6 +55,128 @@ async def test_tool_scope_removes_unrelated_external_tools():
 
     async def handler(scoped_request):
         observed.extend(tool.name for tool in scoped_request.tools)
+        return ModelResponse(result=[])
+
+    await middleware.awrap_model_call(request, handler)
+
+    assert observed == ["allowed_tool", "internal_response_tool"]
+
+
+async def test_required_sequence_forces_each_authoritative_step():
+    middleware = IntentToolScopeMiddleware(
+        {"list_beneficiaries", "transfer_between_accounts"},
+        required_tool_sequences={
+            "saved_beneficiary_transfer": (
+                "list_beneficiaries",
+                "transfer_between_accounts",
+            )
+        },
+    )
+    base_state = {
+        "messages": [],
+        "available_tools": ["list_beneficiaries", "transfer_between_accounts"],
+        "intent": {"intent": "saved_beneficiary_transfer"},
+    }
+
+    async def visible(messages):
+        observed = []
+        request_options = {}
+        request = ModelRequest(
+            model=ScriptedChatModel(responses=[]),
+            messages=messages,
+            tools=[list_beneficiaries, transfer_between_accounts, internal_response_tool],
+            response_format="agent-report",
+            state=base_state,
+        )
+
+        async def handler(scoped_request):
+            observed.extend(tool.name for tool in scoped_request.tools)
+            request_options.update(
+                response_format=scoped_request.response_format,
+                tool_choice=scoped_request.tool_choice,
+            )
+            return ModelResponse(result=[])
+
+        await middleware.awrap_model_call(request, handler)
+        return observed, request_options
+
+    observed, options = await visible([])
+    assert observed == ["list_beneficiaries"]
+    assert options == {"response_format": None, "tool_choice": "list_beneficiaries"}
+    listed = ToolMessage(content="listed", tool_call_id="list-1", name="list_beneficiaries")
+    observed, options = await visible([listed])
+    assert observed == ["transfer_between_accounts"]
+    assert options == {"response_format": None, "tool_choice": "transfer_between_accounts"}
+    transferred = ToolMessage(
+        content="transferred",
+        tool_call_id="transfer-1",
+        name="transfer_between_accounts",
+    )
+    observed, options = await visible([listed, transferred])
+    assert observed == ["internal_response_tool"]
+    assert options == {"response_format": "agent-report", "tool_choice": None}
+
+
+async def test_required_sequence_recovers_tool_name_from_call_id():
+    middleware = IntentToolScopeMiddleware(
+        {"list_beneficiaries", "transfer_between_accounts"},
+        required_tool_sequences={
+            "saved_beneficiary_transfer": (
+                "list_beneficiaries",
+                "transfer_between_accounts",
+            )
+        },
+    )
+    call = AIMessage(
+        content="",
+        tool_calls=[{"id": "list-1", "name": "list_beneficiaries", "args": {}}],
+    )
+    result_without_name = ToolMessage(content="listed", tool_call_id="list-1")
+    observed = []
+    request = ModelRequest(
+        model=ScriptedChatModel(responses=[]),
+        messages=[call, result_without_name],
+        tools=[list_beneficiaries, transfer_between_accounts, internal_response_tool],
+        state={
+            "messages": [],
+            "available_tools": ["list_beneficiaries", "transfer_between_accounts"],
+            "intent": {"intent": "saved_beneficiary_transfer"},
+        },
+    )
+
+    async def handler(scoped_request):
+        observed.extend(tool.name for tool in scoped_request.tools)
+        return ModelResponse(result=[])
+
+    await middleware.awrap_model_call(request, handler)
+
+    assert observed == ["transfer_between_accounts"]
+
+
+async def test_required_sequence_is_ignored_when_workflow_is_not_registered():
+    middleware = IntentToolScopeMiddleware(
+        {"allowed_tool"},
+        required_tool_sequences={
+            "money_transfer": ("list_beneficiaries", "transfer_between_accounts")
+        },
+    )
+    observed = []
+    request = ModelRequest(
+        model=ScriptedChatModel(responses=[]),
+        messages=[],
+        tools=[allowed_tool, internal_response_tool],
+        response_format="agent-report",
+        state={
+            "messages": [],
+            "available_tools": ["allowed_tool"],
+            "intent": {"intent": "money_transfer"},
+        },
+    )
+
+    async def handler(scoped_request):
+        observed.extend(tool.name for tool in scoped_request.tools)
+        assert scoped_request.response_format == "agent-report"
+        assert scoped_request.tool_choice is None
         return ModelResponse(result=[])
 
     await middleware.awrap_model_call(request, handler)

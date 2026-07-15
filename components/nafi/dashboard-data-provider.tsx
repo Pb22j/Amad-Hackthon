@@ -56,8 +56,23 @@ export function DashboardDataProvider({ children }: { children: React.ReactNode 
 
   React.useEffect(() => {
     void refresh();
+
+    const refreshOnFinancialAction = () => {
+      void refresh();
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+
+    window.addEventListener("nafea:financial-action", refreshOnFinancialAction);
+    window.addEventListener("focus", refreshOnFinancialAction);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
     return () => {
       requestSequence.current += 1;
+      window.removeEventListener("nafea:financial-action", refreshOnFinancialAction);
+      window.removeEventListener("focus", refreshOnFinancialAction);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, [refresh]);
 

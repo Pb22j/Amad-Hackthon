@@ -105,7 +105,21 @@ def build_financial_agent(
     # cannot disable or extend them.
     middleware: list[Any] = [
         AgentContextMiddleware(),
-        IntentToolScopeMiddleware({item.name for item in tool_metadata}),
+        IntentToolScopeMiddleware(
+            {item.name for item in tool_metadata},
+            required_tool_sequences={
+                Intent.SAVED_BENEFICIARY_TRANSFER.value: (
+                    "list_beneficiaries",
+                    "transfer_between_accounts",
+                ),
+                # Backward-compatible fallback: a classifier that emits the
+                # broader transfer intent still cannot expose gift execution.
+                Intent.MONEY_TRANSFER.value: (
+                    "list_beneficiaries",
+                    "transfer_between_accounts",
+                ),
+            },
+        ),
         ModelCallLimitMiddleware(
             run_limit=config.limits.task.max_model_calls,
             exit_behavior="error",

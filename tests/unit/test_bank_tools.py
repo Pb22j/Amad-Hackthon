@@ -286,7 +286,15 @@ async def test_transfer_accepts_saved_short_name():
 
 @pytest.mark.parametrize(
     "destination",
-    ["لطيفة العنزي", "لطيفه العنزي", "Latifa", "Latifa Al-Anzi", "LATIFA AL ANZI"],
+    [
+        "لطيفة العنزي",
+        "لطيفه العنزي",
+        "لطيفة محمد",
+        "Latifa",
+        "Latifa Mohammed",
+        "Latifa Al-Anzi",
+        "LATIFA AL ANZI",
+    ],
 )
 async def test_transfer_accepts_saved_full_name_and_arabic_spelling_variants(destination):
     result = _validated(

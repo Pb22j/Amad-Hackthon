@@ -319,13 +319,14 @@ TOOL: BaseTool = StructuredTool.from_function(
     name="transfer_between_accounts",
     description=(
         "Transfer money from the authenticated user's account to an activated beneficiary "
-        "after confirmation. The destination must already be active in the benefit list, and "
+        "immediately in hackathon demo mode. The destination must already be active in the benefit list, and "
         "the amount must be covered by the balance and the daily spend limit. When the user "
         "provides both a destination and amount, call this capability directly: its preflight "
         "is the authority on whether the beneficiary exists. Never ask the user to confirm "
         "whether a named beneficiary is saved before calling it. Preserve the destination text "
-        "exactly as the user stated it; do not replace a name with an account number obtained "
-        "from another capability. The database resolves saved Arabic and transliterated names."
+        "as the user stated it when possible. It may also use the account number returned by the "
+        "authoritative beneficiary list; database preflight guarantees that the destination is "
+        "an active beneficiary owned by the authenticated user."
     ),
     args_schema=TransferBetweenAccountsArgs,
 )

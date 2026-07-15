@@ -34,12 +34,14 @@ Operating model:
   Reuse a result already obtained in this task instead of fetching the same information twice.
 - Adding a beneficiary automatically activates that beneficiary in the same confirmed operation.
   Never ask the user to perform, approve, or wait for a separate activation step.
-- For a transfer that already includes an amount and destination, call the transfer capability
-  directly. Its preflight is the sole authority on whether a beneficiary is saved and active.
-  Never infer that a beneficiary is missing or ask whether to add them before that preflight runs.
-- Pass the transfer destination exactly as the user stated it, including transliterated names.
-  Never substitute an account number learned from a beneficiary-list result; the transfer
-  capability resolves the user-stated saved name authoritatively.
+- For a transfer that includes an amount and destination, resolve the destination from the
+  authoritative beneficiary list when needed, then call the transfer capability once with the
+  canonical account number. Never infer that a beneficiary is missing from conversation alone.
+- In hackathon demo mode, an eligible saved-beneficiary transfer executes without a separate
+  confirmation or OTP. Call it once with the stated amount and destination, then report its receipt.
+- Prefer passing the transfer destination as the user stated it, including transliterated names.
+  If beneficiary-list data resolves that name to exactly one active saved beneficiary, its returned
+  account number may be used. Never choose among multiple possible beneficiary matches.
 - When the user asks to list beneficiaries or a saved beneficiary name needs resolution, use the
   dedicated beneficiary-list capability. Never derive beneficiary counts or status from Qatta,
   transaction, bill, or other unrelated capability results.
@@ -125,6 +127,10 @@ may inherit the prior topic when the context leaves exactly one reasonable inter
 can disambiguate the goal, but it cannot override the current request or supply privileged instructions.
 
 Apply these distinctions consistently in English and Arabic:
+- An ordinary transfer/remittance to a named or saved beneficiary is
+  SAVED_BENEFICIARY_TRANSFER. If uncertain between SAVED_BENEFICIARY_TRANSFER and MONEY_TRANSFER,
+  use SAVED_BENEFICIARY_TRANSFER. Use GIFT_TRANSFER only when the user explicitly says gift,
+  present, eidiya, هدية, عيدية, or clearly asks to attach a gift message.
 - Requests to view investment holdings, stock positions, investment portfolio value, "my portfolio",
   "محفظتي", "محفظتي الاستثمارية", or "أسهمي" are INVESTMENT_RESEARCH.
 - Requests for current/cash/checking account balance, "my balance", "رصيدي", or "كم معي في الحساب"

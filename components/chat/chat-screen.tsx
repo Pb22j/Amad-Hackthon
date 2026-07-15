@@ -545,6 +545,9 @@ export function ChatScreen() {
     });
 
     if (TERMINAL_EVENTS.has(event.event_type)) {
+      if (event.event_type === "completed") {
+        window.dispatchEvent(new Event("nafea:financial-action"));
+      }
       if (currentTaskIdRef.current === event.task_id) {
         currentTaskIdRef.current = null;
         setActiveTaskId(null);
