@@ -61,7 +61,7 @@ app.add_middleware(
 )
 
 interaction_store = InteractionStore(
-    settings.INTERACTION_STATE_DB,
+    settings.INTERACTION_DATABASE_URL,
     encryption_key=settings.INTERACTION_DATA_ENCRYPTION_KEY,
     max_user_turns=settings.VOICE_MEMORY_MAX_USER_TURNS,
     max_assistant_turns=settings.VOICE_MEMORY_MAX_ASSISTANT_TURNS,
@@ -90,17 +90,28 @@ class TokenBucketLimiter:
 
 
 limiter = TokenBucketLimiter(settings.RATE_LIMIT_PER_MIN)
+realtime_resume_handles: dict[str, str] = {}
+active_realtime_connections: dict[tuple[str, str], WebSocket] = {}
 
 
 @app.middleware("http")
 async def secure_http_boundary(request: Request, call_next: Any) -> Response:
-    if request.url.path in {
-        "/api/realtime-token",
-        "/api/voice-chat",
-        "/api/submit-task",
-        "/api/resume-task",
-        "/api/confirm-task",
-    } and interaction_store.get_session(_session_token(request)) is None:
+    # Browser CORS preflight requests intentionally carry no session cookie.
+    # Let CORSMiddleware validate and answer them before enforcing endpoint auth.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    if (
+        request.url.path
+        in {
+            "/api/realtime-token",
+            "/api/voice-chat",
+            "/api/submit-task",
+            "/api/resume-task",
+            "/api/confirm-task",
+        }
+        and interaction_store.get_session(_session_token(request)) is None
+    ):
         return Response(
             content=json.dumps({"detail": "Authenticated interaction session required"}),
             status_code=401,
@@ -253,7 +264,9 @@ async def create_session(payload: SessionRequest, response: Response) -> Session
 async def realtime_connection(request: Request, payload: RealtimeRequest) -> dict[str, str]:
     session = require_session(request)
     if payload.language != session.language:
-        raise HTTPException(status_code=409, detail="Language does not match the interaction session")
+        raise HTTPException(
+            status_code=409, detail="Language does not match the interaction session"
+        )
     if not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=503, detail="Realtime voice provider is not configured")
     return {
@@ -275,15 +288,16 @@ async def _relay_browser_to_provider(browser: WebSocket, provider: Any) -> None:
         await provider.send(raw)
 
 
-async def _relay_provider_to_browser(
-    provider: Any, browser: WebSocket, *, session_id: str
-) -> None:
+async def _relay_provider_to_browser(provider: Any, browser: WebSocket, *, session_id: str) -> None:
     user_transcript: list[str] = []
     assistant_transcript: list[str] = []
     async for raw in provider:
         text = raw if isinstance(raw, str) else raw.decode("utf-8")
         try:
             message = json.loads(text)
+            resumption = message.get("sessionResumptionUpdate") or {}
+            if resumption.get("resumable") and resumption.get("newHandle"):
+                realtime_resume_handles[session_id] = str(resumption["newHandle"])
             content = message.get("serverContent") or {}
             input_text = (content.get("inputTranscription") or {}).get("text")
             output_text = (content.get("outputTranscription") or {}).get("text")
@@ -321,25 +335,43 @@ async def realtime_websocket(websocket: WebSocket) -> None:
     if session is None or not _websocket_origin_allowed(websocket):
         await websocket.close(code=4401)
         return
+    identity_key = (session.tenant_id, session.user_id)
+    previous = active_realtime_connections.get(identity_key)
+    if previous is not None and previous is not websocket:
+        try:
+            await previous.close(code=4001, reason="Replaced by a newer voice connection")
+        except RuntimeError:
+            pass
     await websocket.accept()
+    active_realtime_connections[identity_key] = websocket
     provider_url = (
         "wss://generativelanguage.googleapis.com/ws/"
         "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
         f"?key={settings.GEMINI_API_KEY}"
     )
+    resume_handle = realtime_resume_handles.get(session.session_id)
     try:
         async with websockets.connect(provider_url, max_size=2_000_000) as provider:
             await provider.send(
                 json.dumps(
-                    gemini_setup(model=settings.REALTIME_MODEL, language=session.language),
+                    gemini_setup(
+                        model=settings.REALTIME_MODEL,
+                        language=session.language,
+                        voice=settings.REALTIME_VOICE,
+                        resume_handle=resume_handle,
+                    ),
                     ensure_ascii=False,
                 )
             )
-            memory_context = interaction_store.grounded_voice_context(
-                session_id=session.session_id,
-                limit=settings.VOICE_MEMORY_CONTEXT_TURNS,
+            memory_context = (
+                interaction_store.grounded_voice_context(
+                    session_id=session.session_id,
+                    limit=settings.VOICE_MEMORY_CONTEXT_TURNS,
+                )
+                if resume_handle is None
+                else {}
             )
-            if any(memory_context.values()):
+            if memory_context and any(memory_context.values()):
                 await provider.send(
                     json.dumps(
                         {
@@ -373,9 +405,7 @@ async def realtime_websocket(websocket: WebSocket) -> None:
                 _relay_browser_to_provider(websocket, provider)
             )
             provider_to_browser = asyncio.create_task(
-                _relay_provider_to_browser(
-                    provider, websocket, session_id=session.session_id
-                )
+                _relay_provider_to_browser(provider, websocket, session_id=session.session_id)
             )
             done, pending = await asyncio.wait(
                 {browser_to_provider, provider_to_browser},
@@ -390,6 +420,9 @@ async def realtime_websocket(websocket: WebSocket) -> None:
     except Exception as exc:
         logger.error("Realtime proxy failed: %s", type(exc).__name__)
         await websocket.close(code=1011)
+    finally:
+        if active_realtime_connections.get(identity_key) is websocket:
+            active_realtime_connections.pop(identity_key, None)
 
 
 @app.post("/api/voice-chat", response_model=VoiceChatResponse)
@@ -546,6 +579,14 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
         if payload.idempotency_key
         else uuid4()
     )
+    try:
+        interaction_store.reserve_request(
+            session_id=session.session_id,
+            request_id=request_id,
+            natural_language_request=payload.natural_language_request,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     existing = interaction_store.get_task_by_request(
         request_id=request_id, session_id=session.session_id
     )
@@ -591,7 +632,9 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
         return accepted
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         logger.error("Agentic submit failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=502, detail="Agentic layer did not accept the task") from exc
+        raise HTTPException(
+            status_code=502, detail="Agentic layer did not accept the task"
+        ) from exc
 
 
 @app.post("/api/resume-task", status_code=202)
@@ -622,10 +665,16 @@ async def resume_task(request: Request, payload: ResumeTaskRequest) -> dict[str,
         if response.status_code != 202:
             response.raise_for_status()
             raise ValueError("unexpected resume response")
-        interaction_store.clear_pending(task_id=task.task_id, session_id=session.session_id)
+        interaction_store.clear_pending(
+            task_id=task.task_id,
+            session_id=session.session_id,
+            expected_event=event,
+        )
         return {"status": "resumed"}
     except (httpx.HTTPError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail="Agentic layer rejected the clarification") from exc
+        raise HTTPException(
+            status_code=502, detail="Agentic layer rejected the clarification"
+        ) from exc
 
 
 @app.post("/api/confirm-task", status_code=202)
@@ -653,10 +702,16 @@ async def confirm_task(request: Request, payload: ConfirmTaskRequest) -> dict[st
             if response.status_code != 202:
                 response.raise_for_status()
                 raise ValueError("unexpected rejection response")
-            interaction_store.clear_pending(task_id=task.task_id, session_id=session.session_id)
+            interaction_store.clear_pending(
+                task_id=task.task_id,
+                session_id=session.session_id,
+                expected_event=event,
+            )
             return {"status": "rejected_by_user"}
         except (httpx.HTTPError, ValueError) as exc:
-            raise HTTPException(status_code=502, detail="Agentic layer rejected the decision") from exc
+            raise HTTPException(
+                status_code=502, detail="Agentic layer rejected the decision"
+            ) from exc
     if not hmac.compare_digest(payload.otp_code or "", settings.DEMO_CONFIRMATION_OTP):
         raise HTTPException(status_code=403, detail="Invalid demo OTP")
     details = event.get("details", {})
@@ -687,7 +742,13 @@ async def confirm_task(request: Request, payload: ConfirmTaskRequest) -> dict[st
         if response.status_code != 202:
             response.raise_for_status()
             raise ValueError("unexpected confirmation response")
-        interaction_store.clear_pending(task_id=task.task_id, session_id=session.session_id)
+        interaction_store.clear_pending(
+            task_id=task.task_id,
+            session_id=session.session_id,
+            expected_event=event,
+        )
         return {"status": "confirmed"}
     except (httpx.HTTPError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail="Agentic layer rejected the confirmation") from exc
+        raise HTTPException(
+            status_code=502, detail="Agentic layer rejected the confirmation"
+        ) from exc

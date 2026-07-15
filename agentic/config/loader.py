@@ -15,6 +15,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
+from agentic.config.environment import load_backend_environment
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -177,6 +179,10 @@ class SecretsConfig(StrictModel):
 
     @model_validator(mode="after")
     def secure_keys(self) -> "SecretsConfig":
+        for name in ("database_url", "langgraph_database_url"):
+            value = getattr(self, name).get_secret_value()
+            if not value.startswith(("postgresql://", "postgresql+psycopg://")):
+                raise ValueError(f"{name} must be a PostgreSQL URL")
         for name in (
             "confirmation_signing_key",
             "interaction_shared_secret",
@@ -206,8 +212,9 @@ class AppConfig(StrictModel):
                 raise ValueError("checkpoint encryption is required in production")
             if not self.secrets.interaction_event_webhook_url:
                 raise ValueError("interaction event webhook is required in production")
-            if self.secrets.demo_confirmation_otp.get_secret_value() == "1111":
-                raise ValueError("fixed demo OTP must be replaced for production")
+            raise ValueError(
+                "the demo OTP confirmation adapter is not supported in production"
+            )
         return self
 
 
@@ -222,6 +229,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 def load_config(config_dir: str | Path | None = None) -> AppConfig:
     """Load all configuration files and required secret environment values."""
 
+    load_backend_environment()
     root = Path(config_dir) if config_dir else Path(__file__).resolve().parent
     secrets = SecretsConfig(
         database_url=os.environ["DATABASE_URL"],

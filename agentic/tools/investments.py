@@ -1,8 +1,7 @@
-"""SQLite-backed demo portfolio reads and confirmed investment trades."""
+"""PostgreSQL-backed demo portfolio reads and confirmed investment trades."""
 
 from __future__ import annotations
 
-import sqlite3
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -12,6 +11,8 @@ from pydantic import Field
 
 from agentic.tools.bank_db import (
     BankToolArgs,
+    BankConnection,
+    BankRow,
     find_user_by_username,
     money,
     next_reference,
@@ -28,13 +29,42 @@ class PortfolioArgs(BankToolArgs):
 
 
 class TradeArgs(BankToolArgs):
-    symbol: str = Field(min_length=1, max_length=20, pattern=r"^[A-Za-z0-9.-]+$")
+    symbol: str = Field(
+        min_length=1,
+        max_length=40,
+        pattern=r"^[A-Za-z0-9.\-\u0600-\u06FF ]+$",
+        description=(
+            "Supported demo symbol or company alias: ARAMCO/2222/أرامكو, "
+            "ALRAJHI/1120/الراجحي, or SABIC/2010/سابك."
+        ),
+    )
     quantity: float = Field(gt=0, le=1_000_000)
 
 
-def _asset(connection: sqlite3.Connection, symbol: str) -> sqlite3.Row | None:
+SYMBOL_ALIASES = {
+    "2222": "ARAMCO",
+    "SAUDI ARAMCO": "ARAMCO",
+    "ARAMCO": "ARAMCO",
+    "أرامكو": "ARAMCO",
+    "ارامكو": "ARAMCO",
+    "1120": "ALRAJHI",
+    "AL RAJHI": "ALRAJHI",
+    "ALRAJHI": "ALRAJHI",
+    "الراجحي": "ALRAJHI",
+    "2010": "SABIC",
+    "SABIC": "SABIC",
+    "سابك": "SABIC",
+}
+
+
+def normalize_investment_symbol(value: str) -> str:
+    normalized = " ".join(value.strip().split()).upper()
+    return SYMBOL_ALIASES.get(normalized, normalized)
+
+
+def _asset(connection: BankConnection, symbol: str) -> BankRow | None:
     return connection.execute(
-        "SELECT * FROM investment_assets WHERE symbol = ? AND status = 'active'",
+        "SELECT * FROM investment_assets WHERE symbol = %s AND status = 'active'",
         (symbol.strip().upper(),),
     ).fetchone()
 
@@ -46,14 +76,19 @@ def _quantity_text(value: Decimal) -> str:
 async def get_portfolio() -> dict[str, Any]:
     username, _ = owner_identity()
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         user = find_user_by_username(connection, username)
         if user is None:
-            return tool_result(status="failed", summary="Customer not found.", data={}, error_code="customer_not_found")
+            return tool_result(
+                status="failed",
+                summary="Customer not found.",
+                data={},
+                error_code="customer_not_found",
+            )
         rows = connection.execute(
             "SELECT h.*, a.Name, a.Price_SAR FROM investment_holdings h"
             " JOIN investment_assets a ON a.symbol = h.symbol"
-            " WHERE h.user_uuid = ? AND h.Quantity > 0 ORDER BY h.symbol",
+            " WHERE h.user_uuid = %s AND h.Quantity > 0 ORDER BY h.symbol",
             (user["uuid"],),
         ).fetchall()
         holdings = []
@@ -104,22 +139,37 @@ async def sell_investment(symbol: str, quantity: float | Decimal) -> dict[str, A
 
 async def _trade(*, symbol: str, quantity: float | Decimal, side: str) -> dict[str, Any]:
     username, _ = owner_identity()
-    normalized_symbol = symbol.strip().upper()
+    normalized_symbol = normalize_investment_symbol(symbol)
     normalized_quantity = Decimal(str(quantity))
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         user = find_user_by_username(connection, username)
         if user is None:
-            return tool_result(status="failed", summary="Customer not found.", data={}, error_code="customer_not_found")
+            return tool_result(
+                status="failed",
+                summary="Customer not found.",
+                data={},
+                error_code="customer_not_found",
+            )
         if user["status"] != "active":
-            return tool_result(status="failed", summary="Account is inactive.", data={}, error_code="source_account_inactive")
+            return tool_result(
+                status="failed",
+                summary="Account is inactive.",
+                data={},
+                error_code="source_account_inactive",
+            )
         asset = _asset(connection, normalized_symbol)
         if asset is None:
-            return tool_result(status="failed", summary="Investment symbol is unavailable.", data={"symbol": normalized_symbol}, error_code="investment_not_found")
+            return tool_result(
+                status="failed",
+                summary="Investment symbol is unavailable.",
+                data={"symbol": normalized_symbol},
+                error_code="investment_not_found",
+            )
         price = money(asset["Price_SAR"])
         total = money(price * normalized_quantity)
         holding = connection.execute(
-            "SELECT * FROM investment_holdings WHERE user_uuid = ? AND symbol = ?",
+            "SELECT * FROM investment_holdings WHERE user_uuid = %s AND symbol = %s",
             (user["uuid"], normalized_symbol),
         ).fetchone()
         balance = money(user["Balance_SAR"])
@@ -153,13 +203,20 @@ async def _trade(*, symbol: str, quantity: float | Decimal, side: str) -> dict[s
             balance_after = balance - total
             if holding:
                 connection.execute(
-                    "UPDATE investment_holdings SET Quantity = ?, Average_Cost_SAR = ?, updatedAt = ? WHERE uuid = ?",
+                    "UPDATE investment_holdings SET Quantity = %s, Average_Cost_SAR = %s, updatedAt = %s WHERE uuid = %s",
                     (float(new_quantity), float(average_cost), now, holding["uuid"]),
                 )
             else:
                 connection.execute(
-                    "INSERT INTO investment_holdings (uuid, user_uuid, symbol, Quantity, Average_Cost_SAR, updatedAt) VALUES (?, ?, ?, ?, ?, ?)",
-                    (str(uuid4()), user["uuid"], normalized_symbol, float(new_quantity), float(average_cost), now),
+                    "INSERT INTO investment_holdings (uuid, user_uuid, symbol, Quantity, Average_Cost_SAR, updatedAt) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        str(uuid4()),
+                        user["uuid"],
+                        normalized_symbol,
+                        float(new_quantity),
+                        float(average_cost),
+                        now,
+                    ),
                 )
             direction, transaction_type = "debit", "investment_buy"
         else:
@@ -168,28 +225,39 @@ async def _trade(*, symbol: str, quantity: float | Decimal, side: str) -> dict[s
                 return tool_result(
                     status="failed",
                     summary="The portfolio does not contain enough units to sell.",
-                    data={"requested_quantity": str(normalized_quantity), "owned_quantity": str(owned)},
+                    data={
+                        "requested_quantity": str(normalized_quantity),
+                        "owned_quantity": str(owned),
+                    },
                     error_code="insufficient_holdings",
                 )
             new_quantity = owned - normalized_quantity
             average_cost = money(holding["Average_Cost_SAR"])
             balance_after = balance + total
             connection.execute(
-                "UPDATE investment_holdings SET Quantity = ?, updatedAt = ? WHERE uuid = ?",
+                "UPDATE investment_holdings SET Quantity = %s, updatedAt = %s WHERE uuid = %s",
                 (float(new_quantity), now, holding["uuid"]),
             )
             direction, transaction_type = "credit", "investment_sell"
         connection.execute(
-            "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
             (float(balance_after), now, user["uuid"]),
         )
         connection.execute(
             "INSERT INTO transactions (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR, Counterparty_Name, Counterparty_Account, Description, Category, Balance_After_SAR, Reference, createdAt)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 'استثمار', ?, ?, ?)",
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s, 'استثمار', %s, %s, %s)",
             (
-                str(uuid4()), user["uuid"], user["Account_Number"], direction,
-                transaction_type, float(total), asset["Name"],
-                f"{side} {normalized_quantity} {normalized_symbol}", float(balance_after), reference, now,
+                str(uuid4()),
+                user["uuid"],
+                user["Account_Number"],
+                direction,
+                transaction_type,
+                float(total),
+                asset["Name"],
+                f"{side} {normalized_quantity} {normalized_symbol}",
+                float(balance_after),
+                reference,
+                now,
             ),
         )
         return tool_result(
@@ -223,12 +291,20 @@ GET_PORTFOLIO_TOOL: BaseTool = StructuredTool.from_function(
 BUY_INVESTMENT_TOOL: BaseTool = StructuredTool.from_function(
     coroutine=buy_investment,
     name="buy_investment",
-    description="Buy a quantity of a supported demo investment after exact confirmation and OTP.",
+    description=(
+        "Buy a quantity of a supported demo investment after exact confirmation and OTP. "
+        "Supported assets are ARAMCO (2222/أرامكو), ALRAJHI (1120/الراجحي), "
+        "and SABIC (2010/سابك)."
+    ),
     args_schema=TradeArgs,
 )
 SELL_INVESTMENT_TOOL: BaseTool = StructuredTool.from_function(
     coroutine=sell_investment,
     name="sell_investment",
-    description="Sell a held quantity of a demo investment after exact confirmation and OTP.",
+    description=(
+        "Sell a held quantity of a demo investment after exact confirmation and OTP. "
+        "Supported assets are ARAMCO (2222/أرامكو), ALRAJHI (1120/الراجحي), "
+        "and SABIC (2010/سابك)."
+    ),
     args_schema=TradeArgs,
 )

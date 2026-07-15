@@ -29,7 +29,6 @@ Four tools with distinct risk profiles share this module:
 
 from __future__ import annotations
 
-import sqlite3
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -39,6 +38,8 @@ from pydantic import Field
 
 from agentic.tools.bank_db import (
     BankToolArgs,
+    BankConnection,
+    BankRow,
     find_beneficiary,
     find_user_by_account_number,
     find_user_by_username,
@@ -97,7 +98,7 @@ class ListQattaBillsArgs(BankToolArgs):
     pass
 
 
-def _bill_view(row: sqlite3.Row) -> dict[str, Any]:
+def _bill_view(row: BankRow) -> dict[str, Any]:
     return {
         "qatta_name": row["Name"],
         "amount_sar": str(money(row["Amount_SAR"])),
@@ -107,9 +108,9 @@ def _bill_view(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _insert_transaction(
-    connection: sqlite3.Connection,
+    connection: BankConnection,
     *,
-    user: sqlite3.Row,
+    user: BankRow,
     direction: str,
     transaction_type: str,
     amount: Decimal,
@@ -125,7 +126,7 @@ def _insert_transaction(
         " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
         "  Counterparty_Name, Counterparty_Account, Description, Category,"
         "  Balance_After_SAR, Reference, createdAt)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'قطة', ?, ?, ?)",
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'قطة', %s, %s, %s)",
         (
             str(uuid4()),
             user["uuid"],
@@ -151,7 +152,7 @@ async def create_qatta(
     username, _ = owner_identity()
     total = money(total_amount)
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         creator = find_user_by_username(connection, username)
         if creator is None:
             return tool_result(
@@ -170,7 +171,7 @@ async def create_qatta(
 
         # Participants come exclusively from the creator's beneficiary list and
         # must be active there — the same trust boundary transfers rely on.
-        resolved: dict[str, sqlite3.Row] = {}
+        resolved: dict[str, BankRow] = {}
         for reference in participants:
             beneficiary = find_beneficiary(connection, creator["uuid"], reference)
             if beneficiary is None:
@@ -259,7 +260,7 @@ async def create_qatta(
         reference = next_reference(connection, "qatta")
         balance_after = balance - creator_share
         connection.execute(
-            "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
             (float(balance_after), now, creator["uuid"]),
         )
         _insert_transaction(
@@ -279,7 +280,7 @@ async def create_qatta(
             "INSERT INTO qattas"
             " (uuid, creator_uuid, Name, Total_Amount_SAR, Share_Amount_SAR, status,"
             "  createdAt, updatedAt)"
-            " VALUES (?, ?, ?, ?, ?, 'open', ?, ?)",
+            " VALUES (%s, %s, %s, %s, %s, 'open', %s, %s)",
             (qatta_id, creator["uuid"], qatta_name.strip(), float(total), float(share),
              now, now),
         )
@@ -288,7 +289,7 @@ async def create_qatta(
             connection.execute(
                 "INSERT INTO qatta_bills"
                 " (uuid, qatta_uuid, participant_uuid, Amount_SAR, status, paidAt, createdAt)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (
                     str(uuid4()),
                     qatta_id,
@@ -339,7 +340,7 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
 
     username, _ = owner_identity()
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         payer = find_user_by_username(connection, username)
         if payer is None:
             return tool_result(
@@ -353,8 +354,8 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
         bills = connection.execute(
             "SELECT qatta_bills.*, qattas.Name, qattas.creator_uuid"
             " FROM qatta_bills JOIN qattas ON qattas.uuid = qatta_bills.qatta_uuid"
-            " WHERE qatta_bills.participant_uuid = ?"
-            "   AND TRIM(qattas.Name) = ? COLLATE NOCASE"
+            " WHERE qatta_bills.participant_uuid = %s"
+            "   AND LOWER(TRIM(qattas.Name)) = LOWER(%s)"
             " ORDER BY qatta_bills.createdAt",
             (payer["uuid"], cleaned),
         ).fetchall()
@@ -401,7 +402,7 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
                 error_code="daily_limit_exceeded",
             )
         creator = connection.execute(
-            "SELECT * FROM users WHERE uuid = ?", (bill["creator_uuid"],)
+            "SELECT * FROM users WHERE uuid = %s", (bill["creator_uuid"],)
         ).fetchone()
         if creator is None or creator["status"] != "active":
             return tool_result(
@@ -415,7 +416,7 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
         now = timestamp()
         payer_balance_after = balance - amount
         connection.execute(
-            "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
             (float(payer_balance_after), now, payer["uuid"]),
         )
         _insert_transaction(
@@ -432,12 +433,12 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
             now=now,
         )
         connection.execute(
-            "UPDATE qatta_bills SET status = 'paid', paidAt = ? WHERE uuid = ?",
+            "UPDATE qatta_bills SET status = 'paid', paidAt = %s WHERE uuid = %s",
             (now, bill["uuid"]),
         )
 
         remaining = connection.execute(
-            "SELECT COUNT(*) FROM qatta_bills WHERE qatta_uuid = ? AND status = 'unpaid'",
+            "SELECT COUNT(*) FROM qatta_bills WHERE qatta_uuid = %s AND status = 'unpaid'",
             (bill["qatta_uuid"],),
         ).fetchone()[0]
         payout: dict[str, Any] | None = None
@@ -446,14 +447,14 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
             pot_total = money(
                 connection.execute(
                     "SELECT COALESCE(SUM(Amount_SAR), 0) FROM qatta_bills"
-                    " WHERE qatta_uuid = ?",
+                    " WHERE qatta_uuid = %s",
                     (bill["qatta_uuid"],),
                 ).fetchone()[0]
             )
             payout_reference = next_reference(connection, "qatta-payout")
             creator_balance_after = money(creator["Balance_SAR"]) + pot_total
             connection.execute(
-                "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+                "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
                 (float(creator_balance_after), now, creator["uuid"]),
             )
             _insert_transaction(
@@ -470,7 +471,7 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
                 now=now,
             )
             connection.execute(
-                "UPDATE qattas SET status = 'completed', updatedAt = ? WHERE uuid = ?",
+                "UPDATE qattas SET status = 'completed', updatedAt = %s WHERE uuid = %s",
                 (now, bill["qatta_uuid"]),
             )
             payout = {
@@ -516,7 +517,7 @@ async def cancel_qatta(qatta_name: str) -> dict[str, Any]:
 
     username, _ = owner_identity()
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         owner = find_user_by_username(connection, username)
         if owner is None:
             return tool_result(
@@ -528,8 +529,8 @@ async def cancel_qatta(qatta_name: str) -> dict[str, Any]:
 
         cleaned = qatta_name.strip()
         mine = connection.execute(
-            "SELECT * FROM qattas WHERE creator_uuid = ?"
-            " AND TRIM(Name) = ? COLLATE NOCASE ORDER BY createdAt",
+            "SELECT * FROM qattas WHERE creator_uuid = %s"
+            " AND LOWER(TRIM(Name)) = LOWER(%s) ORDER BY createdAt",
             (owner["uuid"], cleaned),
         ).fetchall()
         open_qattas = [row for row in mine if row["status"] == "open"]
@@ -544,8 +545,8 @@ async def cancel_qatta(qatta_name: str) -> dict[str, Any]:
             someone_elses = connection.execute(
                 "SELECT 1 FROM qatta_bills"
                 " JOIN qattas ON qattas.uuid = qatta_bills.qatta_uuid"
-                " WHERE qatta_bills.participant_uuid = ?"
-                "   AND TRIM(qattas.Name) = ? COLLATE NOCASE",
+                " WHERE qatta_bills.participant_uuid = %s"
+                "   AND LOWER(TRIM(qattas.Name)) = LOWER(%s)",
                 (owner["uuid"], cleaned),
             ).fetchone()
             if someone_elses is not None:
@@ -568,7 +569,7 @@ async def cancel_qatta(qatta_name: str) -> dict[str, Any]:
         paid_bills = connection.execute(
             "SELECT qatta_bills.*, users.uuid AS payer_uuid"
             " FROM qatta_bills JOIN users ON users.uuid = qatta_bills.participant_uuid"
-            " WHERE qatta_bills.qatta_uuid = ? AND qatta_bills.status = 'paid'"
+            " WHERE qatta_bills.qatta_uuid = %s AND qatta_bills.status = 'paid'"
             " ORDER BY qatta_bills.createdAt",
             (qatta["uuid"],),
         ).fetchall()
@@ -577,12 +578,12 @@ async def cancel_qatta(qatta_name: str) -> dict[str, Any]:
         total_refunded = Decimal("0.00")
         for bill in paid_bills:
             payer = connection.execute(
-                "SELECT * FROM users WHERE uuid = ?", (bill["payer_uuid"],)
+                "SELECT * FROM users WHERE uuid = %s", (bill["payer_uuid"],)
             ).fetchone()
             amount = money(bill["Amount_SAR"])
             balance_after = money(payer["Balance_SAR"]) + amount
             connection.execute(
-                "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+                "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
                 (float(balance_after), now, payer["uuid"]),
             )
             _insert_transaction(
@@ -604,9 +605,9 @@ async def cancel_qatta(qatta_name: str) -> dict[str, Any]:
             total_refunded += amount
 
         connection.execute(
-            "DELETE FROM qatta_bills WHERE qatta_uuid = ?", (qatta["uuid"],)
+            "DELETE FROM qatta_bills WHERE qatta_uuid = %s", (qatta["uuid"],)
         )
-        connection.execute("DELETE FROM qattas WHERE uuid = ?", (qatta["uuid"],))
+        connection.execute("DELETE FROM qattas WHERE uuid = %s", (qatta["uuid"],))
 
         return tool_result(
             status="completed",
@@ -632,7 +633,7 @@ async def list_qatta_bills() -> dict[str, Any]:
 
     username, _ = owner_identity()
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         user = find_user_by_username(connection, username)
         if user is None:
             return tool_result(
@@ -647,7 +648,7 @@ async def list_qatta_bills() -> dict[str, Any]:
             " FROM qatta_bills"
             " JOIN qattas ON qattas.uuid = qatta_bills.qatta_uuid"
             " JOIN users ON users.uuid = qattas.creator_uuid"
-            " WHERE qatta_bills.participant_uuid = ? AND qattas.creator_uuid != ?"
+            " WHERE qatta_bills.participant_uuid = %s AND qattas.creator_uuid != %s"
             " ORDER BY qatta_bills.createdAt DESC",
             (user["uuid"], user["uuid"]),
         ).fetchall()
@@ -656,7 +657,7 @@ async def list_qatta_bills() -> dict[str, Any]:
         ]
 
         created_rows = connection.execute(
-            "SELECT * FROM qattas WHERE creator_uuid = ? ORDER BY createdAt DESC",
+            "SELECT * FROM qattas WHERE creator_uuid = %s ORDER BY createdAt DESC",
             (user["uuid"],),
         ).fetchall()
         my_qattas = []
@@ -666,7 +667,7 @@ async def list_qatta_bills() -> dict[str, Any]:
                 " FROM qatta_bills"
                 " JOIN qattas ON qattas.uuid = qatta_bills.qatta_uuid"
                 " JOIN users ON users.uuid = qatta_bills.participant_uuid"
-                " WHERE qatta_bills.qatta_uuid = ?"
+                " WHERE qatta_bills.qatta_uuid = %s"
                 " ORDER BY qatta_bills.createdAt",
                 (qatta["uuid"],),
             ).fetchall()

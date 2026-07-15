@@ -14,7 +14,6 @@ spend limit as every other outgoing financial action.
 
 from __future__ import annotations
 
-import sqlite3
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -24,6 +23,7 @@ from pydantic import Field
 
 from agentic.tools.bank_db import (
     BankToolArgs,
+    BankConnection,
     find_beneficiary,
     find_user_by_account_number,
     find_user_by_username,
@@ -69,7 +69,7 @@ async def send_gift(
     amount = money(amount)
     message = gift_message.strip()
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         # The schema already enforces gt=0; this guards direct calls too.
         if amount <= 0:
             return tool_result(
@@ -154,11 +154,11 @@ async def send_gift(
         sender_balance_after = balance - amount
         receiver_balance_after = money(receiver["Balance_SAR"]) + amount
         connection.execute(
-            "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
             (float(sender_balance_after), now, sender["uuid"]),
         )
         connection.execute(
-            "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
             (float(receiver_balance_after), now, receiver["uuid"]),
         )
         connection.execute(
@@ -166,7 +166,7 @@ async def send_gift(
             " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
             "  Counterparty_Name, Counterparty_Account, Description, Category,"
             "  Balance_After_SAR, Reference, createdAt)"
-            " VALUES (?, ?, ?, 'debit', 'gift_out', ?, ?, ?, ?, 'هدايا', ?, ?, ?)",
+            " VALUES (%s, %s, %s, 'debit', 'gift_out', %s, %s, %s, %s, 'هدايا', %s, %s, %s)",
             (
                 str(uuid4()),
                 sender["uuid"],
@@ -187,7 +187,7 @@ async def send_gift(
             " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
             "  Counterparty_Name, Counterparty_Account, Description, Category,"
             "  Balance_After_SAR, Reference, createdAt)"
-            " VALUES (?, ?, ?, 'credit', 'gift_in', ?, ?, ?, ?, 'هدايا', ?, ?, ?)",
+            " VALUES (%s, %s, %s, 'credit', 'gift_in', %s, %s, %s, %s, 'هدايا', %s, %s, %s)",
             (
                 str(uuid4()),
                 receiver["uuid"],

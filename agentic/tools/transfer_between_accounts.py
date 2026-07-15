@@ -10,7 +10,6 @@ a completed transfer returns an authoritative receipt.
 
 from __future__ import annotations
 
-import sqlite3
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -20,6 +19,7 @@ from pydantic import Field
 
 from agentic.tools.bank_db import (
     BankToolArgs,
+    BankConnection,
     find_beneficiary,
     find_user_by_account_number,
     find_user_by_username,
@@ -60,7 +60,7 @@ async def transfer_between_accounts(
     username, _ = owner_identity()
     amount = money(amount)
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         owner = find_user_by_username(connection, username)
         if owner is None:
             return tool_result(
@@ -137,11 +137,11 @@ async def transfer_between_accounts(
         receiver_balance_after = money(receiver["Balance_SAR"]) + amount
 
         connection.execute(
-            "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
             (float(sender_balance_after), now, owner["uuid"]),
         )
         connection.execute(
-            "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
             (float(receiver_balance_after), now, receiver["uuid"]),
         )
         connection.execute(
@@ -149,7 +149,7 @@ async def transfer_between_accounts(
             " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
             "  Counterparty_Name, Counterparty_Account, Description, Category,"
             "  Balance_After_SAR, Reference, createdAt)"
-            " VALUES (?, ?, ?, 'debit', 'transfer_out', ?, ?, ?, ?, 'حوالات', ?, ?, ?)",
+            " VALUES (%s, %s, %s, 'debit', 'transfer_out', %s, %s, %s, %s, 'حوالات', %s, %s, %s)",
             (
                 str(uuid4()),
                 owner["uuid"],
@@ -168,7 +168,7 @@ async def transfer_between_accounts(
             " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
             "  Counterparty_Name, Counterparty_Account, Description, Category,"
             "  Balance_After_SAR, Reference, createdAt)"
-            " VALUES (?, ?, ?, 'credit', 'transfer_in', ?, ?, ?, ?, 'حوالات', ?, ?, ?)",
+            " VALUES (%s, %s, %s, 'credit', 'transfer_in', %s, %s, %s, %s, 'حوالات', %s, %s, %s)",
             (
                 str(uuid4()),
                 receiver["uuid"],

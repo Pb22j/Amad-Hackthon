@@ -2,24 +2,53 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
+import psycopg
 import pytest
 import pytest_asyncio
+from psycopg import sql
 
 from agentic.api.schemas import AgenticRequest, AuthorizationContext
 from agentic.config.loader import AppConfig, load_config
 from agentic.persistence.database import Database
 
 
+def _database_url(base_url: str, database_name: str) -> str:
+    parsed = urlsplit(base_url.replace("postgresql+psycopg://", "postgresql://", 1))
+    return urlunsplit(parsed._replace(path=f"/{database_name}"))
+
+
+@pytest.fixture(scope="session")
+def postgres_test_url() -> str:
+    base_url = os.getenv(
+        "TEST_POSTGRES_URL",
+        "postgresql://amad:development-only-password@localhost:55432/amad",
+    )
+    database_name = f"amad_pytest_{uuid4().hex[:10]}"
+    admin_url = _database_url(base_url, "postgres")
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+    test_url = _database_url(base_url, database_name)
+    yield test_url
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database_name))
+        )
+
+
 @pytest.fixture(autouse=True)
-def environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def environment(monkeypatch: pytest.MonkeyPatch, postgres_test_url: str) -> None:
     if os.getenv("RUN_LIVE_AGENT_TESTS") == "1":
         # The opt-in live matrix deliberately uses the caller's real provider,
         # PostgreSQL, encryption, and signing configuration.
         return
-    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-    monkeypatch.setenv("LANGGRAPH_DATABASE_URL", "postgresql://unused")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        postgres_test_url.replace("postgresql://", "postgresql+psycopg://", 1),
+    )
+    monkeypatch.setenv("LANGGRAPH_DATABASE_URL", postgres_test_url)
     monkeypatch.setenv("CONFIRMATION_SIGNING_KEY", "c" * 32)
     monkeypatch.setenv("CHECKPOINT_ENCRYPTION_KEY", "e" * 32)
     monkeypatch.setenv("APP_DATA_ENCRYPTION_KEY", "d" * 32)
@@ -48,10 +77,13 @@ def app_config() -> AppConfig:
 
 
 @pytest_asyncio.fixture
-async def database() -> Database:
-    database = Database("sqlite+aiosqlite:///:memory:")
+async def database(postgres_test_url: str) -> Database:
+    database = Database(
+        postgres_test_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    )
     await database.create_schema()
     yield database
+    await database.drop_schema()
     await database.dispose()
 
 

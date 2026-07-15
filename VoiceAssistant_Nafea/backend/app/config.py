@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,14 +20,16 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gpt-4o-mini"
     LLM_SYSTEM_PROMPT: str = "You are a helpful and conversational AI assistant."
     REALTIME_MODEL: str = "gpt-realtime-2.1"
-    REALTIME_VOICE: str = "alloy"
+    REALTIME_VOICE: str = "Charon"
 
     AGENTIC_BASE_URL: str = "http://localhost:9000"
     INTERACTION_SHARED_SECRET: str = "dummy_secret_key_123_dummy_secret_key"
     CONFIRMATION_SIGNING_KEY: str = "dummy_confirmation_key_1234567890ab"
     DEMO_CONFIRMATION_OTP: str = "1111"
     INTERACTION_DATA_ENCRYPTION_KEY: str = "dummy_interaction_data_key_12345678"
-    INTERACTION_STATE_DB: str = "cache_dir/interaction_state.db"
+    INTERACTION_DATABASE_URL: str = (
+        "postgresql://amad:development-only-password@localhost:55432/amad"
+    )
     INTERACTION_TIMESTAMP_TOLERANCE_SECONDS: int = 300
     AGENTIC_TIMEOUT_SECONDS: float = 15.0
 
@@ -41,7 +43,7 @@ class Settings(BaseSettings):
     VOICE_MEMORY_CONTEXT_TURNS: int = 8
     VOICE_MEMORY_MAX_TEXT_CHARACTERS: int = 2000
     SESSION_COOKIE_SECURE: bool = False
-    FRONTEND_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    FRONTEND_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
     MAX_AUDIO_BYTES: int = 10_000_000
 
     TTS_VOICE_ID: str = "alloy"
@@ -72,19 +74,23 @@ class Settings(BaseSettings):
             raise ValueError("CONFIRMATION_SIGNING_KEY must contain at least 32 bytes")
         if len(self.INTERACTION_DATA_ENCRYPTION_KEY.encode()) < 32:
             raise ValueError("INTERACTION_DATA_ENCRYPTION_KEY must contain at least 32 bytes")
+        if not self.INTERACTION_DATABASE_URL.startswith(
+            ("postgresql://", "postgresql+psycopg://")
+        ):
+            raise ValueError("INTERACTION_DATABASE_URL must be a PostgreSQL URL")
         if len(self.DEMO_CONFIRMATION_OTP) != 4 or not self.DEMO_CONFIRMATION_OTP.isdigit():
             raise ValueError("DEMO_CONFIRMATION_OTP must contain exactly four digits")
         if self.ENVIRONMENT == "production" and not self.SSL_VERIFY:
             raise ValueError("SSL verification cannot be disabled in production")
         if self.ENVIRONMENT == "production" and self.ALLOW_DEMO_SESSION_BOOTSTRAP:
             raise ValueError("demo session bootstrap must be disabled in production")
-        if self.ENVIRONMENT == "production" and self.DEMO_CONFIRMATION_OTP == "1111":
-            raise ValueError("fixed demo OTP must be replaced for production")
+        if self.ENVIRONMENT == "production":
+            raise ValueError("the demo OTP confirmation adapter is not supported in production")
         return self
 
 
     model_config = SettingsConfigDict(
-        env_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
+        env_file=Path(__file__).resolve().parents[3] / ".env.backend",
         env_file_encoding="utf-8",
         extra="ignore"
     )

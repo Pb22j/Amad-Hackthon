@@ -30,7 +30,8 @@ code owns identity, authorization, confirmation, isolation, persistence, and rep
 2. The API verifies the HMAC signature. Identity, tenant, session, and scopes come from this signed
    envelope; they are never inferred from natural language.
 3. `AgentService.submit()` enforces request and concurrency limits, redacts prohibited secrets,
-   creates an idempotent task row, and returns an acceptance response.
+   creates an idempotent task row, and returns an acceptance response. Reusing a request ID is
+   accepted only when the complete logical request fingerprint and identity tuple match.
 4. The service loads only memory matching the authenticated tenant and user.
 5. The outer graph screens prohibited requests and uses a structured-output model to classify
    intent and risk.
@@ -38,8 +39,9 @@ code owns identity, authorization, confirmation, isolation, persistence, and rep
    enforces model-call, tool-call, clarification, and per-tool limits.
 7. Every external tool has already been replaced with a guarded wrapper. The wrapper checks trusted
    scopes, exact confirmation, idempotency, ownership, receipts, output size, and safe retries.
-8. Missing information or confirmation produces a LangGraph interrupt. The service persists it and
-   emits an event to the interaction layer, which asks the user.
+8. Missing information or confirmation produces a LangGraph interrupt. The service persists the
+   state transition and outbound event in one transaction. A background outbox worker retries
+   signed webhook delivery in task order until the interaction layer acknowledges it.
 9. `POST /agentic/tasks/{task_id}/resume` verifies the same task/user/tenant/session relationship and
    resumes with a clarification answer or the exact authorization token plus dedicated demo OTP.
 10. The final `AgentReport` is validated against authoritative tool executions before it is stored
@@ -47,12 +49,12 @@ code owns identity, authorization, confirmation, isolation, persistence, and rep
 
 ## Tool integration
 
-`agentic/tools` now exports SQLite-backed demo tools for accounts, transactions, beneficiaries,
+`agentic/tools` now exports PostgreSQL-backed demo tools for accounts, transactions, beneficiaries,
 transfers, reports, financial analysis, gifts, bills, Qatta, and investments. The guard binds the
-authenticated user and tenant with a request-scoped context, including across SQLite worker threads.
+authenticated user and tenant with a request-scoped context, including across database worker threads.
 The older in-memory provider remains available through an explicit `AGENTIC_TOOL_PROVIDER` override.
 
-A future PostgreSQL/Open Banking provider can replace the default without changing orchestration:
+An Open Banking provider can replace the default without changing orchestration:
 
 ```python
 # agentic/tools/__init__.py

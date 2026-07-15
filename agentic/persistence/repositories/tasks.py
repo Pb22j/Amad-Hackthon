@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -45,9 +48,23 @@ class TaskRepository:
         self.session = session
 
     async def create(self, request: AgenticRequest, *, config_hash: str) -> AgentTaskRow:
+        row, _ = await self.create_or_get(request, config_hash=config_hash)
+        return row
+
+    async def create_or_get(
+        self,
+        request: AgenticRequest,
+        *,
+        config_hash: str,
+        request_fingerprint: str | None = None,
+    ) -> tuple[AgentTaskRow, bool]:
+        """Create a task or accept only an exact replay of the original request."""
+
+        fingerprint = request_fingerprint or self.request_fingerprint(request)
         existing = await self.get_by_request(str(request.request_id), request.tenant_id)
         if existing:
-            return existing
+            self._validate_replay(existing, request, fingerprint)
+            return existing, False
         row = AgentTaskRow(
             request_id=str(request.request_id),
             session_id=str(request.session_id),
@@ -59,6 +76,7 @@ class TaskRepository:
             original_request=request.natural_language_request,
             status=TaskStatus.RECEIVED.value,
             config_hash=config_hash,
+            request_fingerprint=fingerprint,
         )
         try:
             async with self.session.begin_nested():
@@ -68,9 +86,43 @@ class TaskRepository:
             existing = await self.get_by_request(str(request.request_id), request.tenant_id)
             if existing is None:
                 raise
-            return existing
+            self._validate_replay(existing, request, fingerprint)
+            return existing, False
         await self.add_event(row.id, "accepted", {})
-        return row
+        return row, True
+
+    @staticmethod
+    def request_fingerprint(request: AgenticRequest) -> str:
+        payload = request.model_dump(mode="json")
+        # ``created_at`` may be filled by Pydantic when an otherwise identical
+        # raw request omits it, so it is not part of logical replay identity.
+        payload.get("metadata", {}).pop("created_at", None)
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _validate_replay(
+        row: AgentTaskRow, request: AgenticRequest, fingerprint: str
+    ) -> None:
+        persisted_identity_matches = (
+            row.session_id == str(request.session_id)
+            and row.user_id == request.user_id
+            and row.tenant_id == request.tenant_id
+            and row.language == request.language
+            and row.authorized_scopes == sorted(request.authorization.scopes)
+            and row.assurance_level == request.authorization.assurance_level
+            and row.original_request == request.natural_language_request
+        )
+        if not persisted_identity_matches or (
+            row.request_fingerprint is not None
+            and not hmac.compare_digest(row.request_fingerprint, fingerprint)
+        ):
+            raise ValueError("request_id was already used with a different request")
+        if row.request_fingerprint is None:
+            # Backfill legacy rows after the persisted subset has been checked.
+            row.request_fingerprint = fingerprint
 
     async def get(self, task_id: str, *, tenant_id: str, user_id: str) -> AgentTaskRow | None:
         statement = select(AgentTaskRow).where(

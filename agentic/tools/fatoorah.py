@@ -11,7 +11,6 @@ monthly report. Bill-payment debits count toward the customer's daily limit.
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +19,8 @@ from pydantic import Field
 
 from agentic.tools.bank_db import (
     BankToolArgs,
+    BankConnection,
+    BankRow,
     find_user_by_username,
     money,
     next_reference,
@@ -47,7 +48,7 @@ class ListFatoorahsArgs(BankToolArgs):
     pass
 
 
-def _fatoorah_view(row: sqlite3.Row) -> dict[str, Any]:
+def _fatoorah_view(row: BankRow) -> dict[str, Any]:
     return {
         "bill_number": row["Bill_Number"],
         "biller": row["Biller_Name_Ar"],
@@ -64,7 +65,7 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
     username, _ = owner_identity()
     digits = last_four_digits.strip()
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         # The schema enforces four numeric digits; this guards direct calls.
         if not (len(digits) == 4 and digits.isdigit()):
             return tool_result(
@@ -93,7 +94,7 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
         # Bills are assigned to one customer; only the owner's bills match.
         matches = connection.execute(
             "SELECT * FROM fatoorahs"
-            " WHERE user_uuid = ? AND substr(Bill_Number, -4) = ?"
+            " WHERE user_uuid = %s AND RIGHT(Bill_Number, 4) = %s"
             " ORDER BY createdAt",
             (payer["uuid"], digits),
         ).fetchall()
@@ -162,11 +163,11 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
         now = timestamp()
         balance_after = balance - amount
         connection.execute(
-            "UPDATE users SET Balance_SAR = ?, updatedAt = ? WHERE uuid = ?",
+            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
             (float(balance_after), now, payer["uuid"]),
         )
         connection.execute(
-            "UPDATE fatoorahs SET status = 'paid', paidAt = ? WHERE uuid = ?",
+            "UPDATE fatoorahs SET status = 'paid', paidAt = %s WHERE uuid = %s",
             (now, fatoorah["uuid"]),
         )
         connection.execute(
@@ -174,7 +175,7 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
             " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
             "  Counterparty_Name, Counterparty_Account, Description, Category,"
             "  Balance_After_SAR, Reference, createdAt)"
-            " VALUES (?, ?, ?, 'debit', 'fatoorah_payment', ?, ?, NULL, ?, 'فواتير', ?, ?, ?)",
+            " VALUES (%s, %s, %s, 'debit', 'fatoorah_payment', %s, %s, NULL, %s, 'فواتير', %s, %s, %s)",
             (
                 str(uuid4()),
                 payer["uuid"],
@@ -215,7 +216,7 @@ async def list_fatoorahs() -> dict[str, Any]:
 
     username, _ = owner_identity()
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         user = find_user_by_username(connection, username)
         if user is None:
             return tool_result(
@@ -225,7 +226,7 @@ async def list_fatoorahs() -> dict[str, Any]:
                 error_code="customer_not_found",
             )
         rows = connection.execute(
-            "SELECT * FROM fatoorahs WHERE user_uuid = ?"
+            "SELECT * FROM fatoorahs WHERE user_uuid = %s"
             " ORDER BY status DESC, createdAt",
             (user["uuid"],),
         ).fetchall()

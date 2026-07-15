@@ -8,7 +8,6 @@ return a valid empty report rather than an error.
 
 from __future__ import annotations
 
-import sqlite3
 from decimal import Decimal
 from typing import Any
 
@@ -17,6 +16,7 @@ from pydantic import Field
 
 from agentic.tools.bank_db import (
     BankToolArgs,
+    BankConnection,
     find_user_by_username,
     money,
     month_bounds,
@@ -45,7 +45,7 @@ async def monthly_report(month: str | None = None) -> dict[str, Any]:
     report_month = month or riyadh_now().strftime("%Y-%m")
     start, end = month_bounds(report_month)
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         owner = find_user_by_username(connection, username)
         if owner is None:
             return tool_result(
@@ -57,7 +57,7 @@ async def monthly_report(month: str | None = None) -> dict[str, Any]:
 
         rows = connection.execute(
             "SELECT * FROM transactions"
-            " WHERE user_uuid = ? AND createdAt >= ? AND createdAt < ?"
+            " WHERE user_uuid = %s AND createdAt >= %s AND createdAt < %s"
             " ORDER BY createdAt",
             (owner["uuid"], start, end),
         ).fetchall()

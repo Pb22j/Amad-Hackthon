@@ -1,6 +1,6 @@
 # Financial Tool Contract
 
-The repository includes a SQLite-backed demo provider, while the agent boundary also accepts
+The repository includes a PostgreSQL-backed demo provider, while the agent boundary also accepts
 external LangChain `BaseTool` objects and agent-level `ToolMetadata`.
 
 ## Default tools package

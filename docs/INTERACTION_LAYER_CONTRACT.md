@@ -9,7 +9,9 @@ clarification and confirmation pauses, and the final structured report.
 
 The integration is asynchronous and event-driven:
 
-1. The interaction layer authenticates the user and submits a signed task.
+1. The interaction layer authenticates the user, durably reserves the request ID for the current
+   session, and submits a signed task. This reservation lets an early signed webhook establish the
+   task binding before the submit HTTP response arrives.
 2. The agentic API immediately returns `202 Accepted` and a durable `task_id`.
 3. The agent sends signed webhook events as the task changes state.
 4. When input or approval is needed, the interaction layer asks the user and calls the resume API.
@@ -156,8 +158,9 @@ Successful response (`202 Accepted`):
 }
 ```
 
-Persist the `request_id` ↔ `task_id` ↔ `session_id` mapping before acknowledging the operation to
-the user. The `202` response means accepted for processing, not financially completed.
+Persist a `request_id` ↔ `session_id` reservation before submission. Atomically bind its `task_id`
+from either the first valid signed webhook or the `202` response, and reject conflicting bindings.
+The `202` response means accepted for processing, not financially completed.
 
 ## 6. Agent-to-Interaction Webhook
 
@@ -180,8 +183,9 @@ expected = hex(HMAC-SHA256(
 
 Verify the signature with a constant-time comparison **before parsing or using the body**. Reject
 stale timestamps (recommended maximum age: 300 seconds). Return any `2xx` response only after the
-event has been durably recorded. The agent retries failed delivery up to three times, so use a
-deduplication key such as `(task_id, event_type, created_at)` or persist a body hash.
+event has been durably recorded. The agent stores events in a transactional outbox and retries
+failed delivery in task order, so duplicate delivery is expected; persist a body hash for
+deduplication.
 
 Common event envelope:
 

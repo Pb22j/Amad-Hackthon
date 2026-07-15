@@ -8,7 +8,6 @@ codes instead of raising, so the agent can explain the outcome safely.
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 from uuid import uuid4
 
@@ -17,6 +16,7 @@ from pydantic import Field
 
 from agentic.tools.bank_db import (
     BankToolArgs,
+    BankConnection,
     find_beneficiary,
     find_user_by_account_number,
     find_user_by_username,
@@ -57,7 +57,7 @@ async def add_benefit(
     username, _ = owner_identity()
     normalized = normalize_account_number(benefit_account_number)
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         owner = find_user_by_username(connection, username)
         if owner is None:
             return tool_result(
@@ -77,7 +77,7 @@ async def add_benefit(
 
         short_name_taken = connection.execute(
             "SELECT 1 FROM beneficiaries"
-            " WHERE owner_uuid = ? AND TRIM(Short_Name) = ? COLLATE NOCASE",
+            " WHERE owner_uuid = %s AND LOWER(TRIM(Short_Name)) = LOWER(%s)",
             (owner["uuid"], short_name.strip()),
         ).fetchone()
         if short_name_taken is not None:
@@ -117,7 +117,7 @@ async def add_benefit(
             "INSERT INTO beneficiaries"
             " (uuid, owner_uuid, Full_Name, Short_Name, Account_Number, status,"
             "  createdAt, updatedAt)"
-            " VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
+            " VALUES (%s, %s, %s, %s, %s, 'active', %s, %s)",
             (
                 beneficiary_id,
                 owner["uuid"],

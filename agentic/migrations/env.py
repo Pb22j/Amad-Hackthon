@@ -8,10 +8,12 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from agentic.config.environment import load_backend_environment
 from agentic.persistence.models import Base
 
 
 config = context.config
+load_backend_environment()
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
@@ -32,11 +34,31 @@ LANGGRAPH_TABLES = {
     "store_vector_migrations",
 }
 
+# These tables are shared by the DB-API-backed financial tools and interaction
+# service. Their explicit migration is authoritative; excluding them keeps
+# SQLAlchemy autogenerate from proposing destructive drops.
+UNIFIED_RUNTIME_TABLES = {
+    "platform_users",
+    "users",
+    "beneficiaries",
+    "qattas",
+    "qatta_bills",
+    "fatoorahs",
+    "transactions",
+    "investment_assets",
+    "investment_holdings",
+    "interaction_sessions",
+    "interaction_requests",
+    "interaction_tasks",
+    "interaction_events",
+    "voice_turns",
+}
+
 
 def include_name(name: str | None, type_: str, parent_names: dict[str, str | None]) -> bool:
-    if type_ == "table" and name in LANGGRAPH_TABLES:
+    if type_ == "table" and name in LANGGRAPH_TABLES | UNIFIED_RUNTIME_TABLES:
         return False
-    return parent_names.get("table_name") not in LANGGRAPH_TABLES
+    return parent_names.get("table_name") not in LANGGRAPH_TABLES | UNIFIED_RUNTIME_TABLES
 
 
 def run_migrations_offline() -> None:

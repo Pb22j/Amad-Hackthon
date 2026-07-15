@@ -147,7 +147,7 @@ components/
   auth/
     login-screen.tsx      Demo login/register form (mock; submit→/chat, guest→/dashboard)
   chat/
-    chat-screen.tsx       Chat UI: bubbles + simulated mic/equalizer + X→/dashboard
+    chat-screen.tsx       Secure backend chat + realtime voice + task/confirmation UI
   nafi/                   ← THE DASHBOARD (edit here)
     top-header.tsx        Brand mark + "Nafi/نافع" + LanguageToggle + bell + avatar
     net-worth-card.tsx    $10,649,382 gradient number, delta badge, as-of date
@@ -167,7 +167,7 @@ components/
 lib/
   i18n.tsx                i18n system: LanguageProvider, useLang, useFormat, useLocalize (§8)
   nafiData.ts             ALL mock data (§9)
-  chatDemo.ts             respondTo(input, lang) — scripted bilingual chat replies
+  nafea-api.ts            Browser API/WebSocket client for the interaction service
   utils.ts                cn() — clsx + tailwind-merge
 
 public/logos/             al-rajhi.svg, alinma.svg, sab.svg, snb.svg (PLACEHOLDERS) + README.md
@@ -176,8 +176,11 @@ next.config.ts            output: "export"
 wrangler.jsonc            Cloudflare static-assets config
 ```
 
-### ⚠️ Parallel duplicate — do NOT confuse
-A second, **unused** implementation exists under `components/finance/*` backed by `lib/financeData.ts`. **It is NOT imported by the app** — `app/page.tsx` uses `components/nafi/*` only. It was not part of this work and is left untouched. **Edit `components/nafi/*`, never `components/finance/*`.** Consider deleting the duplicate (see §14).
+### Archived implementations
+
+The unused finance-card prototype is preserved under `legacy/nafi-finance-ui/`. The original Vite
+voice client is preserved under `legacy/vite-voice-ui/`. Neither directory is part of the active
+Next.js build; edit `components/nafi/*` and `components/chat/*` instead.
 
 ---
 
@@ -340,7 +343,7 @@ git push origin front-end
 
 **Notes:**
 - A throwaway empty repo `mohammed57770/Amad-Hackthon` was created by mistake earlier and is **unused** (can be deleted).
-- **Git-ignored:** `node_modules`, `.next`, `out`, `build`, `next-env.d.ts`, `*.tsbuildinfo`, `.env*`, `.DS_Store`, and `CONVERSATION.md` (a local design-journey log — this HANDOFF.md supersedes it and is intended to be committed).
+- **Git-ignored runtime config:** `.env.backend` for both Python services and `.env.local` for Next.js. Their tracked templates are `.env.backend.example` and `.env.frontend.example`.
 
 ---
 
@@ -356,8 +359,8 @@ git push origin front-end
 
 **Bugs / inconsistencies to fix:**
 - 🧹 **`recharts` + `react-is`** are still dependencies but unused — remove to slim the tree.
-- 🎙️ **Chat + login are demos** — `chat-screen.tsx` uses scripted replies (`lib/chatDemo.ts`) and a simulated mic; `login-screen.tsx` is a mock gate (no real auth). Wire to a real assistant/auth backend for production.
-- 🧹 **`components/finance/*` + `lib/financeData.ts`** — unused duplicate dashboard; decide whether to delete.
+- 🔐 **Login remains a demo gate** — chat now uses the authenticated interaction backend, but `login-screen.tsx` still does not provide production identity/authentication.
+- 🧱 **`legacy/` is intentionally excluded from the active Next.js TypeScript project** — use it only for historical reference or migration work.
 
 **Environment gotchas:**
 - ⚠️ **Never run `npm run build` while `next dev` is running** — it clobbers `.next` and causes transient `Cannot find module './xxx.js'` 500s. Stop dev first, or build only at the end. Recovery: stop server → `rm -rf .next` → restart.
@@ -372,9 +375,9 @@ git push origin front-end
 
 - [ ] Drop **real official bank logos** into `public/logos/` (same filenames) — currently placeholders.
 - [ ] Remove **`recharts` + `react-is`** from `package.json` (unused).
-- [ ] Wire the **chat** (`lib/chatDemo.ts`) and **login** to real assistant/auth backends (currently scripted/mock).
+- [ ] Replace the demo session bootstrap/login gate with the platform's production identity provider.
 - [ ] Flesh out the placeholder routes (`accounts`, `advisor`, `settings`).
-- [ ] Decide whether to delete the unused **`components/finance/*`** duplicate.
+- [ ] Remove the archived `legacy/` implementations after the product team confirms they are no longer needed.
 - [ ] Decide whether to **redeploy** the navy bento to Cloudflare (live is still indigo by choice — §12).
 - [ ] Open a **PR** from `front-end` → `main` on the team repo when ready to integrate.
 

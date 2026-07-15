@@ -39,9 +39,15 @@ from agentic.memory.extraction import MemoryExtractor
 from agentic.memory.policy import MemoryPolicy, MemoryPolicyError
 from agentic.memory.service import MemoryService
 from agentic.persistence.database import Database
-from agentic.persistence.models import AgentTaskRow, TaskEventRow, ToolExecutionRow
+from agentic.persistence.models import (
+    AgentTaskRow,
+    EventOutboxRow,
+    TaskEventRow,
+    ToolExecutionRow,
+)
 from agentic.policy.output_policy import OutputPolicy
 from agentic.persistence.repositories.clarifications import ClarificationRepository
+from agentic.persistence.repositories.outbox import EventOutboxRepository
 from agentic.persistence.repositories.tasks import TaskRepository
 from agentic.security.confirmation import ConfirmationSigner
 from agentic.security.identity import AuthContext
@@ -83,6 +89,9 @@ class AgentService:
             json.dumps(public_config, sort_keys=True).encode()
         ).hexdigest()
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._outbox_worker: asyncio.Task[None] | None = None
+        self._outbox_stop = asyncio.Event()
+        self._outbox_delivery_lock = asyncio.Lock()
 
     def _valid_demo_otp(self, otp_code: str | None) -> bool:
         """Validate the demo OTP without placing it in graph state or audit data."""
@@ -101,6 +110,7 @@ class AgentService:
         if len(request.natural_language_request) > self.config.limits.task.max_request_characters:
             raise ValueError("request exceeds configured maximum length")
         await self.rate_limiter.acquire(tenant_id=request.tenant_id, user_id=request.user_id)
+        request_fingerprint = TaskRepository.request_fingerprint(request)
         sanitized_request = request.model_copy(
             update={
                 "natural_language_request": redact_text(request.natural_language_request),
@@ -108,12 +118,19 @@ class AgentService:
             }
         )
         try:
-            accepted, task_id = await self._accept(sanitized_request)
+            accepted, task_id, should_run = await self._accept(
+                sanitized_request, request_fingerprint=request_fingerprint
+            )
         except Exception:
             await self.rate_limiter.release(
                 tenant_id=request.tenant_id, user_id=request.user_id
             )
             raise
+        if not should_run:
+            await self.rate_limiter.release(
+                tenant_id=request.tenant_id, user_id=request.user_id
+            )
+            return accepted
         if background:
             task_handle = asyncio.create_task(
                 self._run_new_with_release(task_id, sanitized_request)
@@ -129,31 +146,42 @@ class AgentService:
                 )
         return accepted
 
-    async def _accept(self, request: AgenticRequest) -> tuple[AcceptedTask, str]:
+    async def _accept(
+        self, request: AgenticRequest, *, request_fingerprint: str
+    ) -> tuple[AcceptedTask, str, bool]:
+        outbox_id: str | None = None
         async with self.database.session() as session:
-            task = await TaskRepository(session).create(request, config_hash=self.config_hash)
+            task, created = await TaskRepository(session).create_or_get(
+                request,
+                config_hash=self.config_hash,
+                request_fingerprint=request_fingerprint,
+            )
             if task.expires_at is None:
                 task.expires_at = datetime.now(timezone.utc) + timedelta(
                     days=self.config.limits.memory.task_checkpoint_ttl_days
                 )
             task_id = task.id
+            if created:
+                outbox = await EventOutboxRepository(session).enqueue(
+                    AgentEvent(
+                        task_id=UUID(task_id),
+                        request_id=request.request_id,
+                        session_id=request.session_id,
+                        event_type=AgentEventType.ACCEPTED,
+                        user_safe_summary="The request was accepted.",
+                    )
+                )
+                outbox_id = outbox.id
         accepted = AcceptedTask(
             request_id=request.request_id,
             task_id=UUID(task_id),
             status="accepted",
             user_safe_message="The financial task was accepted.",
         )
-        await self.events.publish(
-            AgentEvent(
-                task_id=UUID(task_id),
-                request_id=request.request_id,
-                session_id=request.session_id,
-                event_type=AgentEventType.ACCEPTED,
-                user_safe_summary="The request was accepted.",
-            )
-        )
-        TASKS.labels(outcome="accepted", language=request.language).inc()
-        return accepted, task_id
+        if outbox_id is not None:
+            await self._deliver_outbox_id(outbox_id)
+            TASKS.labels(outcome="accepted", language=request.language).inc()
+        return accepted, task_id, TaskStatus(task.status) == TaskStatus.RECEIVED
 
     async def _run_new_with_release(self, task_id: str, request: AgenticRequest) -> None:
         try:
@@ -258,6 +286,8 @@ class AgentService:
 
     async def _resume(self, task_id: UUID, request: ResumeTaskRequest) -> None:
         task_id_str = str(task_id)
+        rejection_outbox_id: str | None = None
+        rejection_language: str | None = None
         async with self.database.session() as session:
             repository = TaskRepository(session)
             clarifications = ClarificationRepository(session)
@@ -285,37 +315,52 @@ class AgentService:
                         TaskStatus.REJECTED,
                         payload={"reason_code": "user_rejected_confirmation"},
                     )
-                    await self.events.publish(
+                    outbox = await EventOutboxRepository(session).enqueue(
                         AgentEvent(
                             task_id=task_id,
                             request_id=UUID(row.request_id),
                             session_id=UUID(row.session_id),
                             event_type=AgentEventType.REJECTED,
-                            user_safe_summary="The user declined the requested financial action.",
+                            user_safe_summary=(
+                                "The user declined the requested financial action."
+                            ),
                             details={"reason_code": "user_rejected_confirmation"},
                         )
                     )
-                    TASKS.labels(outcome=TaskStatus.REJECTED.value, language=row.language).inc()
-                    return
-                if not self._valid_demo_otp(request.otp_code):
-                    raise PermissionError("invalid confirmation OTP")
-                resume_value = request.authorization_token
-            explicit_user_values = await clarifications.answered_values(task_id_str)
-            await repository.transition(row, TaskStatus.RUNNING)
-            original = AgenticRequest(
-                request_id=UUID(row.request_id),
-                session_id=UUID(row.session_id),
-                user_id=row.user_id,
-                tenant_id=row.tenant_id,
-                language=row.language,
-                natural_language_request=row.original_request,
-                original_user_message=row.original_request,
-                authorization=AuthorizationContext(
-                    scopes=frozenset(row.authorized_scopes),
-                    authenticated_at=row.created_at,
-                    assurance_level=row.assurance_level,
-                ),
-            )
+                    rejection_outbox_id = outbox.id
+                    rejection_language = row.language
+                    resume_value = None
+                    explicit_user_values = ()
+                    original = None
+                else:
+                    if not self._valid_demo_otp(request.otp_code):
+                        raise PermissionError("invalid confirmation OTP")
+                    resume_value = request.authorization_token
+            if rejection_outbox_id is None:
+                explicit_user_values = await clarifications.answered_values(task_id_str)
+                await repository.transition(row, TaskStatus.RUNNING)
+                original = AgenticRequest(
+                    request_id=UUID(row.request_id),
+                    session_id=UUID(row.session_id),
+                    user_id=row.user_id,
+                    tenant_id=row.tenant_id,
+                    language=row.language,
+                    natural_language_request=row.original_request,
+                    original_user_message=row.original_request,
+                    authorization=AuthorizationContext(
+                        scopes=frozenset(row.authorized_scopes),
+                        authenticated_at=row.created_at,
+                        assurance_level=row.assurance_level,
+                    ),
+                )
+        if rejection_outbox_id is not None:
+            await self._deliver_outbox_id(rejection_outbox_id)
+            TASKS.labels(
+                outcome=TaskStatus.REJECTED.value,
+                language=rejection_language or "unknown",
+            ).inc()
+            return
+        assert original is not None
         auth = AuthContext(
             user_id=request.user_id,
             tenant_id=request.tenant_id,
@@ -443,7 +488,13 @@ class AgentService:
         if kind == "clarification":
             target = TaskStatus.WAITING_FOR_INPUT
             event_type = AgentEventType.INPUT_NEEDED
-            async with self.database.session() as session:
+        elif kind == "confirmation":
+            target = TaskStatus.WAITING_FOR_CONFIRMATION
+            event_type = AgentEventType.CONFIRMATION_NEEDED
+        else:
+            raise ValueError("unsupported graph interrupt")
+        async with self.database.session() as session:
+            if kind == "clarification":
                 await ClarificationRepository(session).create(
                     clarification_id=payload["clarification_id"],
                     task_id=task_id,
@@ -452,29 +503,27 @@ class AgentService:
                     expected_answer=payload["expected_answer"],
                     expires_in_seconds=payload["expires_in_seconds"],
                 )
-        elif kind == "confirmation":
-            target = TaskStatus.WAITING_FOR_CONFIRMATION
-            event_type = AgentEventType.CONFIRMATION_NEEDED
-        else:
-            raise ValueError("unsupported graph interrupt")
-        async with self.database.session() as session:
             repository = TaskRepository(session)
             row = await repository.get(task_id, tenant_id=request.tenant_id, user_id=request.user_id)
             if row is None:
                 raise LookupError("task not found")
             await repository.transition(row, target, payload=payload)
-        await self.events.publish(
-            AgentEvent(
-                task_id=UUID(task_id),
-                request_id=request.request_id,
-                session_id=request.session_id,
-                event_type=event_type,
-                user_safe_summary=(
-                    payload.get("question", "Confirmation is required before continuing.")
-                ),
-                details=payload,
+            outbox = await EventOutboxRepository(session).enqueue(
+                AgentEvent(
+                    task_id=UUID(task_id),
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    event_type=event_type,
+                    user_safe_summary=(
+                        payload.get(
+                            "question", "Confirmation is required before continuing."
+                        )
+                    ),
+                    details=payload,
+                )
             )
-        )
+            outbox_id = outbox.id
+        await self._deliver_outbox_id(outbox_id)
         TASKS.labels(outcome=target.value, language=request.language).inc()
 
     async def _extract_memories(self, request: AgenticRequest, task_id: str) -> None:
@@ -552,6 +601,12 @@ class AgentService:
             "rejected": TaskStatus.REJECTED,
             "failed": TaskStatus.FAILED,
         }[report.status]
+        event_type = {
+            TaskStatus.COMPLETED: AgentEventType.COMPLETED,
+            TaskStatus.PARTIALLY_COMPLETED: AgentEventType.COMPLETED,
+            TaskStatus.REJECTED: AgentEventType.REJECTED,
+            TaskStatus.FAILED: AgentEventType.FAILED,
+        }[target]
         async with self.database.session() as session:
             repository = TaskRepository(session)
             row = await repository.get(task_id, tenant_id=request.tenant_id, user_id=request.user_id)
@@ -561,22 +616,18 @@ class AgentService:
             row.intent = result["intent"]["intent"] if result.get("intent") else None
             row.risk = result["risk"]["level"] if result.get("risk") else None
             await repository.transition(row, target, payload={"report": row.final_report})
-        event_type = {
-            TaskStatus.COMPLETED: AgentEventType.COMPLETED,
-            TaskStatus.PARTIALLY_COMPLETED: AgentEventType.COMPLETED,
-            TaskStatus.REJECTED: AgentEventType.REJECTED,
-            TaskStatus.FAILED: AgentEventType.FAILED,
-        }[target]
-        await self.events.publish(
-            AgentEvent(
-                task_id=UUID(task_id),
-                request_id=request.request_id,
-                session_id=request.session_id,
-                event_type=event_type,
-                user_safe_summary=report.summary,
-                details={"report": report.model_dump(mode="json")},
+            outbox = await EventOutboxRepository(session).enqueue(
+                AgentEvent(
+                    task_id=UUID(task_id),
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    event_type=event_type,
+                    user_safe_summary=report.summary,
+                    details={"report": report.model_dump(mode="json")},
+                )
             )
-        )
+            outbox_id = outbox.id
+        await self._deliver_outbox_id(outbox_id)
         TASKS.labels(outcome=target.value, language=request.language).inc()
         if target in {TaskStatus.COMPLETED, TaskStatus.PARTIALLY_COMPLETED}:
             await self._extract_memories(request, task_id)
@@ -584,6 +635,7 @@ class AgentService:
     async def _record_failure(
         self, task_id: str, request: AgenticRequest, error_code: str
     ) -> None:
+        outbox_id: str | None = None
         async with self.database.session() as session:
             repository = TaskRepository(session)
             row = await repository.get(task_id, tenant_id=request.tenant_id, user_id=request.user_id)
@@ -597,17 +649,82 @@ class AgentService:
                 await repository.transition(
                     row, TaskStatus.FAILED, payload={"error_code": error_code}
                 )
-        await self.events.publish(
-            AgentEvent(
-                task_id=UUID(task_id),
-                request_id=request.request_id,
-                session_id=request.session_id,
-                event_type=AgentEventType.FAILED,
-                user_safe_summary="The financial task could not be completed safely.",
-                details={"error_code": error_code},
-            )
-        )
+            if row is not None:
+                outbox = await EventOutboxRepository(session).enqueue(
+                    AgentEvent(
+                        task_id=UUID(task_id),
+                        request_id=request.request_id,
+                        session_id=request.session_id,
+                        event_type=AgentEventType.FAILED,
+                        user_safe_summary=(
+                            "The financial task could not be completed safely."
+                        ),
+                        details={"error_code": error_code},
+                    )
+                )
+                outbox_id = outbox.id
+        if outbox_id is not None:
+            await self._deliver_outbox_id(outbox_id)
         TASKS.labels(outcome="failed", language=request.language).inc()
+
+    async def _deliver_outbox_id(self, outbox_id: str) -> bool:
+        async with self._outbox_delivery_lock:
+            async with self.database.session() as session:
+                row = await session.get(EventOutboxRow, outbox_id)
+                if row is None or row.delivered_at is not None:
+                    return True
+                if await EventOutboxRepository(session).has_undelivered_predecessor(row):
+                    return False
+                event = AgentEvent.model_validate(row.payload)
+            try:
+                await self.events.publish(event)
+            except Exception as exc:
+                async with self.database.session() as session:
+                    row = await session.get(EventOutboxRow, outbox_id)
+                    if row is not None and row.delivered_at is None:
+                        await EventOutboxRepository(session).failed(
+                            row, error_code=type(exc).__name__
+                        )
+                return False
+            async with self.database.session() as session:
+                row = await session.get(EventOutboxRow, outbox_id)
+                if row is not None and row.delivered_at is None:
+                    await EventOutboxRepository(session).delivered(row)
+            return True
+
+    async def _deliver_pending_outbox(self) -> None:
+        async with self.database.session() as session:
+            rows = await EventOutboxRepository(session).pending()
+            outbox_ids = [row.id for row in rows]
+        for outbox_id in outbox_ids:
+            await self._deliver_outbox_id(outbox_id)
+
+    def start_event_delivery_worker(self) -> None:
+        if self._outbox_worker is not None and not self._outbox_worker.done():
+            return
+        self._outbox_stop.clear()
+        self._outbox_worker = asyncio.create_task(self._event_delivery_loop())
+
+    async def _event_delivery_loop(self) -> None:
+        while not self._outbox_stop.is_set():
+            try:
+                await asyncio.wait_for(self._outbox_stop.wait(), timeout=1)
+            except TimeoutError:
+                pass
+            if not self._outbox_stop.is_set():
+                try:
+                    await self._deliver_pending_outbox()
+                except Exception:
+                    # A transient database outage must not permanently kill the
+                    # retry worker; the next pass will retry the durable rows.
+                    continue
+
+    async def stop_event_delivery_worker(self) -> None:
+        if self._outbox_worker is None:
+            return
+        self._outbox_stop.set()
+        await self._outbox_worker
+        self._outbox_worker = None
 
     async def wait_for_background_tasks(self) -> None:
         if self._background_tasks:

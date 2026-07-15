@@ -27,9 +27,20 @@ def test_llm_config_requires_critical_roles():
 def test_short_signing_key_is_rejected():
     with pytest.raises(ValidationError, match="at least 32 bytes"):
         SecretsConfig(
-            database_url="sqlite://",
-            langgraph_database_url="postgres://x",
+            database_url="postgresql://localhost/amad",
+            langgraph_database_url="postgresql://localhost/amad",
             confirmation_signing_key="short",
+            interaction_shared_secret="i" * 32,
+            application_encryption_key="d" * 32,
+        )
+
+
+def test_runtime_database_must_be_postgresql():
+    with pytest.raises(ValidationError, match="database_url must be a PostgreSQL URL"):
+        SecretsConfig(
+            database_url="mysql://localhost/amad",
+            langgraph_database_url="postgresql://localhost/amad",
+            confirmation_signing_key="c" * 32,
             interaction_shared_secret="i" * 32,
             application_encryption_key="d" * 32,
         )
@@ -74,6 +85,29 @@ def test_production_requires_encryption_and_webhook(app_config):
                 "app": production_app,
                 "secrets": app_config.secrets.model_copy(
                     update={"interaction_event_webhook_url": None}
+                ),
+            }
+        )
+
+
+def test_demo_otp_adapter_cannot_be_enabled_in_production(app_config):
+    from pydantic import SecretStr, ValidationError
+
+    from agentic.config.loader import AppConfig
+
+    production_app = app_config.app.model_copy(
+        update={"service": app_config.app.service.model_copy(update={"environment": "production"})}
+    )
+    with pytest.raises(ValidationError, match="demo OTP confirmation adapter"):
+        AppConfig.model_validate(
+            app_config.model_dump(mode="python")
+            | {
+                "app": production_app,
+                "secrets": app_config.secrets.model_copy(
+                    update={
+                        "interaction_event_webhook_url": "https://interaction.test/webhook",
+                        "demo_confirmation_otp": SecretStr("2222"),
+                    }
                 ),
             }
         )

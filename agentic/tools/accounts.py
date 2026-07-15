@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -10,6 +9,7 @@ from pydantic import Field
 
 from agentic.tools.bank_db import (
     BankToolArgs,
+    BankConnection,
     find_user_by_username,
     money,
     next_reference,
@@ -43,7 +43,7 @@ def _masked_account(account_number: str) -> str:
 async def get_balance(account: str = "primary") -> dict[str, Any]:
     username, _ = owner_identity()
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         user = find_user_by_username(connection, username)
         if user is None:
             return tool_result(
@@ -83,7 +83,7 @@ async def search_transactions(query: str = "", limit: int = 10) -> dict[str, Any
     username, _ = owner_identity()
     needle = query.strip().casefold()
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         user = find_user_by_username(connection, username)
         if user is None:
             return tool_result(
@@ -93,7 +93,7 @@ async def search_transactions(query: str = "", limit: int = 10) -> dict[str, Any
                 error_code="customer_not_found",
             )
         rows = connection.execute(
-            "SELECT * FROM transactions WHERE user_uuid = ? ORDER BY createdAt DESC LIMIT 250",
+            "SELECT * FROM transactions WHERE user_uuid = %s ORDER BY createdAt DESC LIMIT 250",
             (user["uuid"],),
         ).fetchall()
         if needle:

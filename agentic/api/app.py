@@ -64,8 +64,16 @@ def create_app(
             app.state.agent_service = service
             app.state.config = config or service.config
             app.state.signature_verifier = signature_verifier
-            yield
-            await service.wait_for_background_tasks()
+            start_worker = getattr(service, "start_event_delivery_worker", None)
+            if start_worker is not None:
+                start_worker()
+            try:
+                yield
+                await service.wait_for_background_tasks()
+            finally:
+                stop_worker = getattr(service, "stop_event_delivery_worker", None)
+                if stop_worker is not None:
+                    await stop_worker()
             return
 
         runtime_config = config or load_config()
@@ -133,10 +141,12 @@ def create_app(
         app.state.signature_verifier = signature_verifier or InteractionSignatureVerifier(
             runtime_config.secrets.interaction_shared_secret.get_secret_value()
         )
+        runtime_service.start_event_delivery_worker()
         try:
             yield
             await runtime_service.wait_for_background_tasks()
         finally:
+            await runtime_service.stop_event_delivery_worker()
             if isinstance(publisher, WebhookEventPublisher):
                 await publisher.close()
             await database.dispose()

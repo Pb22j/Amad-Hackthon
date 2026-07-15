@@ -26,6 +26,20 @@ async def test_task_creation_is_idempotent_per_tenant(database, agentic_request)
 
 
 @pytest.mark.integration
+async def test_task_creation_rejects_conflicting_request_id_reuse(
+    database, agentic_request
+):
+    conflicting = agentic_request.model_copy(
+        update={"natural_language_request": "Transfer 500 SAR."}
+    )
+    async with database.session() as session:
+        repository = TaskRepository(session)
+        await repository.create(agentic_request, config_hash="a" * 64)
+        with pytest.raises(ValueError, match="different request"):
+            await repository.create(conflicting, config_hash="a" * 64)
+
+
+@pytest.mark.integration
 async def test_task_repository_enforces_identity_and_state_machine(database, agentic_request):
     async with database.session() as session:
         repository = TaskRepository(session)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from agentic.agent.service import AgentService
 from agentic.api.schemas import TaskStatus
 from agentic.memory.extraction import MemoryCandidate
-from agentic.persistence.models import AgentTaskRow, ToolExecutionRow
+from agentic.persistence.models import AgentTaskRow, EventOutboxRow, ToolExecutionRow
 from agentic.security.confirmation import ConfirmationSigner
 from agentic.telemetry.events import InMemoryEventPublisher
 
@@ -215,7 +216,7 @@ class FailingPublisher:
 
 
 @pytest.mark.integration
-async def test_acceptance_failure_releases_concurrency_slot(
+async def test_event_delivery_failure_is_outboxed_without_failing_task(
     database, app_config, agentic_request
 ):
     instance = AgentService(
@@ -225,8 +226,30 @@ async def test_acceptance_failure_releases_concurrency_slot(
         confirmation_signer=ConfirmationSigner("c" * 32),
         events=FailingPublisher(),
     )
-    with pytest.raises(RuntimeError, match="webhook"):
-        await instance.submit(agentic_request, background=False)
+    accepted = await instance.submit(agentic_request, background=False)
+    async with database.session() as session:
+        task = await session.get(AgentTaskRow, str(accepted.task_id))
+        pending = list(await session.scalars(__import__("sqlalchemy").select(EventOutboxRow)))
+        assert task.status == TaskStatus.COMPLETED.value
+        assert len(pending) == 2
+        assert all(row.delivered_at is None for row in pending)
+        # Completion stays behind the failed acceptance event so interaction
+        # state cannot be regressed by a late accepted delivery.
+        assert sorted(row.attempts for row in pending) == [0, 1]
+        for row in pending:
+            row.next_attempt_at = datetime.now(timezone.utc)
+    recovered = InMemoryEventPublisher()
+    instance.events = recovered
+    await instance._deliver_pending_outbox()
+    assert [event.event_type.value for event in recovered.events] == [
+        "accepted",
+        "completed",
+    ]
+    async with database.session() as session:
+        delivered = list(
+            await session.scalars(__import__("sqlalchemy").select(EventOutboxRow))
+        )
+        assert all(row.delivered_at is not None for row in delivered)
     await instance.rate_limiter.acquire(
         tenant_id=agentic_request.tenant_id, user_id=agentic_request.user_id
     )

@@ -20,13 +20,15 @@ class Database:
         pool_timeout: int = 30,
         echo: bool = False,
     ) -> None:
-        options: dict[str, object] = {"echo": echo, "pool_pre_ping": True}
-        if not url.startswith("sqlite"):
-            options.update(
-                pool_size=pool_size,
-                max_overflow=max_overflow,
-                pool_timeout=pool_timeout,
-            )
+        if not url.startswith(("postgresql://", "postgresql+psycopg://")):
+            raise ValueError("Database requires a PostgreSQL URL")
+        options: dict[str, object] = {
+            "echo": echo,
+            "pool_pre_ping": True,
+            "pool_size": pool_size,
+            "max_overflow": max_overflow,
+            "pool_timeout": pool_timeout,
+        }
         self.engine: AsyncEngine = create_async_engine(url, **options)
         self.session_factory = async_sessionmaker(
             self.engine, expire_on_commit=False, class_=AsyncSession

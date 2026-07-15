@@ -2,7 +2,7 @@
 
 Teammate-owned functionality is exposed through ``TOOLS``. The agent discovers
 this list at startup and applies the guarded boundary to every item. The bank
-tools operate on the shared SQLite bank database (:mod:`agentic.tools.bank_db`).
+tools operate on the shared PostgreSQL bank database (:mod:`agentic.tools.bank_db`).
 The in-memory ``DUMMY_TOOLS`` sandbox remains available through the
 ``AGENTIC_TOOL_PROVIDER=agentic.tools.dummy:DUMMY_TOOLS`` override.
 """

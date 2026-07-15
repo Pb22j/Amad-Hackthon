@@ -12,19 +12,23 @@ cd VoiceAssistant_Nafea/backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
+# From the repository root, copy .env.backend.example to .env.backend once.
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Frontend requirements: Node.js 20.19+ or 22.12+.
+The integrated frontend is the Next.js app at the repository root. Frontend requirements: Node.js
+20.19+ or 22.12+.
 
 ```bash
-cd VoiceAssistant_Nafea/frontend
+cd ../..
 npm ci
+# Copy .env.frontend.example to .env.local once.
 npm run dev
 ```
 
-The frontend runs at `http://localhost:5173` and proxies `/api` to the backend.
+The frontend runs at `http://localhost:3000`. Because it supports static export, it uses the
+build-time `NEXT_PUBLIC_NAFEA_API_URL` instead of a Next.js server proxy. The legacy Vite client
+under `legacy/vite-voice-ui` remains only as a reference implementation.
 
 ## Required shared configuration
 
@@ -34,6 +38,8 @@ The frontend runs at `http://localhost:5173` and proxies `/api` to the backend.
 - `DEMO_CONFIRMATION_OTP=1111` must match both services for this demo only.
 - `GEMINI_API_KEY` stays only on the backend; `/api/realtime` proxies the provider WebSocket.
 - `FRONTEND_ORIGINS` is an explicit comma-separated allowlist.
+- Both Python services load the repository-root `.env.backend`; do not create a second backend env.
+- Next.js loads only the repository-root `.env.local`.
 - Keep `SSL_VERIFY=true`. Production configuration rejects disabled verification.
 
 The demo bootstrap endpoint derives identity and scopes from server configuration and issues an
@@ -53,8 +59,8 @@ demo bootstrap.
    The agent independently verifies both factors; rejection terminates the task without a tool call.
 6. Only signed terminal events may be communicated as financial outcomes.
 
-Interaction task/event state is stored in the configured SQLite file for the demo. It is bounded and
-session-scoped; this adapter can later move to PostgreSQL without changing the agentic contract.
+Interaction task/event state is stored in PostgreSQL. It is bounded, session-scoped, correlated by
+foreign keys, and shared safely across interaction-service replicas.
 
 ## Voice memory and grounding
 
@@ -73,5 +79,5 @@ session-scoped; this adapter can later move to PostgreSQL without changing the a
 
 ```bash
 cd VoiceAssistant_Nafea/backend && PYTHONPATH=. .venv/bin/pytest -q app/tests
-cd VoiceAssistant_Nafea/frontend && npm run lint && npm run build && npm audit
+cd ../.. && npm run build && npm audit
 ```

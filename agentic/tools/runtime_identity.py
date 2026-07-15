@@ -2,7 +2,7 @@
 
 The guarded agent boundary binds this context immediately around a tool call.
 ``ContextVar`` values propagate through ``asyncio.to_thread``, which lets the
-SQLite demo tools retain their worker-thread implementation without relying on
+Database-backed demo tools retain their worker-thread implementation without relying on
 process-global environment variables for authenticated identity.
 """
 

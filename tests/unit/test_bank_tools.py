@@ -1,16 +1,23 @@
-"""Unit tests for the SQLite-backed bank tools."""
+"""Unit tests for the PostgreSQL-backed bank tools using the private test adapter."""
 
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 from decimal import Decimal
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
+import psycopg
+from psycopg import sql
 import pytest
 
 from agentic.tools.add_benefit import add_benefit
 from agentic.tools.accounts import get_balance, search_transactions
 from agentic.tools.analyze_finances import analyze_finances
-from agentic.tools.bank_db import reset_bank_state
 from agentic.tools.fatoorah import list_fatoorahs, pay_fatoorah
 from agentic.tools.gift import send_gift
 from agentic.tools.investments import buy_investment, get_portfolio, sell_investment
@@ -32,12 +39,67 @@ SAUD_ACCOUNT = "SA91000032763205429515"  # inactive bank customer
 OWN_ACCOUNT = "SA4405000068201234567890"  # the evaluation user's own account
 
 
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _database_url(base_url: str, database_name: str) -> str:
+    parsed = urlsplit(base_url.replace("postgresql+psycopg://", "postgresql://", 1))
+    return urlunsplit(parsed._replace(path=f"/{database_name}"))
+
+
+@pytest.fixture(scope="session")
+def bank_template_database() -> tuple[str, str]:
+    base_url = os.getenv(
+        "TEST_POSTGRES_URL",
+        "postgresql://amad:development-only-password@localhost:55432/amad",
+    )
+    template_name = f"amad_bank_template_{uuid4().hex[:8]}"
+    admin_url = _database_url(base_url, "postgres")
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(template_name)))
+    template_url = _database_url(base_url, template_name)
+    environment = os.environ | {
+        "DATABASE_URL": template_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    }
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, "scripts/seed_postgres.py", "--database-url", template_url],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    )
+    yield admin_url, template_name
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(template_name))
+        )
+
+
 @pytest.fixture(autouse=True)
-def bank_database(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANK_DB_PATH", str(tmp_path / "bank.db"))
-    reset_bank_state()
-    yield
-    reset_bank_state()
+def bank_database(bank_template_database, monkeypatch):
+    admin_url, template_name = bank_template_database
+    database_name = f"amad_bank_test_{uuid4().hex[:12]}"
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        connection.execute(
+            sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+                sql.Identifier(database_name), sql.Identifier(template_name)
+            )
+        )
+    database_url = _database_url(admin_url, database_name)
+    monkeypatch.setenv("BANK_DATABASE_URL", database_url)
+    try:
+        yield
+    finally:
+        with psycopg.connect(admin_url, autocommit=True) as connection:
+            connection.execute(
+                sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database_name))
+            )
 
 
 def _validated(result: dict) -> ToolResult:
@@ -98,6 +160,13 @@ async def test_investment_trade_rejects_unknown_symbols_and_excess_sales():
     assert excess.error_code == "insufficient_holdings"
     over_limit = _validated(await buy_investment(symbol="SABIC", quantity=100))
     assert over_limit.error_code == "daily_limit_exceeded"
+
+
+@pytest.mark.parametrize("alias", ["ARAMCO", "2222", "Saudi Aramco", "أرامكو", "ارامكو"])
+async def test_investment_accepts_arabic_name_and_tadawul_aliases(alias):
+    result = _validated(await buy_investment(symbol=alias, quantity=1))
+    assert result.status == "completed"
+    assert result.data["symbol"] == "ARAMCO"
 
 
 async def test_add_benefit_activates_verified_account():
@@ -298,10 +367,7 @@ async def test_pay_fatoorah_by_last_four_digits_shows_in_monthly_report():
     assert again.error_code == "already_paid"
 
     report = _validated(await monthly_report())
-    entry = next(
-        item for item in report.data["transactions"]
-        if item["type"] == "fatoorah_payment"
-    )
+    entry = next(item for item in report.data["transactions"] if item["type"] == "fatoorah_payment")
     assert entry["description"] == "سداد فاتورة الشركة السعودية للكهرباء رقم 30012345671234"
     assert entry["category"] == "فواتير"
 
@@ -347,9 +413,7 @@ async def test_send_gift_delivers_message_with_sender_full_name(monkeypatch):
     # sender's full name.
     monkeypatch.setenv("BANK_TOOL_USER_ID", "user_69491")
     report = _validated(await monthly_report())
-    gift_entry = next(
-        item for item in report.data["transactions"] if item["type"] == "gift_in"
-    )
+    gift_entry = next(item for item in report.data["transactions"] if item["type"] == "gift_in")
     assert gift_entry["counterparty"] == "أحمد فهد العتيبي"
     assert gift_entry["description"] == "هدية من أحمد فهد العتيبي: مبروك التخرج يا لطيفة"
     assert report.data["current_balance_sar"] == "32966.00"  # 32716 + 250
@@ -357,25 +421,19 @@ async def test_send_gift_delivers_message_with_sender_full_name(monkeypatch):
 
 async def test_send_gift_rejects_non_beneficiary_and_insufficient_funds():
     stranger = _validated(
-        await send_gift(
-            recipient="محمد", amount=Decimal("50.00"), gift_message="عيدية"
-        )
+        await send_gift(recipient="محمد", amount=Decimal("50.00"), gift_message="عيدية")
     )
     assert stranger.error_code == "beneficiary_not_found"
 
     broke = _validated(
-        await send_gift(
-            recipient="لطيفة", amount=Decimal("999999.00"), gift_message="هدية"
-        )
+        await send_gift(recipient="لطيفة", amount=Decimal("999999.00"), gift_message="هدية")
     )
     assert broke.error_code == "insufficient_funds"
 
 
 async def test_send_gift_enforces_the_daily_spend_limit():
     gift = _validated(
-        await send_gift(
-            recipient="لطيفة", amount=Decimal("7000.00"), gift_message="هدية زواج"
-        )
+        await send_gift(recipient="لطيفة", amount=Decimal("7000.00"), gift_message="هدية زواج")
     )
     assert gift.error_code == "daily_limit_exceeded"
 
@@ -431,9 +489,7 @@ async def test_qatta_rounding_preserves_the_exact_requested_total():
 async def test_create_qatta_rejects_share_beyond_balance():
     # 10,000,000 / 2 = 5,000,000 per person — far beyond the 25,431.50 balance.
     broke = _validated(
-        await create_qatta(
-            qatta_name="قطة عشاء", total_amount=10_000_000, participants=["لطيفة"]
-        )
+        await create_qatta(qatta_name="قطة عشاء", total_amount=10_000_000, participants=["لطيفة"])
     )
     assert broke.status == "failed"
     assert broke.error_code == "insufficient_funds"
@@ -451,18 +507,14 @@ async def test_qatta_payments_count_toward_the_transfer_daily_limit():
 
 async def test_qatta_creation_enforces_the_daily_spend_limit():
     result = _validated(
-        await create_qatta(
-            qatta_name="قطة رحلة", total_amount=30_000, participants=["لطيفة"]
-        )
+        await create_qatta(qatta_name="قطة رحلة", total_amount=30_000, participants=["لطيفة"])
     )
     assert result.error_code == "daily_limit_exceeded"
 
 
 async def test_create_qatta_rejects_non_beneficiary_participant():
     result = _validated(
-        await create_qatta(
-            qatta_name="قطة", total_amount=100, participants=["محمد"]
-        )
+        await create_qatta(qatta_name="قطة", total_amount=100, participants=["محمد"])
     )
     assert result.error_code == "participant_not_beneficiary"
 
@@ -563,15 +615,11 @@ async def test_list_qatta_bills_shows_owed_and_created(monkeypatch):
     monkeypatch.setenv("BANK_TOOL_USER_ID", "admin")
     created = _validated(await list_qatta_bills())
     qatta = next(
-        item
-        for item in created.data["qattas_i_created"]
-        if item["name"] == "قطة عشاء الجمعة"
+        item for item in created.data["qattas_i_created"] if item["name"] == "قطة عشاء الجمعة"
     )
     # The pot holds the creator's seeded share plus the freshly paid bill.
     assert qatta["pot_collected_sar"] == "200.00"
     assert qatta["paid_out_sar"] == "0.00"
-    paid = {
-        item["full_name"]: item["status"] for item in qatta["participants"]
-    }
+    paid = {item["full_name"]: item["status"] for item in qatta["participants"]}
     assert paid["أحمد فهد العتيبي"] == "تم الدفع"
     assert paid["لطيفة العنزي"] == "غير مدفوعة"

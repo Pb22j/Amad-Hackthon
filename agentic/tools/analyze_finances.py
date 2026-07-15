@@ -11,7 +11,6 @@ own model turns this data into the advisory answer.
 
 from __future__ import annotations
 
-import sqlite3
 from calendar import monthrange
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -21,7 +20,8 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import Field
 
 from agentic.tools.bank_db import (
-    TIMESTAMP_FORMAT,
+    BankConnection,
+    BankRow,
     BankToolArgs,
     find_user_by_username,
     money,
@@ -80,10 +80,10 @@ async def analyze_finances(
     """Analyze the user's ledger over the last ``months`` calendar months."""
 
     username, _ = owner_identity()
-    now = riyadh_now().replace(tzinfo=None)
+    now = riyadh_now()
     focus = focus_category.strip() if focus_category else None
 
-    def work(connection: sqlite3.Connection) -> dict[str, Any]:
+    def work(connection: BankConnection) -> dict[str, Any]:
         user = find_user_by_username(connection, username)
         if user is None:
             return tool_result(
@@ -96,7 +96,7 @@ async def analyze_finances(
         starts = _month_starts(now, months)
         month_keys = [start.strftime("%Y-%m") for start in starts]
         rows = connection.execute(
-            "SELECT * FROM transactions WHERE user_uuid = ? AND createdAt >= ?"
+            "SELECT * FROM transactions WHERE user_uuid = %s AND createdAt >= %s"
             " ORDER BY createdAt",
             (user["uuid"], timestamp(starts[0])),
         ).fetchall()
@@ -107,10 +107,10 @@ async def analyze_finances(
         }
         categories: dict[str, dict[str, Decimal]] = {}
         counterparties: dict[str, dict[str, Any]] = {}
-        largest_expense: sqlite3.Row | None = None
+        largest_expense: BankRow | None = None
         focus_transactions: list[dict[str, Any]] = []
         for row in rows:
-            key = row["createdAt"][:7]
+            key = row["createdAt"].strftime("%Y-%m")
             if key not in monthly:
                 continue
             amount = money(row["Amount_SAR"])
@@ -242,12 +242,12 @@ async def analyze_finances(
             )
 
         unpaid_rows = connection.execute(
-            "SELECT * FROM fatoorahs WHERE user_uuid = ? AND status = 'unpaid'"
+            "SELECT * FROM fatoorahs WHERE user_uuid = %s AND status = 'unpaid'"
             " ORDER BY dueDate",
             (user["uuid"],),
         ).fetchall()
         unpaid_total = sum((money(row["Amount_SAR"]) for row in unpaid_rows), zero)
-        due_soon_cutoff = (now + timedelta(days=_DUE_SOON_DAYS)).strftime(TIMESTAMP_FORMAT)
+        due_soon_cutoff = now + timedelta(days=_DUE_SOON_DAYS)
         due_soon = [
             row for row in unpaid_rows if row["dueDate"] and row["dueDate"] <= due_soon_cutoff
         ]

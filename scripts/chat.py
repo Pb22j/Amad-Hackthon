@@ -2,8 +2,8 @@
 
 A local development harness that runs the full agent stack — intent
 classification, policy screening, the guarded bank tools, clarification and
-confirmation interrupts — against the real model, without requiring Docker or
-PostgreSQL. It plays the interaction layer's role in the terminal: it shows
+confirmation interrupts — against the real model and the configured PostgreSQL
+database. It plays the interaction layer's role in the terminal: it shows
 clarification questions, asks the human to approve financial actions, and
 signs the confirmation token with the local development key.
 
@@ -12,8 +12,7 @@ Usage:
     .venv/bin/python scripts/chat.py            # chat as evaluation-user
     .venv/bin/python scripts/chat.py --user admin
 
-State: the agent task database is ./chat_agent.db (deleted freely); the bank
-ledger lives in agentic/tools/data/bank.db and persists between chats.
+State: agent tasks and the bank ledger both persist in PostgreSQL.
 """
 
 from __future__ import annotations
@@ -31,12 +30,19 @@ from uuid import UUID, uuid4
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-# Development-only secrets, set before any agentic import reads them. The task
-# database is anchored to the repo root so the script works from any directory.
+# Development-only secrets, set before any agentic import reads them.
 os.environ.setdefault(
-    "DATABASE_URL", f"sqlite+aiosqlite:///{REPO_ROOT / 'chat_agent.db'}"
+    "DATABASE_URL",
+    "postgresql+psycopg://amad:development-only-password@localhost:55432/amad",
 )
-os.environ.setdefault("LANGGRAPH_DATABASE_URL", "postgresql://unused")
+os.environ.setdefault(
+    "LANGGRAPH_DATABASE_URL",
+    "postgresql://amad:development-only-password@localhost:55432/amad",
+)
+os.environ.setdefault(
+    "BANK_DATABASE_URL",
+    "postgresql://amad:development-only-password@localhost:55432/amad",
+)
 os.environ.setdefault("CONFIRMATION_SIGNING_KEY", "development-confirmation-key-0001")
 os.environ.setdefault("CHECKPOINT_ENCRYPTION_KEY", "development-checkpoint-key-00001")
 os.environ.setdefault("APP_DATA_ENCRYPTION_KEY", "development-appdata-key-00000001")
