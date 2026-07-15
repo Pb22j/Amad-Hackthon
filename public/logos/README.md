@@ -1,17 +1,24 @@
 # Bank logos
 
-These are **neutral placeholders**. Drop the official, full-colour logo for each
-bank here using the exact same filename, and the UI will render it automatically
-(no code changes needed). Do not alter the official branding.
+⚠️ **These four files are missing — drop them here.** The neutral placeholders
+were removed; `lib/nafiData.ts` now points at the PNG filenames below, so until
+the real assets land the bank tiles render as broken images.
 
-| File            | Bank                          |
-| --------------- | ----------------------------- |
-| `al-rajhi.svg`  | Al Rajhi Bank                 |
-| `alinma.svg`    | Alinma Bank                   |
-| `sab.svg`       | SAB — Saudi Awwal Bank        |
-| `snb.svg`       | SNB — Saudi National Bank     |
+Use the official, full-colour logo for each bank, with these **exact**
+filenames. No code change is needed — `BankLogo` reads the path from
+`lib/nafiData.ts`.
 
-SVG is preferred (crisp at any size). PNG works too — if you use a different
-extension, update the `logo` path in `lib/nafiData.ts`. Logos render on a white
-tile (`bg-white`) via `object-contain`, so both light and dark marks display
-correctly.
+| File          | Bank                      |
+| ------------- | ------------------------- |
+| `alrajhi.png` | Al Rajhi Bank             |
+| `alinma.png`  | Alinma Bank               |
+| `sab.png`     | SAB — Saudi Awwal Bank    |
+| `snb.png`     | SNB — Saudi National Bank |
+
+Do not alter the official branding. Logos render at `object-contain` on a white
+tile (`tile: "#ffffff"` in the data), with **no CSS filters** — no `invert`,
+`grayscale`, or `brightness` — so they display in their original colours.
+
+Prefer transparent-background artwork; the tile is a square with `p-1.5`
+padding. To use a different extension, update the `logo` path in
+`lib/nafiData.ts`.

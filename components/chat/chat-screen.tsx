@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Mic, Send, Sparkles, X } from "lucide-react";
+import { Mic, Send, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useLang } from "@/lib/i18n";
@@ -97,28 +97,14 @@ export function ChatScreen() {
           <LanguageToggle />
           <Link
             href="/dashboard"
-            aria-label={t("skipToDashboard")}
-            title={t("skipToDashboard")}
+            aria-label={t("backToDashboard")}
+            title={t("backToDashboard")}
             className="grid size-9 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-muted-foreground transition-colors hover:text-foreground"
           >
             <X className="size-4" aria-hidden />
           </Link>
         </div>
       </header>
-
-      {/* Unlock banner */}
-      <div className="flex items-center gap-2.5 border-b border-white/[0.06] bg-primary/[0.06] px-4 py-2.5 sm:px-5">
-        <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />
-        <p className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">
-          <span className="font-medium text-foreground">{t("unlockTitle")}</span> — {t("unlockDesc")}
-        </p>
-        <Link
-          href="/"
-          className="shrink-0 rounded-full bg-primary px-3 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90"
-        >
-          {t("register")}
-        </Link>
-      </div>
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-5 sm:px-5">

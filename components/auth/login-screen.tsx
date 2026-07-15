@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, Lock, Mail, User } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/lib/auth";
 import { useLang } from "@/lib/i18n";
 import { BrandLogo } from "@/components/nafi/brand-logo";
 import { LanguageToggle } from "@/components/i18n/language-toggle";
@@ -12,17 +13,19 @@ import { LanguageToggle } from "@/components/i18n/language-toggle";
 type Mode = "signin" | "register";
 
 /**
- * Demo login / registration gate. This is a front-end mock — it does NOT
- * authenticate or store any real credentials. Submitting continues to the chat
- * (the full experience); "Continue as guest" skips straight to the dashboard.
+ * Login / registration gate. This is a front-end mock — it does NOT
+ * authenticate or store any real credentials. As an Open Banking product there
+ * is no anonymous entry: signing in or registering are the only ways through.
  */
 export function LoginScreen() {
   const { t, dir } = useLang();
+  const { signIn } = useAuth();
   const router = useRouter();
   const [mode, setMode] = React.useState<Mode>("signin");
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
+    signIn();
     router.push("/chat");
   }
 
@@ -106,15 +109,6 @@ export function LoginScreen() {
               <ArrowRight className={cn("size-4", dir === "rtl" && "-scale-x-100")} aria-hidden />
             </button>
           </form>
-
-          {/* Guest / skip */}
-          <button
-            type="button"
-            onClick={() => router.push("/dashboard")}
-            className="mt-3 w-full rounded-xl border border-white/10 bg-white/[0.02] py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
-          >
-            {t("continueGuest")}
-          </button>
         </div>
 
         <p className="mt-5 text-center text-[11px] leading-relaxed text-faint">{t("demoNote")}</p>
