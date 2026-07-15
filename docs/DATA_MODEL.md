@@ -9,10 +9,10 @@ All services, development harnesses, and tests require PostgreSQL.
 | Domain | Tables | Primary consumers |
 |---|---|---|
 | Application identity | `platform_users` | authentication/bootstrap services |
-| Banking customers | `users`, `beneficiaries` | balance, beneficiary, transfer, gift tools |
-| Ledger and reporting | `transactions` | transaction search, monthly reports, financial analysis, daily-limit enforcement |
+| Banking customers | `users`, `beneficiaries` | dashboard, balance, beneficiary, transfer, gift tools |
+| Ledger and reporting | `transactions` | dashboard activity, transaction search, monthly reports, financial analysis, daily-limit enforcement |
 | Shared expenses and bills | `qattas`, `qatta_bills`, `fatoorahs` | Qatta and SADAD-style bill tools |
-| Investments | `investment_assets`, `investment_holdings` | portfolio, buy, and sell tools |
+| Investments | `investment_assets`, `investment_holdings` | dashboard portfolio, portfolio, buy, and sell tools |
 | Interaction boundary | `interaction_sessions`, `interaction_requests`, `interaction_tasks`, `interaction_events`, `voice_turns` | voice service authentication, idempotency, webhook correlation, bounded encrypted recall |
 | Agent runtime | `agent_tasks`, `task_events`, `event_outbox`, `clarification_requests`, `action_authorizations`, `tool_executions` | guarded agent workflow and reliable event delivery |
 | Memory, audit, evaluation | `memory_items`, `audit_events`, `eval_runs` | session-scoped memory, security evidence, regression evaluation |

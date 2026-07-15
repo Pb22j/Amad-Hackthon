@@ -18,11 +18,12 @@ import {
 import { cn } from "@/lib/utils";
 import { useLang } from "@/lib/i18n";
 import {
+  ensureNafeaSession,
+  invalidateNafeaSession,
   NafeaApiError,
   nafeaPost,
   nafeaRequest,
   nafeaWebSocketUrl,
-  setNafeaSessionToken,
 } from "@/lib/nafea-api";
 import { BrandLogo } from "@/components/nafi/brand-logo";
 import { LanguageToggle } from "@/components/i18n/language-toggle";
@@ -44,13 +45,6 @@ type AgentEvent = {
   user_safe_summary: string;
   details: Record<string, unknown>;
   created_at: string;
-};
-
-type SessionResponse = {
-  session_id: string;
-  session_token: string;
-  language: "en" | "ar";
-  expires_at: number;
 };
 
 type AcceptedTask = {
@@ -120,41 +114,14 @@ type ClarificationSchema = {
   maximum?: number;
 };
 
-let sessionBootstrap:
-  | {
-      language: "en" | "ar";
-      expiresAt: number;
-      promise: Promise<SessionResponse>;
-    }
-  | undefined;
-
-function bootstrapSession(language: "en" | "ar"): Promise<SessionResponse> {
-  const now = Date.now() / 1000;
-  if (
-    sessionBootstrap?.language === language &&
-    (sessionBootstrap.expiresAt === 0 || sessionBootstrap.expiresAt > now + 30)
-  ) {
-    return sessionBootstrap.promise;
-  }
-
-  const record = {
-    language,
-    expiresAt: 0,
-    promise: nafeaPost<SessionResponse>("/api/session", { language }),
-  };
-  sessionBootstrap = record;
-  void record.promise
-    .then((session) => {
-      setNafeaSessionToken(session.session_token);
-      record.expiresAt = session.expires_at;
-    })
-    .catch(() => {
-      if (sessionBootstrap === record) sessionBootstrap = undefined;
-    });
-  return record.promise;
-}
-
 const TERMINAL_EVENTS = new Set<AgentEventType>(["completed", "rejected", "failed"]);
+const VOICE_RELAY_EVENTS = new Set<AgentEventType>([
+  "input_needed",
+  "confirmation_needed",
+  "completed",
+  "rejected",
+  "failed",
+]);
 const AGENT_EVENTS = new Set<AgentEventType>([
   "accepted",
   "progress",
@@ -387,6 +354,7 @@ export function ChatScreen() {
   const realtimeToolCallsRef = React.useRef(
     new Map<string, Promise<Record<string, unknown>>>()
   );
+  const relayedVoiceEventsRef = React.useRef(new Set<string>());
   const realtimeFinancialActionRef = React.useRef(false);
 
   const mediaStreamRef = React.useRef<MediaStream | null>(null);
@@ -396,6 +364,8 @@ export function ChatScreen() {
   const processorRef = React.useRef<AudioWorkletNode | null>(null);
   const mutedGainRef = React.useRef<GainNode | null>(null);
   const playerRef = React.useRef<AudioWorkletNode | null>(null);
+  const voicePlaybackActiveRef = React.useRef(false);
+  const suppressMicUntilRef = React.useRef(0);
   const voiceInputRef = React.useRef("");
   const voiceOutputRef = React.useRef("");
 
@@ -446,6 +416,8 @@ export function ChatScreen() {
     processorRef.current = null;
     mutedGainRef.current = null;
     playerRef.current = null;
+    voicePlaybackActiveRef.current = false;
+    suppressMicUntilRef.current = 0;
     if (inputContextRef.current) void inputContextRef.current.close();
     if (outputContextRef.current) void outputContextRef.current.close();
     inputContextRef.current = null;
@@ -457,8 +429,11 @@ export function ChatScreen() {
   }, []);
 
   function relayTrustedEventToVoice(event: AgentEvent) {
+    if (!VOICE_RELAY_EVENTS.has(event.event_type)) return;
     const socket = realtimeSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const relayKey = `${event.task_id}:${event.event_type}:${event.created_at}`;
+    if (relayedVoiceEventsRef.current.has(relayKey)) return;
 
     let text: string;
     if (event.event_type === "input_needed") {
@@ -490,6 +465,11 @@ export function ChatScreen() {
         realtimeInput: { text },
       })
     );
+    if (relayedVoiceEventsRef.current.size >= 100) {
+      const oldest = relayedVoiceEventsRef.current.values().next().value;
+      if (oldest) relayedVoiceEventsRef.current.delete(oldest);
+    }
+    relayedVoiceEventsRef.current.add(relayKey);
   }
 
   function processAgentEvent(event: AgentEvent) {
@@ -535,7 +515,9 @@ export function ChatScreen() {
       if (event.event_type === "confirmation_needed") setPending(event);
     }
 
-    if (!blockedClarification) relayTrustedEventToVoice(event);
+    if (!blockedClarification && VOICE_RELAY_EVENTS.has(event.event_type)) {
+      relayTrustedEventToVoice(event);
+    }
   }
   processEventRef.current = processAgentEvent;
 
@@ -637,11 +619,13 @@ export function ChatScreen() {
   async function submitFinancialTask(
     request: string,
     idempotencyKey: string,
-    optimisticMessageId?: string
+    optimisticMessageId?: string,
+    source: "chat" | "voice" = "chat"
   ): Promise<AcceptedTask> {
     const accepted = await nafeaPost<AcceptedTask>("/api/submit-task", {
       natural_language_request: request,
       idempotency_key: idempotencyKey,
+      source,
     });
     registerAcceptedTask(accepted, optimisticMessageId);
     return accepted;
@@ -669,7 +653,12 @@ export function ChatScreen() {
             task_id: currentTaskIdRef.current,
           };
         }
-        const accepted = await submitFinancialTask(request, call.id || newRequestKey());
+        const accepted = await submitFinancialTask(
+          request,
+          call.id || newRequestKey(),
+          undefined,
+          "voice"
+        );
         return { ...accepted };
       }
 
@@ -691,7 +680,14 @@ export function ChatScreen() {
         });
       clearPendingIfCurrent(pending);
       return response;
-    } catch {
+    } catch (error) {
+      if (error instanceof NafeaApiError && error.status === 504) {
+        return {
+          status: "timed_out",
+          action_cancelled: true,
+          message: error.message,
+        };
+      }
       return { error: "The secure financial service could not complete this tool call." };
     } finally {
       realtimeFinancialActionRef.current = false;
@@ -748,6 +744,8 @@ export function ChatScreen() {
 
       if (content?.interrupted) {
         playerRef.current?.port.postMessage({ action: "clear" });
+        voicePlaybackActiveRef.current = false;
+        suppressMicUntilRef.current = performance.now() + 200;
         voiceOutputRef.current = "";
       }
 
@@ -829,6 +827,12 @@ export function ChatScreen() {
           mutedGain.connect(inputContext.destination);
           processor.port.onmessage = (audioEvent: MessageEvent<Float32Array>) => {
             if (socket.readyState !== WebSocket.OPEN) return;
+            if (
+              voicePlaybackActiveRef.current ||
+              performance.now() < suppressMicUntilRef.current
+            ) {
+              return;
+            }
             const pcm = resampleTo16Khz(audioEvent.data, inputContext.sampleRate);
             socket.send(
               JSON.stringify({
@@ -843,6 +847,12 @@ export function ChatScreen() {
           };
 
           const player = new AudioWorkletNode(outputContext, "pcm-player");
+          player.port.onmessage = (playbackEvent: MessageEvent) => {
+            const playback = playbackEvent.data as { type?: string; active?: boolean };
+            if (playback.type !== "playback-state") return;
+            voicePlaybackActiveRef.current = Boolean(playback.active);
+            if (!playback.active) suppressMicUntilRef.current = performance.now() + 200;
+          };
           player.connect(outputContext.destination);
           micSourceRef.current = source;
           processorRef.current = processor;
@@ -873,6 +883,7 @@ export function ChatScreen() {
     queuedEventsRef.current = [];
     currentTaskIdRef.current = null;
     realtimeToolCallsRef.current.clear();
+    relayedVoiceEventsRef.current.clear();
     realtimeFinancialActionRef.current = false;
     setActiveTaskId(null);
     setPending(null);
@@ -915,7 +926,7 @@ export function ChatScreen() {
     }
 
     function connectSession() {
-      void bootstrapSession(lang)
+      void ensureNafeaSession(lang)
         .then(async (session) => {
           if (disposed) return;
           sessionIdRef.current = session.session_id;
@@ -925,9 +936,11 @@ export function ChatScreen() {
           setErrorMessage("");
           connectEvents();
         })
-        .catch(() => {
+        .catch((error) => {
           if (disposed) return;
-          if (sessionBootstrap?.language === lang) sessionBootstrap = undefined;
+          if (error instanceof NafeaApiError && error.status === 401) {
+            invalidateNafeaSession();
+          }
           setSessionStatus("offline");
           setErrorMessage(t("sessionError"));
           reconnectTimer = setTimeout(connectSession, 1_500);

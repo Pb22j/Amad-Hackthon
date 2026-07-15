@@ -142,6 +142,7 @@ class StubService:
         self.config = config
         self.error = error
         self.resumed = False
+        self.cancelled = False
 
     async def wait_for_background_tasks(self):
         return None
@@ -158,6 +159,12 @@ class StubService:
 
     async def delete_memory(self, **kwargs):
         return 2
+
+    async def cancel(self, task_id, payload):
+        if self.error:
+            raise self.error
+        self.cancelled = True
+        return True
 
     async def get_task_status(self, task_id, payload):
         if self.error:
@@ -189,6 +196,27 @@ def test_resume_endpoint_success_and_validation_error(app_config, agentic_reques
     assert accepted.status_code == 202
     assert service.resumed
     assert invalid.status_code == 409
+
+
+def test_cancel_endpoint_accepts_interaction_timeout(app_config, agentic_request):
+    service = StubService(app_config)
+    app = create_app(service=service, config=app_config)
+    payload = {
+        "request_id": str(agentic_request.request_id),
+        "session_id": str(agentic_request.session_id),
+        "user_id": agentic_request.user_id,
+        "tenant_id": agentic_request.tenant_id,
+        "reason_code": "interaction_timeout",
+    }
+    with TestClient(app) as client:
+        response = client.post(
+            f"/agentic/tasks/{agentic_request.request_id}/cancel",
+            json=payload,
+        )
+
+    assert response.status_code == 202
+    assert response.json() == {"cancelled": True}
+    assert service.cancelled
 
 
 def test_resume_endpoint_accepts_already_reported_guard_failure(app_config, agentic_request):

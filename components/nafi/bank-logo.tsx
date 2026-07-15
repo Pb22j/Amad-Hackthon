@@ -1,3 +1,5 @@
+import { Landmark } from "lucide-react";
+
 import { cn } from "@/lib/utils";
 import type { Bank } from "@/lib/nafiData";
 
@@ -19,14 +21,18 @@ export function BankLogo({
       className={cn("grid shrink-0 place-items-center overflow-hidden rounded-xl ring-1 ring-black/5", className)}
       style={{ width: size, height: size, backgroundColor: bank.tile }}
     >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={bank.logo}
-        alt={`${bank.name} logo`}
-        className="h-full w-full object-contain p-1.5"
-        loading="lazy"
-        decoding="async"
-      />
+      {bank.logo ? (
+        /* eslint-disable-next-line @next/next/no-img-element */
+        <img
+          src={bank.logo}
+          alt={`${bank.name} logo`}
+          className="h-full w-full object-contain p-1.5"
+          loading="lazy"
+          decoding="async"
+        />
+      ) : (
+        <Landmark className="size-1/2 text-slate-700" aria-label={bank.name} />
+      )}
     </span>
   );
 }

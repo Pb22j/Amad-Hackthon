@@ -1,5 +1,32 @@
 const configuredBaseUrl = process.env.NEXT_PUBLIC_NAFEA_API_URL?.trim();
-let sessionToken: string | undefined;
+const SESSION_TOKEN_KEY = "nafea.interaction-session-token";
+let sessionToken: string | undefined = readStoredSessionToken();
+
+export type NafeaLanguage = "en" | "ar";
+
+export type NafeaSession = {
+  session_id: string;
+  session_token: string;
+  language: NafeaLanguage;
+  expires_at: number;
+};
+
+let sessionBootstrap:
+  | {
+      language: NafeaLanguage;
+      expiresAt: number;
+      promise: Promise<NafeaSession>;
+    }
+  | undefined;
+
+function readStoredSessionToken(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.sessionStorage.getItem(SESSION_TOKEN_KEY) || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * The exported Next.js app cannot use server-side rewrites, so its browser API
@@ -12,6 +39,59 @@ export const NAFEA_API_BASE_URL = (
 
 export function setNafeaSessionToken(token: string): void {
   sessionToken = token;
+  if (typeof window !== "undefined") {
+    try {
+      window.sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+    } catch {
+      // Storage can be unavailable in hardened browsers; in-memory auth still works.
+    }
+  }
+}
+
+export function invalidateNafeaSession(): void {
+  sessionBootstrap = undefined;
+  sessionToken = undefined;
+  if (typeof window !== "undefined") {
+    try {
+      window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    } catch {
+      // In-memory invalidation still prevents reuse in hardened browsers.
+    }
+  }
+}
+
+/**
+ * Establish or refresh one interaction session for every browser surface.
+ * Chat, voice, login, and dashboards share this promise so route changes do
+ * not create separate backend identities or memory namespaces.
+ */
+export function ensureNafeaSession(language: NafeaLanguage): Promise<NafeaSession> {
+  const now = Date.now() / 1000;
+  if (
+    sessionBootstrap?.language === language &&
+    (sessionBootstrap.expiresAt === 0 || sessionBootstrap.expiresAt > now + 30)
+  ) {
+    return sessionBootstrap.promise;
+  }
+
+  const record = {
+    language,
+    expiresAt: 0,
+    promise: nafeaPost<NafeaSession>("/api/session", {
+      language,
+      reuse_existing: true,
+    }),
+  };
+  sessionBootstrap = record;
+  void record.promise
+    .then((session) => {
+      setNafeaSessionToken(session.session_token);
+      record.expiresAt = session.expires_at;
+    })
+    .catch(() => {
+      if (sessionBootstrap === record) sessionBootstrap = undefined;
+    });
+  return record.promise;
 }
 
 export class NafeaApiError extends Error {
@@ -65,7 +145,7 @@ export async function nafeaRequest<T>(
   if (!response.ok) {
     let message = "Nafi could not complete that request.";
     // Backend 5xx details are intentionally not surfaced to the user.
-    if (response.status < 500) {
+    if (response.status < 500 || response.status === 504) {
       try {
         const payload = (await response.json()) as { detail?: string };
         if (payload.detail) message = payload.detail;

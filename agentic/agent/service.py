@@ -31,7 +31,9 @@ from agentic.api.schemas import (
     AgentEventType,
     AgenticRequest,
     AuthorizationContext,
+    CancelTaskRequest,
     ResumeTaskRequest,
+    TERMINAL_TASK_STATUSES,
     TaskStatus,
     TaskStatusRequest,
     TaskStatusResponse,
@@ -137,6 +139,7 @@ class AgentService:
             json.dumps(public_config, sort_keys=True).encode()
         ).hexdigest()
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._task_handles: dict[str, asyncio.Task[Any]] = {}
         self._outbox_worker: asyncio.Task[None] | None = None
         self._outbox_stop = asyncio.Event()
         self._outbox_delivery_lock = asyncio.Lock()
@@ -180,7 +183,14 @@ class AgentService:
                 self._run_new_with_release(task_id, sanitized_request)
             )
             self._background_tasks.add(task_handle)
-            task_handle.add_done_callback(self._background_tasks.discard)
+            self._task_handles[task_id] = task_handle
+
+            def discard_handle(completed: asyncio.Task[Any]) -> None:
+                self._background_tasks.discard(completed)
+                if self._task_handles.get(task_id) is completed:
+                    self._task_handles.pop(task_id, None)
+
+            task_handle.add_done_callback(discard_handle)
         else:
             try:
                 await self._run_new(task_id, sanitized_request)
@@ -297,6 +307,7 @@ class AgentService:
                 else False
             ),
             original_request=request.natural_language_request,
+            prior_user_statements=tuple(request.metadata.conversation_user_statements),
         )
         async with self.database.session() as session:
             memories = await MemoryService(
@@ -452,6 +463,55 @@ class AgentService:
                 max_items_per_type=self.config.limits.memory.max_items_per_type,
                 max_value_characters=self.config.limits.memory.max_value_characters,
             ).delete_for_session(auth=auth)
+
+    async def cancel(self, task_id: UUID, request: CancelTaskRequest) -> bool:
+        """Cancel a running task after the interaction layer's response deadline."""
+
+        task_id_str = str(task_id)
+        async with self.database.session() as session:
+            repository = TaskRepository(session)
+            row = await repository.get(
+                task_id_str,
+                tenant_id=request.tenant_id,
+                user_id=request.user_id,
+            )
+            if (
+                row is None
+                or row.session_id != str(request.session_id)
+                or row.request_id != str(request.request_id)
+            ):
+                raise LookupError("task not found")
+            if TaskStatus(row.status) in TERMINAL_TASK_STATUSES:
+                return False
+            handle = self._task_handles.get(task_id_str)
+            if handle is not None and not handle.done():
+                handle.cancel()
+            await repository.transition(
+                row,
+                TaskStatus.FAILED,
+                payload={"error_code": request.reason_code},
+            )
+            outbox = await EventOutboxRepository(session).enqueue(
+                AgentEvent(
+                    task_id=task_id,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    event_type=AgentEventType.FAILED,
+                    user_safe_summary=_localized(
+                        row.language,
+                        "The request took too long, so it was cancelled safely.",
+                        "استغرق الطلب وقتاً طويلاً، لذلك تم إلغاؤه بأمان.",
+                    ),
+                    details={
+                        "reason_code": request.reason_code,
+                        "action_cancelled": True,
+                    },
+                )
+            )
+            outbox_id = outbox.id
+        await self._deliver_outbox_id(outbox_id)
+        TASKS.labels(outcome="interaction_timeout", language=row.language).inc()
+        return True
 
     async def get_task_status(
         self, task_id: UUID, request: TaskStatusRequest

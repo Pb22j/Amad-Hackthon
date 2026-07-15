@@ -10,7 +10,7 @@ Next.js build.
 .
 ├── app/                         Next.js App Router pages
 ├── components/                  Active Nafi UI and chat components
-├── lib/                         Active browser API, i18n, and dashboard data
+├── lib/                         Browser API/session client, i18n, and dashboard types
 ├── public/                      Active logos and realtime audio worklets
 ├── agentic/                     Guarded financial agent service (port 9000)
 │   ├── agent/                   Task orchestration and workflow state
@@ -31,7 +31,7 @@ Next.js build.
 
 ```text
 Next.js browser (:3000)
-        │ session/task HTTP, event WebSocket, realtime voice WebSocket
+        │ session/task/dashboard HTTP, event WebSocket, realtime voice WebSocket
         ▼
 Interaction service (:8001) ───── signed agent requests/webhooks ─────▶ Agentic service (:9000)
         │                                                               │
@@ -40,8 +40,9 @@ Interaction service (:8001) ───── signed agent requests/webhooks ─�
 
 The browser never receives provider keys, interaction secrets, user IDs, tenant IDs, or scopes.
 The interaction service owns browser sessions, task correlation, confirmation tokens, webhook
-verification, and event delivery. The agentic service owns policy, model orchestration, guarded
-tools, durable workflow state, and signed outbox delivery.
+verification, event delivery, and the read-only session-scoped dashboard projection. The agentic
+service owns policy, model orchestration, guarded tools, durable workflow state, and signed outbox
+delivery.
 
 ## Archived tree
 

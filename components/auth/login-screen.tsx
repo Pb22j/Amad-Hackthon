@@ -2,11 +2,12 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Lock, Mail, User } from "lucide-react";
+import { ArrowRight, Loader2, Lock, Mail, User } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { useLang } from "@/lib/i18n";
+import { ensureNafeaSession } from "@/lib/nafea-api";
 import { BrandLogo } from "@/components/nafi/brand-logo";
 import { LanguageToggle } from "@/components/i18n/language-toggle";
 
@@ -18,15 +19,25 @@ type Mode = "signin" | "register";
  * is no anonymous entry: signing in or registering are the only ways through.
  */
 export function LoginScreen() {
-  const { t, dir } = useLang();
+  const { t, dir, lang } = useLang();
   const { signIn } = useAuth();
   const router = useRouter();
   const [mode, setMode] = React.useState<Mode>("signin");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [errorMessage, setErrorMessage] = React.useState("");
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    signIn();
-    router.push("/chat");
+    setSubmitting(true);
+    setErrorMessage("");
+    try {
+      await ensureNafeaSession(lang);
+      signIn();
+      router.push("/chat");
+    } catch {
+      setErrorMessage(t("sessionError"));
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -103,11 +114,20 @@ export function LoginScreen() {
 
             <button
               type="submit"
-              className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-br from-primary to-purple py-2.5 text-sm font-semibold text-white shadow-[0_10px_24px_-10px_rgba(111,141,255,0.7)] transition-transform hover:scale-[1.01] active:scale-[0.99]"
+              disabled={submitting}
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-br from-primary to-purple py-2.5 text-sm font-semibold text-white shadow-[0_10px_24px_-10px_rgba(111,141,255,0.7)] transition-transform hover:scale-[1.01] active:scale-[0.99] disabled:cursor-wait disabled:opacity-70"
             >
-              {mode === "signin" ? t("signIn") : t("register")}
-              <ArrowRight className={cn("size-4", dir === "rtl" && "-scale-x-100")} aria-hidden />
+              {submitting ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
+              {submitting ? t("connecting") : mode === "signin" ? t("signIn") : t("register")}
+              {!submitting ? (
+                <ArrowRight className={cn("size-4", dir === "rtl" && "-scale-x-100")} aria-hidden />
+              ) : null}
             </button>
+            {errorMessage ? (
+              <p role="alert" className="text-center text-xs text-negative">
+                {errorMessage}
+              </p>
+            ) : null}
           </form>
         </div>
 

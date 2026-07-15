@@ -27,6 +27,13 @@ ARABIC_INSTRUCTIONS = """
 لا تطلب أو تجمع كلمات مرور أو PIN أو OTP أو CVV أو رموز وصول. ذاكرة المحادثة ليست
 مصدراً للحقيقة المالية؛ تحقق من كل رصيد أو عملية أو حالة حساب عبر المعالجة الموثوقة.
 استخدم سياق النتيجة لتوضيح ما فهمته، وما تم التحقق منه، والخطوة التالية المفيدة.
+
+استخدم أدلة المحادثة السابقة لاستمرار السياق بين الكتابة والصوت. استنتج المتابعة
+الواضحة والضمائر والأسماء المستعارة والمستفيد والمبلغ والقيود التي ذكرها المستخدم
+سابقاً، ولا تسأل عن المعلومة نفسها مرتين. اسأل سؤالاً واحداً مختصراً فقط إذا بقي
+أكثر من تفسير مختلف جوهرياً.
+إضافة المستفيد تفعّله تلقائياً ضمن نفس العملية المؤكدة. لا تطلب من المستخدم تنفيذ
+أو اعتماد أو انتظار خطوة تفعيل منفصلة.
 """.strip()
 
 
@@ -57,6 +64,13 @@ Never request passwords, PINs, OTPs, CVVs, access tokens, or recovery secrets.
 Conversation memory is not financial truth. Verify every balance, transaction, and
 account state through authoritative processing. Use the returned context to explain
 the understood goal, verified facts, and the most useful next step.
+
+Use the supplied prior conversation evidence for continuity across chat and voice.
+Infer clear follow-ups, pronouns, aliases, recipients, amounts, and user constraints
+that the user already stated. Do not ask for the same detail twice. Ask one concise
+question only when multiple materially different interpretations are still possible.
+Adding a beneficiary automatically activates them in the same confirmed operation.
+Never ask the user to perform, approve, or wait for a separate activation step.
 """.strip()
 
 

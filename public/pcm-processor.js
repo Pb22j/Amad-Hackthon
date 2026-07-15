@@ -1,7 +1,9 @@
 class PCMProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.bufferSize = 2048;
+    // 512 samples is 32ms at the 16kHz input rate. Small, regular chunks keep
+    // realtime VAD responsive without flooding the websocket with tiny frames.
+    this.bufferSize = 512;
     this.buffer = new Float32Array(this.bufferSize);
     this.framesWritten = 0;
   }

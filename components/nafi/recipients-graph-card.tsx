@@ -4,12 +4,22 @@ import { ArrowRight, Users } from "lucide-react";
 
 import { BentoCard, CardTitle } from "@/components/nafi/bento-card";
 import { BankLogo } from "@/components/nafi/bank-logo";
+import type { DashboardRecipient } from "@/lib/dashboard";
 import { useLang, useLocalize } from "@/lib/i18n";
-import { recipients, type Recipient } from "@/lib/nafiData";
+import { bankFromDashboard, type Bank } from "@/lib/nafiData";
 
-const ROW_Y = [16, 50, 84]; // vertical centres (%)
+type RecipientView = {
+  id: string;
+  name: string;
+  nameAr: string;
+  bank: Bank;
+};
 
-function RecipientBox({ r }: { r: Recipient }) {
+function rowY(index: number, total: number): number {
+  return ((index + 1) / (total + 1)) * 100;
+}
+
+function RecipientBox({ r }: { r: RecipientView }) {
   const loc = useLocalize();
   const initials = r.name.split(" ")[0][0] + (r.name.split(" ")[1]?.[0] ?? "");
   return (
@@ -24,7 +34,7 @@ function RecipientBox({ r }: { r: Recipient }) {
   );
 }
 
-function BankNode({ r }: { r: Recipient }) {
+function BankNode({ r }: { r: RecipientView }) {
   const loc = useLocalize();
   return (
     <div className="flex flex-col items-center gap-1.5">
@@ -36,13 +46,29 @@ function BankNode({ r }: { r: Recipient }) {
   );
 }
 
-export function RecipientsGraphCard({ className }: { className?: string }) {
+export function RecipientsGraphCard({
+  recipients,
+  className,
+}: {
+  recipients: DashboardRecipient[];
+  className?: string;
+}) {
   const { t } = useLang();
+  const items: RecipientView[] = recipients.map((recipient) => ({
+    id: recipient.id,
+    name: recipient.name,
+    nameAr: recipient.name_ar,
+    bank: bankFromDashboard(recipient.bank),
+  }));
 
   return (
     <BentoCard className={className}>
       <CardTitle title={t("favoriteRecipients")} />
 
+      {items.length === 0 ? (
+        <p className="py-10 text-center text-sm text-muted-foreground">{t("noRecipients")}</p>
+      ) : (
+        <>
       {/* Desktop node graph */}
       <div className="relative hidden h-[280px] sm:block">
         <svg
@@ -52,12 +78,15 @@ export function RecipientsGraphCard({ className }: { className?: string }) {
           aria-hidden
         >
           <g fill="none" stroke="#38466182" strokeWidth="1.4" vectorEffect="non-scaling-stroke">
-            <path d="M25 50 C 30 50 30 16 33 16" />
-            <path d="M25 50 L 33 50" />
-            <path d="M25 50 C 30 50 30 84 33 84" />
-            <path d="M67 16 L 83 16" />
-            <path d="M67 50 L 83 50" />
-            <path d="M67 84 L 83 84" />
+            {items.map((recipient, index) => {
+              const y = rowY(index, items.length);
+              return (
+                <g key={recipient.id}>
+                  <path d={`M25 50 C 30 50 30 ${y} 33 ${y}`} />
+                  <path d={`M67 ${y} L 83 ${y}`} />
+                </g>
+              );
+            })}
           </g>
         </svg>
 
@@ -72,29 +101,29 @@ export function RecipientsGraphCard({ className }: { className?: string }) {
         </div>
 
         {/* Recipients (middle) */}
-        {recipients.map((r, i) => (
+        {items.map((r, i) => (
           <div
             key={r.id}
             className="absolute w-[34%] -translate-y-1/2"
-            style={{ insetInlineStart: "33%", top: `${ROW_Y[i]}%` }}
+            style={{ insetInlineStart: "33%", top: `${rowY(i, items.length)}%` }}
           >
             <RecipientBox r={r} />
           </div>
         ))}
 
         {/* Arrows */}
-        {recipients.map((r, i) => (
+        {items.map((r, i) => (
           <ArrowRight
             key={`a-${r.id}`}
             className="absolute size-4 -translate-y-1/2 text-faint rtl:-scale-x-100"
-            style={{ insetInlineStart: "75%", top: `${ROW_Y[i]}%` }}
+            style={{ insetInlineStart: "75%", top: `${rowY(i, items.length)}%` }}
             aria-hidden
           />
         ))}
 
         {/* Banks (end side) */}
-        {recipients.map((r, i) => (
-          <div key={`b-${r.id}`} className="absolute -translate-y-1/2" style={{ insetInlineEnd: 0, top: `${ROW_Y[i]}%` }}>
+        {items.map((r, i) => (
+          <div key={`b-${r.id}`} className="absolute -translate-y-1/2" style={{ insetInlineEnd: 0, top: `${rowY(i, items.length)}%` }}>
             <BankNode r={r} />
           </div>
         ))}
@@ -102,7 +131,7 @@ export function RecipientsGraphCard({ className }: { className?: string }) {
 
       {/* Mobile stacked fallback */}
       <div className="space-y-2.5 sm:hidden">
-        {recipients.map((r) => (
+        {items.map((r) => (
           <div key={r.id} className="flex items-center gap-2">
             <div className="min-w-0 flex-1">
               <RecipientBox r={r} />
@@ -112,6 +141,8 @@ export function RecipientsGraphCard({ className }: { className?: string }) {
           </div>
         ))}
       </div>
+        </>
+      )}
     </BentoCard>
   );
 }

@@ -249,15 +249,20 @@ async def pay_bill(biller: str, amount: Decimal, currency: str = "SAR") -> dict[
 
 
 async def add_beneficiary(name: str, account_reference: str) -> dict[str, Any]:
-    """Add a beneficiary to the process-local dummy address book."""
+    """Add and automatically activate a beneficiary in the dummy address book."""
 
     async with _STATE.lock:
         _STATE.beneficiaries[name] = account_reference
         reference = _STATE.next_reference("beneficiary")
     return _result(
         status="completed",
-        summary=f"Added {name} to the simulated beneficiary list.",
-        data={"name": name, "account_reference": account_reference},
+        summary=f"Added and automatically activated {name} in the simulated beneficiary list.",
+        data={
+            "name": name,
+            "account_reference": account_reference,
+            "status": "active",
+            "automatically_activated": True,
+        },
         operation_id=reference,
     )
 
@@ -415,7 +420,10 @@ DUMMY_TOOLS: tuple[BaseTool, ...] = (
     _tool(
         add_beneficiary,
         name="add_beneficiary",
-        description="Add a beneficiary to the authenticated user's simulated address book.",
+        description=(
+            "Add and automatically activate a beneficiary in the authenticated user's "
+            "simulated address book."
+        ),
         schema=BeneficiaryArgs,
     ),
     _tool(

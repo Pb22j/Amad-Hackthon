@@ -54,6 +54,7 @@ class AgentRuntimeContext:
     initial_authorization_token: str | None = None
     otp_verified: bool = False
     original_request: str = ""
+    prior_user_statements: tuple[str, ...] = ()
     explicit_user_field_values: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     resuming_from_clarification: bool = False
 
@@ -75,10 +76,15 @@ def _argument_is_explicit(
     explicit_user_values: tuple[Any, ...],
     *,
     field_name: str | None = None,
+    prior_user_statements: tuple[str, ...] = (),
 ) -> bool:
     """Check that a protected model argument appears in authenticated text."""
 
-    evidence = (request, *(str(item) for item in explicit_user_values))
+    evidence = (
+        request,
+        *prior_user_statements,
+        *(str(item) for item in explicit_user_values),
+    )
     if isinstance(value, (list, tuple, set)):
         return bool(value) and all(
             _argument_is_explicit(
@@ -86,6 +92,7 @@ def _argument_is_explicit(
                 request,
                 explicit_user_values,
                 field_name=field_name,
+                prior_user_statements=prior_user_statements,
             )
             for item in value
         )
@@ -431,6 +438,7 @@ class GuardedToolFactory:
                     context.original_request,
                     context.explicit_user_field_values.get(field_name, ()),
                     field_name=field_name,
+                    prior_user_statements=context.prior_user_statements,
                 ):
                     question, label = _clarification_copy(field_name, context.original_request)
                     arguments[field_name] = interrupt(

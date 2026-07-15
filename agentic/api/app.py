@@ -23,6 +23,7 @@ from agentic.agent.graph import build_financial_agent
 from agentic.agent.service import AgentService
 from agentic.api.schemas import (
     AgenticRequest,
+    CancelTaskRequest,
     HealthResponse,
     MemoryDeleteRequest,
     ResumeTaskRequest,
@@ -241,6 +242,24 @@ def create_app(
             # a 500/502 only creates a duplicate, misleading transport failure.
             pass
         return Response(status_code=status.HTTP_202_ACCEPTED)
+
+    @app.post("/agentic/tasks/{task_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
+    async def cancel_task(
+        task_id: UUID,
+        request: Request,
+        x_interaction_timestamp: str | None = Header(default=None),
+        x_interaction_signature: str | None = Header(default=None),
+    ) -> dict[str, bool]:
+        body = await request.body()
+        await verify_request_signature(
+            request, body, x_interaction_timestamp, x_interaction_signature
+        )
+        try:
+            payload = CancelTaskRequest.model_validate_json(body)
+            service_instance: AgentService = request.app.state.agent_service
+            return {"cancelled": await service_instance.cancel(task_id, payload)}
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="task not found") from exc
 
     @app.post(
         "/agentic/tasks/{task_id}/status",

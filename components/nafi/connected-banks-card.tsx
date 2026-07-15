@@ -2,9 +2,10 @@
 
 import { BentoCard, CardTitle } from "@/components/nafi/bento-card";
 import { BankLogo } from "@/components/nafi/bank-logo";
+import type { DashboardAccount } from "@/lib/dashboard";
 import { cn } from "@/lib/utils";
 import { useLang, useLocalize } from "@/lib/i18n";
-import { connectedBanks, type Bank } from "@/lib/nafiData";
+import { bankFromDashboard, type Bank } from "@/lib/nafiData";
 
 function BankRow({ bank }: { bank: Bank }) {
   const loc = useLocalize();
@@ -39,7 +40,13 @@ function BankRow({ bank }: { bank: Bank }) {
   );
 }
 
-export function ConnectedBanksCard({ className }: { className?: string }) {
+export function ConnectedBanksCard({
+  accounts,
+  className,
+}: {
+  accounts: DashboardAccount[];
+  className?: string;
+}) {
   const { t } = useLang();
   return (
     <BentoCard className={cn("flex flex-col", className)}>
@@ -56,9 +63,20 @@ export function ConnectedBanksCard({ className }: { className?: string }) {
       <div className="relative min-h-0 flex-1 lg:min-h-[13.5rem]">
         <div className="no-scrollbar overflow-y-auto overscroll-contain scroll-smooth lg:absolute lg:inset-0">
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-1">
-            {connectedBanks.map((bank) => (
-              <BankRow key={bank.id} bank={bank} />
+            {accounts.map((account) => (
+              <BankRow
+                key={account.id}
+                bank={bankFromDashboard(
+                  account,
+                  `${account.account_type} · ${account.masked_account_number}`
+                )}
+              />
             ))}
+            {accounts.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                {t("noAccounts")}
+              </p>
+            ) : null}
           </div>
         </div>
 

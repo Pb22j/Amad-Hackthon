@@ -3,16 +3,24 @@
 import { TrendingUp } from "lucide-react";
 
 import { BentoCard, CardTitle } from "@/components/nafi/bento-card";
+import type { DashboardSnapshot } from "@/lib/dashboard";
 import { cn } from "@/lib/utils";
 import { useFormat, useLang } from "@/lib/i18n";
-import { asOfDate, netWorth } from "@/lib/nafiData";
 
 /**
  * The hero of the bento. The figure is the loudest thing on the page: an
  * oversized, tightly-tracked numeral lit from behind by a primary bloom that
  * bleeds through the card's frost.
  */
-export function NetWorthCard({ className }: { className?: string }) {
+export function NetWorthCard({
+  data,
+  asOf,
+  className,
+}: {
+  data: DashboardSnapshot["net_worth"];
+  asOf: string;
+  className?: string;
+}) {
   const { t } = useLang();
   const fmt = useFormat();
 
@@ -34,7 +42,7 @@ export function NetWorthCard({ className }: { className?: string }) {
         dir="ltr"
         className="numeral mt-1 bg-gradient-to-b from-white via-white to-slate-300 bg-clip-text text-start text-[3.25rem] font-light leading-[0.95] text-transparent sm:text-[4.25rem]"
       >
-        {fmt.money(netWorth.amount)}
+        {fmt.money(Number(data.amount_sar))}
       </p>
 
       <div className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -46,13 +54,13 @@ export function NetWorthCard({ className }: { className?: string }) {
           dir="ltr"
         >
           <TrendingUp className="size-3" aria-hidden />
-          {fmt.pct(netWorth.deltaPercent)}
+          {fmt.pct(data.delta_percent)}
         </span>
       </div>
 
       {/* Pushed to the floor of the card so the hero never leaves a void beneath it. */}
       <p className="mt-auto pt-6 text-[11px] text-faint">
-        {t("asOf")} {fmt.date(asOfDate)}
+        {t("asOf")} {fmt.date(new Date(asOf))}
       </p>
     </BentoCard>
   );

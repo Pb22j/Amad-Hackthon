@@ -1,5 +1,5 @@
 from pathlib import Path
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
         "postgresql://amad:development-only-password@localhost:55432/amad"
     )
     INTERACTION_TIMESTAMP_TOLERANCE_SECONDS: int = 300
-    AGENTIC_TIMEOUT_SECONDS: float = 15.0
+    AGENTIC_TIMEOUT_SECONDS: float = Field(default=20.0, ge=1.0, le=120.0)
 
     DEMO_USER_ID: str = "evaluation-user"
     DEMO_TENANT_ID: str = "evaluation-tenant"

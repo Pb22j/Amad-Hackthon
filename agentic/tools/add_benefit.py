@@ -67,11 +67,48 @@ async def add_benefit(
                 error_code="customer_not_found",
             )
 
-        if find_beneficiary(connection, owner["uuid"], normalized) is not None:
+        existing = find_beneficiary(connection, owner["uuid"], normalized)
+        if existing is not None:
+            if existing["status"] == "inactive":
+                target = find_user_by_account_number(connection, normalized)
+                if target is None or target["status"] != "active":
+                    return tool_result(
+                        status="failed",
+                        summary=(
+                            "The destination bank account is not active, so the "
+                            "beneficiary cannot be activated."
+                        ),
+                        data={"benefit_account_number": normalized},
+                        error_code="account_inactive",
+                    )
+                now = timestamp()
+                connection.execute(
+                    "UPDATE beneficiaries SET status = 'active', updatedAt = %s"
+                    " WHERE uuid = %s",
+                    (now, existing["uuid"]),
+                )
+                return tool_result(
+                    status="completed",
+                    summary=(
+                        f"Beneficiary {existing['Short_Name']} was automatically "
+                        "activated for transfers."
+                    ),
+                    data={
+                        "beneficiary": {
+                            "full_name": existing["Full_Name"],
+                            "short_name": existing["Short_Name"],
+                            "account_number": existing["Account_Number"],
+                            "bank_name": target["Bank_Name_Ar"],
+                            "status": "active",
+                        },
+                        "automatically_activated": True,
+                    },
+                    operation_id=str(existing["uuid"]),
+                )
             return tool_result(
                 status="failed",
-                summary="This account is already in the beneficiary list, so it was not added again.",
-                data={"benefit_account_number": normalized},
+                summary="This account is already active in the beneficiary list, so it was not added again.",
+                data={"benefit_account_number": normalized, "status": "active"},
                 error_code="beneficiary_already_exists",
             )
 
@@ -138,7 +175,8 @@ async def add_benefit(
                     "account_number": normalized,
                     "bank_name": target["Bank_Name_Ar"],
                     "status": "active",
-                }
+                },
+                "automatically_activated": True,
             },
             operation_id=beneficiary_id,
         )

@@ -184,6 +184,29 @@ async def test_add_benefit_activates_verified_account():
     assert result.operation_id
     assert result.user_id == "evaluation-user"
     assert result.data["beneficiary"]["status"] == "active"
+    assert result.data["automatically_activated"] is True
+
+
+async def test_add_benefit_reactivates_existing_inactive_beneficiary():
+    with psycopg.connect(os.environ["BANK_DATABASE_URL"]) as connection:
+        connection.execute(
+            "UPDATE beneficiaries SET status = 'inactive'"
+            " WHERE owner_uuid = (SELECT uuid FROM users WHERE Username = %s)"
+            " AND Account_Number = %s",
+            ("evaluation-user", LATIFA_ACCOUNT),
+        )
+
+    result = _validated(
+        await add_benefit(
+            full_name_of_benefit_account="لطيفة العنزي",
+            benefit_account_number=LATIFA_ACCOUNT,
+            short_name="لطيفة",
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.data["beneficiary"]["status"] == "active"
+    assert result.data["automatically_activated"] is True
 
 
 async def test_add_benefit_rejects_duplicate_beneficiary():

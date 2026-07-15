@@ -70,6 +70,7 @@ class AuthorizationContext(StrictSchema):
 class RequestMetadata(StrictSchema):
     created_at: datetime = Field(default_factory=utc_now)
     conversation_context_summary: str | None = Field(default=None, max_length=10_000)
+    conversation_user_statements: list[str] = Field(default_factory=list, max_length=20)
     source_provider: str | None = Field(default=None, max_length=100)
 
 
@@ -129,6 +130,14 @@ class TaskStatusRequest(StrictSchema):
     session_id: UUID
     user_id: str = Field(min_length=1, max_length=200)
     tenant_id: str = Field(min_length=1, max_length=200)
+
+
+class CancelTaskRequest(StrictSchema):
+    request_id: UUID
+    session_id: UUID
+    user_id: str = Field(min_length=1, max_length=200)
+    tenant_id: str = Field(min_length=1, max_length=200)
+    reason_code: Literal["interaction_timeout"] = "interaction_timeout"
 
 
 class TaskStatusResponse(StrictSchema):

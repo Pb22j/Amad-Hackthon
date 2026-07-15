@@ -102,6 +102,8 @@ async def test_remaining_dummy_actions_follow_result_contract():
     assert all(result.status == "completed" for result in validated)
     assert validated[0].receipt_id
     assert validated[1].operation_id and validated[1].receipt_id is None
+    assert validated[1].data["status"] == "active"
+    assert validated[1].data["automatically_activated"] is True
     assert validated[2].receipt_id
 
 

@@ -318,6 +318,49 @@ class InteractionStore:
             expires_at=row["expires_at"],
         )
 
+    def refresh_session(
+        self,
+        token: str | None,
+        *,
+        language: str,
+        ttl_seconds: int,
+    ) -> InteractionSession | None:
+        """Reuse one authenticated session and extend its lifetime.
+
+        The browser may reload, change language, or switch between chat and
+        voice. None of those UI actions should create a new memory namespace.
+        """
+
+        if not token:
+            return None
+        expires_at = time.time() + ttl_seconds
+        with self._lock:
+            connection = self._connect()
+            try:
+                row = connection.execute(
+                    """
+                    UPDATE interaction_sessions
+                    SET language = %s, expires_at = %s
+                    WHERE token_hash = %s AND expires_at > %s
+                    RETURNING *
+                    """,
+                    (language, expires_at, _token_hash(token), time.time()),
+                ).fetchone()
+                connection.commit()
+            finally:
+                self._close(connection)
+        if row is None:
+            return None
+        return InteractionSession(
+            session_id=row["session_id"],
+            user_id=row["user_id"],
+            tenant_id=row["tenant_id"],
+            language=row["language"],
+            scopes=tuple(json.loads(row["scopes_json"])),
+            authenticated_at=row["authenticated_at"],
+            expires_at=row["expires_at"],
+        )
+
     def reserve_request(
         self, *, session_id: str, request_id: str, natural_language_request: str
     ) -> None:
@@ -437,7 +480,9 @@ class InteractionStore:
                     """
                     SELECT task_id FROM interaction_tasks
                     WHERE session_id = %s
-                      AND status NOT IN ('completed', 'partially_completed', 'rejected', 'failed')
+                      AND status NOT IN (
+                          'completed', 'partially_completed', 'rejected', 'failed', 'timed_out'
+                      )
                     ORDER BY updated_at DESC LIMIT 1
                     """,
                     (session_id,),
@@ -487,6 +532,12 @@ class InteractionStore:
                     ).fetchone()
                 if task["request_id"] != event.request_id or task["session_id"] != event.session_id:
                     raise PermissionError("event identity does not match submitted task")
+                current = connection.execute(
+                    "SELECT status FROM interaction_tasks WHERE task_id = %s",
+                    (event.task_id,),
+                ).fetchone()
+                if current is not None and current["status"] == "timed_out":
+                    return False
                 inserted = connection.execute(
                     """
                     INSERT INTO interaction_events
@@ -546,7 +597,8 @@ class InteractionStore:
             try:
                 updated = connection.execute(
                     """
-                    UPDATE interaction_tasks SET pending_event_json = NULL, updated_at = %s
+                    UPDATE interaction_tasks
+                    SET status = 'running', pending_event_json = NULL, updated_at = %s
                     WHERE task_id = %s AND session_id = %s
                       AND pending_event_json = %s::jsonb
                     """,
@@ -559,6 +611,86 @@ class InteractionStore:
                 ).rowcount
                 connection.commit()
                 return bool(updated)
+            finally:
+                self._close(connection)
+
+    def record_timeout(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        language: str = "en",
+    ) -> AgentEvent | None:
+        """Atomically stop waiting for a slow task and persist a user-safe event."""
+
+        with self._lock:
+            connection = self._connect()
+            try:
+                task = connection.execute(
+                    """
+                    SELECT request_id, status FROM interaction_tasks
+                    WHERE task_id = %s AND session_id = %s
+                    """,
+                    (task_id, session_id),
+                ).fetchone()
+                if task is None or task["status"] in {
+                    "input_needed",
+                    "confirmation_needed",
+                    "completed",
+                    "partially_completed",
+                    "rejected",
+                    "failed",
+                    "timed_out",
+                }:
+                    return None
+                event = AgentEvent(
+                    task_id=task_id,
+                    request_id=task["request_id"],
+                    session_id=session_id,
+                    event_type="failed",
+                    user_safe_summary=(
+                        "استغرق الطلب وقتاً أطول من المتوقع، لذلك ألغيت العملية. "
+                        "لا تعتبر أي إجراء مكتملاً. أخبرني كيف تريد المتابعة."
+                        if language == "ar"
+                        else (
+                            "This is taking longer than expected, so I cancelled the action. "
+                            "Nothing should be treated as completed. Please tell me how you "
+                            "would like to continue."
+                        )
+                    ),
+                    details={
+                        "reason_code": "agentic_timeout",
+                        "action_cancelled": True,
+                    },
+                    created_at=datetime.now(timezone.utc),
+                )
+                payload = event.model_dump_json()
+                event_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+                connection.execute(
+                    """
+                    INSERT INTO interaction_events
+                    (event_hash, task_id, session_id, event_type, payload_json, created_at)
+                    VALUES (%s, %s, %s, 'failed', %s, %s)
+                    ON CONFLICT (event_hash) DO NOTHING
+                    """,
+                    (
+                        event_hash,
+                        task_id,
+                        session_id,
+                        payload,
+                        event.created_at.timestamp(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE interaction_tasks
+                    SET status = 'timed_out', pending_event_json = NULL, updated_at = %s
+                    WHERE task_id = %s AND session_id = %s
+                    """,
+                    (time.time(), task_id, session_id),
+                )
+                connection.commit()
+                return event
             finally:
                 self._close(connection)
 
@@ -622,7 +754,7 @@ class InteractionStore:
         except (InvalidTag, UnicodeDecodeError, ValueError):
             return None
 
-    def record_voice_turn(
+    def record_conversation_turn(
         self,
         *,
         session_id: str,
@@ -630,7 +762,7 @@ class InteractionStore:
         text: str,
         provenance: str,
     ) -> bool:
-        """Persist a bounded encrypted transcript without promoting it to fact."""
+        """Persist a bounded encrypted chat or voice turn without promoting it to fact."""
 
         if role not in {"user", "assistant"}:
             raise ValueError("unsupported voice turn role")
@@ -676,8 +808,25 @@ class InteractionStore:
                 self._close(connection)
         return True
 
-    def grounded_voice_context(self, *, session_id: str, limit: int = 8) -> dict[str, Any]:
-        """Return evidence labels; assistant text is intentionally never recalled as truth."""
+    def record_voice_turn(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        text: str,
+        provenance: str,
+    ) -> bool:
+        """Compatibility wrapper for existing callers and tests."""
+
+        return self.record_conversation_turn(
+            session_id=session_id,
+            role=role,
+            text=text,
+            provenance=provenance,
+        )
+
+    def recent_user_statements(self, *, session_id: str, limit: int = 8) -> list[str]:
+        """Return exact recent authenticated-user statements from chat and voice."""
 
         with self._lock:
             connection = self._connect()
@@ -692,13 +841,19 @@ class InteractionStore:
                 ).fetchall()
             finally:
                 self._close(connection)
-        statements = []
+        statements: list[str] = []
         for row in reversed(rows):
             text = self._decrypt_turn(
                 session_id=session_id, role=row["role"], payload=row["encrypted_text"]
             )
             if text is not None:
                 statements.append(text)
+        return statements
+
+    def grounded_voice_context(self, *, session_id: str, limit: int = 8) -> dict[str, Any]:
+        """Return evidence labels; assistant text is intentionally never recalled as truth."""
+
+        statements = self.recent_user_statements(session_id=session_id, limit=limit)
         verified_events = [
             {
                 "event_type": event.get("event_type"),

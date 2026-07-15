@@ -7,7 +7,8 @@ import { LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { useLang, useLocalize } from "@/lib/i18n";
-import { user } from "@/lib/nafiData";
+import { invalidateNafeaSession } from "@/lib/nafea-api";
+import { useDashboardData } from "@/components/nafi/dashboard-data-provider";
 
 /**
  * Profile avatar with a small popover menu. Holds the sign-out action.
@@ -17,9 +18,11 @@ export function UserMenu() {
   const { t } = useLang();
   const loc = useLocalize();
   const { signOut } = useAuth();
+  const { snapshot } = useDashboardData();
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
   const rootRef = React.useRef<HTMLDivElement>(null);
+  const user = snapshot?.user ?? { name: "Nafi", name_ar: "نافع", initial: "N" };
 
   React.useEffect(() => {
     if (!open) return;
@@ -41,6 +44,7 @@ export function UserMenu() {
 
   function handleSignOut() {
     setOpen(false);
+    invalidateNafeaSession();
     signOut();
     router.replace("/");
   }
@@ -73,7 +77,7 @@ export function UserMenu() {
           className="absolute end-0 top-11 z-50 w-56 overflow-hidden rounded-2xl border border-white/[0.06] bg-popover shadow-[inset_0_1px_0_0_rgb(255_255_255/0.04),0_18px_40px_-16px_rgb(0_0_0/0.9)]"
         >
           <div className="border-b border-white/[0.06] px-4 py-3">
-            <p className="truncate text-sm font-medium">{loc(user.name, user.nameAr)}</p>
+            <p className="truncate text-sm font-medium">{loc(user.name, user.name_ar)}</p>
             <p className="mt-0.5 truncate text-[11px] text-faint">{t("signedIn")}</p>
           </div>
 

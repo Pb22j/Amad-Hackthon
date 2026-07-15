@@ -8,7 +8,7 @@ import hmac
 import json
 import time
 from collections import defaultdict
-from typing import Any
+from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import settings
+from app.dashboard import DashboardStore
 from app.interaction import (
     AgentEvent,
     InteractionSession,
@@ -67,6 +68,7 @@ interaction_store = InteractionStore(
     max_assistant_turns=settings.VOICE_MEMORY_MAX_ASSISTANT_TURNS,
     max_memory_text_characters=settings.VOICE_MEMORY_MAX_TEXT_CHARACTERS,
 )
+dashboard_store = DashboardStore(settings.INTERACTION_DATABASE_URL)
 
 
 class TokenBucketLimiter:
@@ -92,6 +94,7 @@ class TokenBucketLimiter:
 limiter = TokenBucketLimiter(settings.RATE_LIMIT_PER_MIN)
 realtime_resume_handles: dict[str, str] = {}
 active_realtime_connections: dict[tuple[str, str], WebSocket] = {}
+task_watchdogs: dict[str, asyncio.Task[None]] = {}
 
 
 @app.middleware("http")
@@ -173,6 +176,7 @@ class ConfigResponse(StrictModel):
 
 class SessionRequest(StrictModel):
     language: str = Field(default="ar", pattern="^(ar|en)$")
+    reuse_existing: bool = False
 
 
 class SessionResponse(StrictModel):
@@ -189,6 +193,7 @@ class RealtimeRequest(StrictModel):
 class SubmitTaskRequest(StrictModel):
     natural_language_request: str = Field(min_length=1, max_length=20_000)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    source: Literal["chat", "voice"] = "chat"
 
 
 class ResumeTaskRequest(StrictModel):
@@ -297,16 +302,32 @@ async def get_config() -> ConfigResponse:
 
 
 @app.post("/api/session", response_model=SessionResponse)
-async def create_session(payload: SessionRequest, response: Response) -> SessionResponse:
+async def create_session(
+    payload: SessionRequest,
+    request: Request,
+    response: Response,
+) -> SessionResponse:
     if not settings.ALLOW_DEMO_SESSION_BOOTSTRAP:
         raise HTTPException(status_code=404, detail="Demo session bootstrap is disabled")
-    session, token = interaction_store.create_session(
-        user_id=settings.DEMO_USER_ID,
-        tenant_id=settings.DEMO_TENANT_ID,
-        language=payload.language,
-        scopes=settings.demo_scopes,
-        ttl_seconds=settings.SESSION_TTL_SECONDS,
+    token = _session_token(request) if payload.reuse_existing else None
+    session = (
+        interaction_store.refresh_session(
+            token,
+            language=payload.language,
+            ttl_seconds=settings.SESSION_TTL_SECONDS,
+        )
+        if payload.reuse_existing
+        else None
     )
+    if session is None:
+        session, token = interaction_store.create_session(
+            user_id=settings.DEMO_USER_ID,
+            tenant_id=settings.DEMO_TENANT_ID,
+            language=payload.language,
+            scopes=settings.demo_scopes,
+            ttl_seconds=settings.SESSION_TTL_SECONDS,
+        )
+    assert token is not None
     response.set_cookie(
         "nafea_session",
         token,
@@ -345,6 +366,23 @@ async def get_active_task(request: Request) -> dict[str, Any]:
             "pending_event": task.pending_event,
         }
     }
+
+
+@app.get("/api/dashboard")
+async def get_dashboard(request: Request) -> dict[str, Any]:
+    """Return a read-only banking snapshot scoped to the authenticated session."""
+
+    session = require_session(request)
+    if "financial:read" not in session.scopes:
+        raise HTTPException(status_code=403, detail="Financial read access is required")
+    try:
+        return await asyncio.to_thread(
+            dashboard_store.snapshot,
+            user_id=session.user_id,
+            tenant_id=session.tenant_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/tasks/{task_id}/latest-event")
@@ -650,15 +688,42 @@ async def handle_agentic_webhook(request: Request) -> dict[str, str]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Invalid agent event") from exc
     if inserted:
+        if event.event_type in {
+            "input_needed",
+            "confirmation_needed",
+            "completed",
+            "rejected",
+            "failed",
+        }:
+            _cancel_task_watchdog(event.task_id)
+        if event.event_type in {
+            "input_needed",
+            "confirmation_needed",
+            "completed",
+            "rejected",
+            "failed",
+        }:
+            interaction_store.record_conversation_turn(
+                session_id=event.session_id,
+                role="assistant",
+                text=event.user_safe_summary,
+                provenance="signed_agentic_event",
+            )
         await manager.send(event.session_id, event.model_dump(mode="json"))
     return {"status": "received" if inserted else "duplicate"}
 
 
-async def _agentic_post(url: str, payload: dict[str, Any]) -> httpx.Response:
+async def _agentic_post(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float | None = None,
+) -> httpx.Response:
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     timestamp, signature = sign_message(settings.INTERACTION_SHARED_SECRET, body)
     async with httpx.AsyncClient(
-        timeout=settings.AGENTIC_TIMEOUT_SECONDS, verify=settings.SSL_VERIFY
+        timeout=timeout_seconds or settings.AGENTIC_TIMEOUT_SECONDS,
+        verify=settings.SSL_VERIFY,
     ) as client:
         return await client.post(
             url,
@@ -669,6 +734,73 @@ async def _agentic_post(url: str, payload: dict[str, Any]) -> httpx.Response:
                 "X-Interaction-Signature": signature,
             },
         )
+
+
+def _cancel_task_watchdog(task_id: str) -> None:
+    watchdog = task_watchdogs.pop(task_id, None)
+    if watchdog is not None and watchdog is not asyncio.current_task():
+        watchdog.cancel()
+
+
+async def _task_response_watchdog(
+    *,
+    task_id: str,
+    request_id: str,
+    session: InteractionSession,
+) -> None:
+    try:
+        await asyncio.sleep(settings.AGENTIC_TIMEOUT_SECONDS)
+        event = interaction_store.record_timeout(
+            task_id=task_id,
+            session_id=session.session_id,
+            language=session.language,
+        )
+        if event is None:
+            return
+        interaction_store.record_conversation_turn(
+            session_id=session.session_id,
+            role="assistant",
+            text=event.user_safe_summary,
+            provenance="interaction_timeout",
+        )
+        await manager.send(session.session_id, event.model_dump(mode="json"))
+        cancel_payload = {
+            "request_id": request_id,
+            "session_id": session.session_id,
+            "user_id": session.user_id,
+            "tenant_id": session.tenant_id,
+            "reason_code": "interaction_timeout",
+        }
+        try:
+            response = await _agentic_post(
+                f"{settings.AGENTIC_BASE_URL.rstrip('/')}/agentic/tasks/{task_id}/cancel",
+                cancel_payload,
+                timeout_seconds=5.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.error("Agentic cancellation failed after timeout: %s", type(exc).__name__)
+    except asyncio.CancelledError:
+        return
+    finally:
+        if task_watchdogs.get(task_id) is asyncio.current_task():
+            task_watchdogs.pop(task_id, None)
+
+
+def _schedule_task_watchdog(
+    *,
+    task_id: str,
+    request_id: str,
+    session: InteractionSession,
+) -> None:
+    _cancel_task_watchdog(task_id)
+    task_watchdogs[task_id] = asyncio.create_task(
+        _task_response_watchdog(
+            task_id=task_id,
+            request_id=request_id,
+            session=session,
+        )
+    )
 
 
 @app.post("/api/submit-task", status_code=202)
@@ -702,6 +834,20 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
             status_code=409,
             detail="Finish the active financial task before starting another one",
         )
+    prior_user_statements = interaction_store.recent_user_statements(
+        session_id=session.session_id,
+        limit=settings.VOICE_MEMORY_CONTEXT_TURNS,
+    )
+    # Provider input transcription is the canonical voice-memory record. Saving
+    # the tool argument too would store the same spoken turn twice. Chat has no
+    # provider transcription, so it is persisted here instead.
+    if payload.source == "chat":
+        interaction_store.record_conversation_turn(
+            session_id=session.session_id,
+            role="user",
+            text=payload.natural_language_request,
+            provenance="chat_user_message",
+        )
     agentic_payload = {
         "request_id": request_id,
         "session_id": session.session_id,
@@ -715,7 +861,15 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
             "authenticated_at": session.authenticated_at,
             "assurance_level": "demo_authenticated",
         },
-        "metadata": {"source_provider": "nafea-voice"},
+        "metadata": {
+            "source_provider": f"nafea-{payload.source}",
+            "conversation_context_summary": json.dumps(
+                {"recent_user_statements": prior_user_statements},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "conversation_user_statements": prior_user_statements,
+        },
     }
     try:
         response = await _agentic_post(
@@ -729,7 +883,21 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
         interaction_store.record_task(
             session_id=session.session_id, request_id=request_id, task_id=task_id
         )
+        _schedule_task_watchdog(
+            task_id=task_id,
+            request_id=request_id,
+            session=session,
+        )
         return accepted
+    except httpx.TimeoutException as exc:
+        logger.error("Agentic submit timed out")
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "This is taking longer than 20 seconds, so I cancelled the request. "
+                "Nothing should be treated as completed."
+            ),
+        ) from exc
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         logger.error("Agentic submit failed: %s", type(exc).__name__)
         raise HTTPException(
@@ -772,7 +940,17 @@ async def resume_task(request: Request, payload: ResumeTaskRequest) -> dict[str,
             session_id=session.session_id,
             expected_event=event,
         )
+        _schedule_task_watchdog(
+            task_id=task.task_id,
+            request_id=task.request_id,
+            session=session,
+        )
         return {"status": "resumed"}
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="The continuation timed out after 20 seconds and was cancelled.",
+        ) from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(
             status_code=502, detail="Agentic layer rejected the clarification"
@@ -849,7 +1027,17 @@ async def confirm_task(request: Request, payload: ConfirmTaskRequest) -> dict[st
             session_id=session.session_id,
             expected_event=event,
         )
+        _schedule_task_watchdog(
+            task_id=task.task_id,
+            request_id=task.request_id,
+            session=session,
+        )
         return {"status": "confirmed"}
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="The confirmation timed out after 20 seconds and was cancelled.",
+        ) from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(
             status_code=502, detail="Agentic layer rejected the confirmation"

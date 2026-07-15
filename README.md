@@ -54,7 +54,10 @@ npm run dev
 
 Open `http://localhost:3000`. The browser creates an HttpOnly demo session, receives correlated
 task events over `/api/ws`, and uses the backend `/api/realtime` proxy for live voice. Next.js reads
-only `.env.local`; update its `NEXT_PUBLIC_NAFEA_API_URL` before a hosted build.
+only `.env.local`; update its `NEXT_PUBLIC_NAFEA_API_URL` before a hosted build. The dashboard reads
+the authenticated customer's current accounts, portfolio, transactions, bills, and beneficiaries
+from the interaction service's read-only `/api/dashboard` projection over the shared PostgreSQL
+database.
 
 Run retention cleanup from a scheduled job:
 

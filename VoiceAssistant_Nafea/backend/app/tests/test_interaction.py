@@ -14,7 +14,13 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.config import Settings
 from app.interaction import AgentEvent, InteractionStore, sign_message
-from app.main import _relay_provider_to_browser, app, interaction_store, limiter
+from app.main import (
+    _relay_provider_to_browser,
+    app,
+    interaction_store,
+    limiter,
+    task_watchdogs,
+)
 from app.prompts import gemini_setup, instructions_for
 
 
@@ -24,6 +30,10 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def reset_rate_limiter():
     limiter.buckets.clear()
+    yield
+    for watchdog in task_watchdogs.values():
+        watchdog.cancel()
+    task_watchdogs.clear()
 
 
 def create_session(language: str = "ar") -> dict:
@@ -43,6 +53,20 @@ def test_session_token_authenticates_cross_origin_http_requests():
 
     assert response.status_code == 200
     assert response.json() == {"active_task": None}
+
+
+def test_session_is_reused_across_reload_and_language_change():
+    with TestClient(app) as isolated:
+        first = isolated.post("/api/session", json={"language": "en"}).json()
+        second = isolated.post(
+            "/api/session",
+            json={"language": "ar", "reuse_existing": True},
+            headers={"X-Session-Token": first["session_token"]},
+        ).json()
+
+    assert second["session_id"] == first["session_id"]
+    assert second["session_token"] == first["session_token"]
+    assert second["language"] == "ar"
 
 
 @pytest.mark.parametrize("path", ["/api/submit-task", "/api/realtime-token"])
@@ -117,6 +141,45 @@ def test_submit_uses_server_owned_session_identity(mock_post):
     assert sent["tenant_id"] == settings.DEMO_TENANT_ID
     assert sent["language"] == "en"
     assert "financial:read" in sent["authorization"]["scopes"]
+
+
+@patch("app.main._agentic_post", new_callable=AsyncMock)
+def test_chat_and_voice_feed_the_same_agentic_conversation_context(mock_post):
+    session = create_session("en")
+
+    async def respond(_url, payload, **_kwargs):
+        return accepted_response(payload)
+
+    mock_post.side_effect = respond
+    first = client.post(
+        "/api/submit-task",
+        json={"natural_language_request": "Use my savings account", "source": "chat"},
+    ).json()
+    assert webhook(
+        {
+            "task_id": first["task_id"],
+            "request_id": first["request_id"],
+            "session_id": session["session_id"],
+            "event_type": "completed",
+            "user_safe_summary": "I used the requested account.",
+            "details": {},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ).status_code == 200
+    response = client.post(
+        "/api/submit-task",
+        json={"natural_language_request": "Transfer 50 to Sara", "source": "voice"},
+    )
+
+    assert response.status_code == 202
+    sent = mock_post.await_args.args[1]
+    assert sent["metadata"]["source_provider"] == "nafea-voice"
+    assert sent["metadata"]["conversation_user_statements"] == [
+        "Use my savings account",
+    ]
+    assert interaction_store.recent_user_statements(session_id=session["session_id"]) == [
+        "Use my savings account"
+    ]
 
 
 @patch("app.main._agentic_post", new_callable=AsyncMock)
