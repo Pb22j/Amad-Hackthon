@@ -97,6 +97,99 @@ async def test_graph_returns_concise_structured_report(database, app_config):
 
 
 @pytest.mark.integration
+async def test_unknown_request_returns_capability_grounded_interaction_guidance(
+    database, app_config
+):
+    await add_task(database)
+
+    async def read_balance(account: str) -> dict[str, Any]:
+        return {"status": "completed", "summary": account, "data": {}}
+
+    tool = StructuredTool.from_function(
+        coroutine=read_balance,
+        name="read_balance",
+        description="Read the authenticated customer's account balance.",
+        args_schema=BalanceArgs,
+    )
+    metadata = ToolMetadata(
+        name="read_balance",
+        risk=ToolRisk.SENSITIVE_READ,
+        intents=frozenset({Intent.ACCOUNT_INFORMATION.value}),
+        required_scopes=frozenset({"financial:read"}),
+    )
+    model = ScriptedChatModel(
+        responses=[
+            report_message(
+                summary=(
+                    "I can help with balances, transactions, payments, beneficiaries, "
+                    "and investments. Tell me what you would like to do."
+                ),
+                interaction_context={
+                    "response_kind": "guidance",
+                    "user_goal": "Understand what Nafea can help with",
+                    "key_facts": ["Account balances are supported."],
+                    "suggested_next_steps": ["Ask to view an account balance."],
+                },
+            )
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(Intent.UNKNOWN),
+        external_tools=[tool],
+        tool_metadata=[metadata],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state("Can you help me prepare for a trip?"),
+        config={"configurable": {"thread_id": "unknown-guidance"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert result["status"] == "completed"
+    assert result["final_report"]["interaction_context"]["response_kind"] == "guidance"
+    assert result["available_tools"] == []
+    seen_text = "\n".join(
+        str(message.content)
+        for invocation in model.seen_messages
+        for message in invocation
+        if isinstance(message.content, str)
+    )
+    assert "read_balance" in seen_text
+    async with database.session() as session:
+        assert await session.scalar(select(func.count()).select_from(ToolExecutionRow)) == 0
+
+
+@pytest.mark.integration
+async def test_unknown_request_has_deterministic_guidance_when_support_model_fails(
+    database, app_config
+):
+    await add_task(database)
+    graph = build_financial_agent(
+        primary_model=ScriptedChatModel(responses=[]),
+        classifier_model=StaticClassifier(Intent.UNKNOWN),
+        external_tools=[],
+        tool_metadata=[],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state("Something unexpected"),
+        config={"configurable": {"thread_id": "unknown-fallback"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert result["status"] == "completed"
+    assert "I can help with available" in result["final_report"]["summary"]
+    context = result["final_report"]["interaction_context"]
+    assert context["response_kind"] == "guidance"
+    assert context["suggested_next_steps"]
+
+
+@pytest.mark.integration
 async def test_graph_recovers_when_model_finishes_with_plain_text(database, app_config):
     await add_task(database)
     model = ScriptedChatModel(
@@ -480,6 +573,114 @@ async def test_financial_action_interrupts_for_exact_confirmation(database, app_
 
 @pytest.mark.integration
 @pytest.mark.security
+async def test_financial_action_separates_clarification_from_confirmation(
+    database, app_config
+):
+    await add_task(database)
+    observed = []
+
+    async def transfer(amount: int, destination: str) -> dict[str, Any]:
+        observed.append({"amount": amount, "destination": destination})
+        return {
+            "status": "completed",
+            "summary": "Transfer completed",
+            "data": {},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+            "receipt_id": "receipt-1",
+        }
+
+    tool = StructuredTool.from_function(
+        coroutine=transfer,
+        name="transfer_funds",
+        description="Transfer funds.",
+        args_schema=TransferArgs,
+    )
+    initial_arguments = {"amount": 2000, "destination": "default"}
+    clarified_arguments = {"amount": 2000, "destination": "Yousef"}
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_funds",
+                        "args": initial_arguments,
+                        "id": "transfer-before-clarification",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_funds",
+                        "args": clarified_arguments,
+                        "id": "transfer-after-clarification",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            report_message(summary="Transfer completed", receipt_ids=["receipt-1"]),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(Intent.MONEY_TRANSFER),
+        external_tools=[tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="transfer_funds",
+                risk=ToolRisk.FINANCIAL_ACTION,
+                required_scopes=frozenset({"financial:write"}),
+                explicit_user_fields=frozenset({"amount", "destination"}),
+                requires_confirmation=True,
+                requires_receipt=True,
+                idempotent=True,
+            )
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+    graph_config = {"configurable": {"thread_id": "task-1"}}
+    context = runtime_context(database, app_config)
+    context.original_request = "Transfer two thousands riyals"
+
+    clarification = await graph.ainvoke(
+        state(context.original_request), config=graph_config, context=context
+    )
+    clarification_payload = clarification["__interrupt__"][0].value
+    assert clarification_payload["kind"] == "clarification"
+    assert clarification_payload["expected_answer"]["field"] == "destination"
+
+    context.explicit_user_values = ("Yousef",)
+    context.resuming_from_clarification = True
+    confirmation = await graph.ainvoke(
+        Command(resume="Yousef"), config=graph_config, context=context
+    )
+    confirmation_payload = confirmation["__interrupt__"][0].value
+    assert confirmation_payload["kind"] == "confirmation"
+    assert confirmation_payload["arguments"] == clarified_arguments
+    assert observed == []
+
+    token = context.confirmation_signer.issue(
+        auth=context.auth,
+        task_id="task-1",
+        tool_name="transfer_funds",
+        arguments=clarified_arguments,
+    )
+    context.otp_verified = True
+    result = await graph.ainvoke(
+        Command(resume=token), config=graph_config, context=context
+    )
+
+    assert observed == [clarified_arguments]
+    assert result["final_report"]["receipt_ids"] == ["receipt-1"]
+
+
+@pytest.mark.integration
+@pytest.mark.security
 async def test_completed_financial_action_without_receipt_fails(database, app_config):
     await add_task(database)
 
@@ -672,9 +873,7 @@ async def test_completed_execution_is_reused_idempotently(database, app_config):
             }
         ],
     )
-    model = ScriptedChatModel(
-        responses=[tool_call, report_message(), tool_call, report_message()]
-    )
+    model = ScriptedChatModel(responses=[tool_call, report_message(), tool_call, report_message()])
     graph = build_financial_agent(
         primary_model=model,
         classifier_model=StaticClassifier(Intent.ACCOUNT_INFORMATION),
@@ -684,10 +883,6 @@ async def test_completed_execution_is_reused_idempotently(database, app_config):
         checkpointer=InMemorySaver(),
     )
     context = runtime_context(database, app_config)
-    await graph.ainvoke(
-        state(), config={"configurable": {"thread_id": "first"}}, context=context
-    )
-    await graph.ainvoke(
-        state(), config={"configurable": {"thread_id": "second"}}, context=context
-    )
+    await graph.ainvoke(state(), config={"configurable": {"thread_id": "first"}}, context=context)
+    await graph.ainvoke(state(), config={"configurable": {"thread_id": "second"}}, context=context)
     assert calls == 1

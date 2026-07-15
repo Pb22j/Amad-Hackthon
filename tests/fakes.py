@@ -62,6 +62,7 @@ def report_message(
     status: str = "completed",
     receipt_ids: list[str] | None = None,
     result: dict[str, Any] | None = None,
+    interaction_context: dict[str, Any] | None = None,
 ) -> AIMessage:
     return AIMessage(
         content="",
@@ -76,6 +77,13 @@ def report_message(
                     "warnings": [],
                     "receipt_ids": receipt_ids or [],
                     "needs_follow_up": False,
+                    "interaction_context": interaction_context
+                    or {
+                        "response_kind": "outcome",
+                        "user_goal": "",
+                        "key_facts": [],
+                        "suggested_next_steps": [],
+                    },
                 },
                 "id": "report-call",
                 "type": "tool_call",

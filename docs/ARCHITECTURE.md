@@ -20,7 +20,7 @@ Next.js build.
 │   ├── persistence/             SQLAlchemy repositories and stores
 │   ├── security/                Signing, identity, confirmation, redaction
 │   └── tools/                   Guarded financial tool providers
-├── VoiceAssistant_Nafea/backend/ Interaction, voice, session, and webhook API (port 8000)
+├── VoiceAssistant_Nafea/backend/ Interaction, voice, session, and webhook API (port 8001)
 │   └── app/                     FastAPI application and interaction tests
 ├── scripts/                     Database seed and local operational commands
 ├── tests/                       Agent unit, integration, PostgreSQL, security, and live suites
@@ -33,7 +33,7 @@ Next.js build.
 Next.js browser (:3000)
         │ session/task HTTP, event WebSocket, realtime voice WebSocket
         ▼
-Interaction service (:8000) ───── signed agent requests/webhooks ─────▶ Agentic service (:9000)
+Interaction service (:8001) ───── signed agent requests/webhooks ─────▶ Agentic service (:9000)
         │                                                               │
         └────────────── PostgreSQL shared system of record ◀────────────┘
 ```

@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   AlertTriangle,
   Check,
+  CircleHelp,
   Loader2,
   Mic,
   MicOff,
@@ -86,11 +87,22 @@ type Msg = {
   text: string;
   taskId?: string;
   event?: AgentEvent;
+  pending?: boolean;
 };
 
 type SessionStatus = "connecting" | "online" | "offline";
 type VoiceStatus = "idle" | "connecting" | "active";
 type Translate = (key: string, vars?: Record<string, string>) => string;
+
+type ClarificationSchema = {
+  type: "string" | "number" | "integer" | "boolean";
+  field: string;
+  label: string;
+  description?: string;
+  choices: Array<string | number | boolean>;
+  minimum?: number;
+  maximum?: number;
+};
 
 let sessionBootstrap:
   | {
@@ -177,6 +189,35 @@ function eventText(event: AgentEvent): string {
   return event.user_safe_summary;
 }
 
+function clarificationSchema(event: AgentEvent): ClarificationSchema {
+  const schema = record(event.details.expected_answer);
+  const rawType = schema?.type;
+  const type =
+    rawType === "number" || rawType === "integer" || rawType === "boolean"
+      ? rawType
+      : "string";
+  const rawField = typeof schema?.field === "string" ? schema.field : "answer";
+  const label =
+    typeof schema?.label === "string"
+      ? schema.label
+      : rawField.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  const choices = Array.isArray(schema?.enum)
+    ? schema.enum.filter(
+        (value): value is string | number | boolean =>
+          typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+      )
+    : [];
+  return {
+    type,
+    field: rawField,
+    label,
+    description: typeof schema?.description === "string" ? schema.description : undefined,
+    choices,
+    minimum: typeof schema?.minimum === "number" ? schema.minimum : undefined,
+    maximum: typeof schema?.maximum === "number" ? schema.maximum : undefined,
+  };
+}
+
 function eventLabel(event: AgentEvent, t: Translate): string {
   const labels: Record<AgentEventType, string> = {
     accepted: t("accepted"),
@@ -211,6 +252,17 @@ function safeArguments(details: Record<string, unknown>): Array<[string, string]
           : JSON.stringify(value);
       return [key, rendered ?? ""];
     });
+}
+
+function argumentLabel(key: string, t: Translate): string {
+  const labels: Record<string, string> = {
+    symbol: t("investmentSymbol"),
+    quantity: t("quantity"),
+    amount: t("amount"),
+    destination: t("destination"),
+    destination_account: t("destination"),
+  };
+  return labels[key] ?? key.replaceAll("_", " ");
 }
 
 function reportMetadata(event: AgentEvent): { warnings: string[]; receipts: string[] } {
@@ -275,6 +327,7 @@ export function ChatScreen() {
   const [liveTranscript, setLiveTranscript] = React.useState("");
   const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null);
   const [pendingEvent, setPendingEvent] = React.useState<AgentEvent | null>(null);
+  const [clarificationValue, setClarificationValue] = React.useState("");
   const [confirmationOtp, setConfirmationOtp] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState("");
@@ -310,9 +363,30 @@ export function ChatScreen() {
   }
 
   function setPending(event: AgentEvent | null) {
+    const previousClarification = pendingEventRef.current?.details.clarification_id;
     pendingEventRef.current = event;
     setPendingEvent(event);
     if (!event || event.event_type !== "confirmation_needed") setConfirmationOtp("");
+    if (
+      !event ||
+      event.event_type !== "input_needed" ||
+      event.details.clarification_id !== previousClarification
+    ) {
+      setClarificationValue("");
+    }
+  }
+
+  function clearPendingIfCurrent(expected: AgentEvent) {
+    const current = pendingEventRef.current;
+    const expectedClarificationId = expected.details.clarification_id;
+    const currentClarificationId = current?.details.clarification_id;
+    if (
+      current?.task_id === expected.task_id &&
+      current.event_type === expected.event_type &&
+      currentClarificationId === expectedClarificationId
+    ) {
+      setPending(null);
+    }
   }
 
   const stopVoice = React.useCallback(() => {
@@ -348,14 +422,25 @@ export function ChatScreen() {
     if (event.event_type === "input_needed") {
       const question = eventText(event);
       if (SENSITIVE_QUESTION.test(question)) return;
-      text = `Trusted backend clarification. Ask exactly this question: ${question}`;
+      text =
+        "Authoritative clarification. Ask the user this question politely as Nafea, " +
+        `without mentioning internal processing: ${question}`;
     } else if (event.event_type === "confirmation_needed") {
       const args = Object.fromEntries(safeArguments(event.details));
       text =
-        "Trusted backend confirmation. Tell the user to review and use the authenticated " +
+        "Authoritative confirmation. Naturally ask the user to review and use the authenticated " +
         `on-screen controls. Exact safe action: ${JSON.stringify(args)}`;
     } else {
-      text = `Trusted backend task update (${event.event_type}): ${eventText(event)}`;
+      const report = record(event.details.report);
+      const interactionContext = record(report?.interaction_context);
+      text =
+        "Authoritative result. Present it naturally as Nafea, the user's single assistant. " +
+        "Do not mention agents, tools, delegation, or internal processing. " +
+        JSON.stringify({
+          status: event.event_type,
+          summary: eventText(event),
+          interaction_context: interactionContext,
+        });
     }
 
     socket.send(
@@ -370,7 +455,14 @@ export function ChatScreen() {
 
     const blockedClarification =
       event.event_type === "input_needed" && SENSITIVE_QUESTION.test(eventText(event));
-    const displayText = blockedClarification ? t("unsafeClarification") : eventText(event);
+    const workingEvent = event.event_type === "accepted" || event.event_type === "progress";
+    const displayText = blockedClarification
+      ? t("unsafeClarification")
+      : workingEvent
+        ? t("chatThinking")
+        : event.event_type === "confirmation_needed"
+          ? t("reviewAction")
+          : eventText(event);
 
     setMessages((current) => {
       const index = current.findIndex((message) => message.taskId === event.task_id);
@@ -380,6 +472,7 @@ export function ChatScreen() {
         text: displayText,
         taskId: event.task_id,
         event,
+        pending: workingEvent,
       };
       if (index < 0) return [...current, nextMessage];
       return current.map((message, messageIndex) =>
@@ -404,7 +497,7 @@ export function ChatScreen() {
   }
   processEventRef.current = processAgentEvent;
 
-  function registerAcceptedTask(accepted: AcceptedTask) {
+  function registerAcceptedTask(accepted: AcceptedTask, optimisticMessageId?: string) {
     knownTasksRef.current.set(accepted.task_id, accepted.request_id);
     if (accepted.status === "accepted") {
       currentTaskIdRef.current = accepted.task_id;
@@ -413,13 +506,26 @@ export function ChatScreen() {
 
     setMessages((current) => {
       if (current.some((message) => message.taskId === accepted.task_id)) return current;
+      if (optimisticMessageId) {
+        return current.map((message) =>
+          message.id === optimisticMessageId
+            ? {
+                ...message,
+                text: t("chatThinking"),
+                taskId: accepted.task_id,
+                pending: true,
+              }
+            : message
+        );
+      }
       return [
         ...current,
         {
           id: nextMessageId(),
           role: "nafi",
-          text: accepted.user_safe_message || t("processing"),
+          text: t("chatThinking"),
           taskId: accepted.task_id,
+          pending: true,
         },
       ];
     });
@@ -435,13 +541,14 @@ export function ChatScreen() {
 
   async function submitFinancialTask(
     request: string,
-    idempotencyKey: string
+    idempotencyKey: string,
+    optimisticMessageId?: string
   ): Promise<AcceptedTask> {
     const accepted = await nafeaPost<AcceptedTask>("/api/submit-task", {
       natural_language_request: request,
       idempotency_key: idempotencyKey,
     });
-    registerAcceptedTask(accepted);
+    registerAcceptedTask(accepted, optimisticMessageId);
     return accepted;
   }
 
@@ -487,7 +594,7 @@ export function ChatScreen() {
           task_id: pending.task_id,
           user_answer: answer.trim(),
         });
-      setPending(null);
+      clearPendingIfCurrent(pending);
       return response;
     } catch {
       return { error: "The secure financial service could not complete this tool call." };
@@ -676,7 +783,11 @@ export function ChatScreen() {
     setPending(null);
     setErrorMessage("");
     setSessionStatus("connecting");
-    setMessages([{ id: nextMessageId(), role: "nafi", text: t("chatGreeting") }]);
+    setMessages((current) =>
+      current.length > 0
+        ? current
+        : [{ id: nextMessageId(), role: "nafi", text: t("chatGreeting") }]
+    );
 
     function connectEvents() {
       if (disposed || !sessionIdRef.current) return;
@@ -708,17 +819,22 @@ export function ChatScreen() {
       socket.onerror = () => socket.close();
     }
 
-    void bootstrapSession(lang)
-      .then((session) => {
+    function connectSession() {
+      void bootstrapSession(lang).then((session) => {
         if (disposed) return;
         sessionIdRef.current = session.session_id;
+        setErrorMessage("");
         connectEvents();
-      })
-      .catch(() => {
+      }).catch(() => {
         if (disposed) return;
+        if (sessionBootstrap?.language === lang) sessionBootstrap = undefined;
         setSessionStatus("offline");
         setErrorMessage(t("sessionError"));
+        reconnectTimer = setTimeout(connectSession, 1_500);
       });
+    }
+
+    connectSession();
 
     return () => {
       disposed = true;
@@ -738,33 +854,57 @@ export function ChatScreen() {
     if (!body || submitting || sessionStatus !== "online") return;
     setErrorMessage("");
     setInput("");
+    const optimisticMessageId = nextMessageId();
     setMessages((current) => [
       ...current,
       { id: nextMessageId(), role: "user", text: body },
+      {
+        id: optimisticMessageId,
+        role: "nafi",
+        text: t("chatThinking"),
+        pending: true,
+      },
     ]);
     setSubmitting(true);
 
     const pending = pendingEventRef.current;
     try {
-      if (pending?.event_type === "input_needed") {
-        await nafeaPost("/api/resume-task", {
-          task_id: pending.task_id,
-          user_answer: body,
-        });
-        setPending(null);
-        setMessages((current) =>
-          current.map((message) =>
-            message.taskId === pending.task_id
-              ? { ...message, text: t("answerRecorded") }
-              : message
-          )
-        );
-      } else {
-        if (currentTaskIdRef.current) throw new Error(t("activeTask"));
-        await submitFinancialTask(body, newRequestKey());
-      }
+      if (pending?.event_type === "input_needed") throw new Error(t("provideInCard"));
+      if (currentTaskIdRef.current) throw new Error(t("activeTask"));
+      await submitFinancialTask(body, newRequestKey(), optimisticMessageId);
     } catch (error) {
       if (pending) setPending(pending);
+      setMessages((current) =>
+        current.filter((message) => message.id !== optimisticMessageId)
+      );
+      setErrorMessage(error instanceof Error ? error.message : t("requestError"));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function submitClarification(answer: string | number | boolean) {
+    const clarification = pendingEventRef.current;
+    if (clarification?.event_type !== "input_needed" || submitting) return;
+    const displayAnswer = typeof answer === "boolean" ? (answer ? t("yes") : t("no")) : String(answer);
+    setSubmitting(true);
+    setErrorMessage("");
+    try {
+      await nafeaPost("/api/resume-task", {
+        task_id: clarification.task_id,
+        user_answer: answer,
+      });
+      setMessages((current) => [
+        ...current.map((message) =>
+          message.taskId === clarification.task_id &&
+          message.event?.details.clarification_id === clarification.details.clarification_id
+            ? { ...message, text: t("answerRecorded") }
+            : message
+        ),
+        { id: nextMessageId(), role: "user", text: displayAnswer },
+      ]);
+      clearPendingIfCurrent(clarification);
+    } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : t("requestError"));
     } finally {
       setSubmitting(false);
@@ -799,11 +939,10 @@ export function ChatScreen() {
 
   const suggestions = [t("sugNetWorth"), t("sugSpend"), t("sugTransfer")];
   const hasUserMessage = messages.some((message) => message.role === "user");
-  const waitingForAnswer = pendingEvent?.event_type === "input_needed";
   const composerDisabled =
     sessionStatus !== "online" ||
     submitting ||
-    Boolean(activeTaskId && !waitingForAnswer);
+    Boolean(activeTaskId);
   const statusText =
     sessionStatus === "online"
       ? t("online")
@@ -835,7 +974,7 @@ export function ChatScreen() {
         </div>
 
         <div className="flex items-center gap-2">
-          <LanguageToggle />
+          <LanguageToggle disabled={Boolean(activeTaskId) || submitting} />
           <Link
             href="/dashboard"
             aria-label={t("backToDashboard")}
@@ -856,11 +995,25 @@ export function ChatScreen() {
             message.taskId === pendingEvent.task_id
               ? pendingEvent
               : null;
+          const clarification =
+            pendingEvent?.event_type === "input_needed" &&
+            message.taskId === pendingEvent.task_id
+              ? pendingEvent
+              : null;
+          const answerSchema = clarification ? clarificationSchema(clarification) : null;
           return (
             <div
               key={message.id}
-              className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}
+              className={cn(
+                "flex items-end gap-2",
+                message.role === "user" ? "justify-end" : "justify-start"
+              )}
             >
+              {message.role === "nafi" && (
+                <span className="mb-0.5 grid size-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-primary to-purple text-white shadow-lg shadow-primary/10">
+                  <BrandLogo className="h-2.5 w-4" />
+                </span>
+              )}
               <div
                 className={cn(
                   "max-w-[88%] rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed",
@@ -869,7 +1022,8 @@ export function ChatScreen() {
                     : "border border-white/[0.06] bg-card-2 text-foreground"
                 )}
               >
-                {message.event && (
+                {message.event &&
+                  !["accepted", "progress", "completed"].includes(message.event.event_type) && (
                   <span
                     className={cn(
                       "mb-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold",
@@ -879,7 +1033,19 @@ export function ChatScreen() {
                     {eventLabel(message.event, t)}
                   </span>
                 )}
-                <p>{message.text}</p>
+                {message.pending ? (
+                  <div role="status" aria-live="polite">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="size-3.5 animate-spin text-primary" aria-hidden />
+                      <p>{message.text}</p>
+                    </div>
+                    <p className="mt-1.5 text-[10px] text-muted-foreground">
+                      {t("chatWorkingHint")}
+                    </p>
+                  </div>
+                ) : (
+                  <p>{message.text}</p>
+                )}
 
                 {metadata && metadata.warnings.length > 0 && (
                   <div className="mt-2 border-t border-white/[0.06] pt-2 text-[11px] text-orange">
@@ -897,6 +1063,91 @@ export function ChatScreen() {
                   </div>
                 )}
 
+                {clarification && answerSchema && (
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (clarificationValue.trim()) void submitClarification(clarificationValue);
+                    }}
+                    className="mt-3 space-y-3 border-t border-primary/30 pt-3"
+                  >
+                    <div className="flex items-center gap-2 font-semibold text-primary">
+                      <CircleHelp className="size-4" aria-hidden />
+                      <span>{t("missingInformationTitle")}</span>
+                    </div>
+                    <div>
+                      <label
+                        className="block text-[11px] font-medium"
+                        htmlFor={`clarification-${clarification.task_id}`}
+                      >
+                        {answerSchema.label}
+                      </label>
+                      {answerSchema.description && (
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {answerSchema.description}
+                        </p>
+                      )}
+                    </div>
+                    {answerSchema.type === "boolean" ? (
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          disabled={submitting}
+                          onClick={() => void submitClarification(true)}
+                          className="rounded-full bg-primary px-4 py-1.5 text-[11px] font-semibold text-white disabled:opacity-40"
+                        >
+                          {t("yes")}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={submitting}
+                          onClick={() => void submitClarification(false)}
+                          className="rounded-full border border-white/10 px-4 py-1.5 text-[11px] font-semibold disabled:opacity-40"
+                        >
+                          {t("no")}
+                        </button>
+                      </div>
+                    ) : answerSchema.choices.length > 0 ? (
+                      <div className="flex flex-wrap gap-2">
+                        {answerSchema.choices.map((choice) => (
+                          <button
+                            key={String(choice)}
+                            type="button"
+                            disabled={submitting}
+                            onClick={() => void submitClarification(choice)}
+                            className="rounded-full border border-primary/30 bg-primary/10 px-3 py-1.5 text-[11px] font-semibold text-primary disabled:opacity-40"
+                          >
+                            {String(choice)}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex gap-2">
+                        <input
+                          id={`clarification-${clarification.task_id}`}
+                          type={answerSchema.type === "string" ? "text" : "number"}
+                          step={answerSchema.type === "integer" ? 1 : "any"}
+                          min={answerSchema.minimum}
+                          max={answerSchema.maximum}
+                          required
+                          autoFocus
+                          value={clarificationValue}
+                          onChange={(event) => setClarificationValue(event.target.value)}
+                          className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/20 px-3 py-2 outline-none focus:border-primary/50"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!clarificationValue.trim() || submitting}
+                          className="rounded-xl bg-primary px-3 py-2 text-[11px] font-semibold text-white disabled:opacity-40"
+                        >
+                          {t("submitInformation")}
+                        </button>
+                      </div>
+                    )}
+                    <p className="text-[10px] text-muted-foreground">{t("missingInformationHint")}</p>
+                  </form>
+                )}
+
                 {confirmation && (
                   <div
                     role="alertdialog"
@@ -910,7 +1161,7 @@ export function ChatScreen() {
                     <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-xl bg-black/15 p-3 text-[11px]">
                       {safeArguments(confirmation.details).map(([key, value]) => (
                         <React.Fragment key={key}>
-                          <dt className="text-muted-foreground">{key.replaceAll("_", " ")}</dt>
+                          <dt className="text-muted-foreground">{argumentLabel(key, t)}</dt>
                           <dd className="text-end font-mono text-foreground">{value}</dd>
                         </React.Fragment>
                       ))}
@@ -1016,7 +1267,13 @@ export function ChatScreen() {
           value={input}
           onChange={(event) => setInput(event.target.value)}
           disabled={composerDisabled}
-          placeholder={waitingForAnswer ? eventText(pendingEvent) : t("chatPlaceholder")}
+          placeholder={
+            pendingEvent?.event_type === "input_needed"
+              ? t("provideInCard")
+              : activeTaskId
+                ? t("chatWorkingPlaceholder")
+                : t("chatPlaceholder")
+          }
           className="min-w-0 flex-1 rounded-full border border-white/[0.06] bg-card-2 px-4 py-2.5 text-sm outline-none placeholder:text-faint focus:border-primary/50 disabled:opacity-50"
         />
         <button

@@ -35,17 +35,23 @@ code owns identity, authorization, confirmation, isolation, persistence, and rep
 4. The service loads only memory matching the authenticated tenant and user.
 5. The outer graph screens prohibited requests and uses a structured-output model to classify
    intent and risk.
-6. The bounded inner agent sees only tools registered for this deployment. LangChain middleware
+6. Unknown or low-confidence requests route to a tool-free support responder. It receives the
+   runtime capability catalog as untrusted context and returns clear guidance without inventing
+   data or exposing internal architecture. A deterministic localized fallback remains available if
+   that response model fails.
+7. The bounded inner agent sees only tools registered for this deployment. LangChain middleware
    enforces model-call, tool-call, clarification, and per-tool limits.
-7. Every external tool has already been replaced with a guarded wrapper. The wrapper checks trusted
+8. Every external tool has already been replaced with a guarded wrapper. The wrapper checks trusted
    scopes, exact confirmation, idempotency, ownership, receipts, output size, and safe retries.
-8. Missing information or confirmation produces a LangGraph interrupt. The service persists the
+9. Missing information or confirmation produces a LangGraph interrupt. The service persists the
    state transition and outbound event in one transaction. A background outbox worker retries
    signed webhook delivery in task order until the interaction layer acknowledges it.
-9. `POST /agentic/tasks/{task_id}/resume` verifies the same task/user/tenant/session relationship and
+10. `POST /agentic/tasks/{task_id}/resume` verifies the same task/user/tenant/session relationship and
    resumes with a clarification answer or the exact authorization token plus dedicated demo OTP.
-10. The final `AgentReport` is validated against authoritative tool executions before it is stored
-    and emitted. A financial action cannot be reported as completed without its receipt.
+11. The final `AgentReport` is validated against authoritative tool executions before it is stored
+    and emitted. It includes typed `interaction_context` containing the understood goal, safe key
+    facts, and suggested next steps. A financial action cannot be reported as completed without its
+    receipt.
 
 ## Tool integration
 

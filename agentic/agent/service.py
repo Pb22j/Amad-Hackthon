@@ -13,7 +13,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -56,6 +58,50 @@ from agentic.security.rate_limit import InMemoryRateLimiter
 from agentic.telemetry.events import EventPublisher
 from agentic.telemetry.metrics import TASK_DURATION, TASKS
 from agentic.tools.guard import AgentRuntimeContext
+
+
+_NUMBER_TOKEN = re.compile(r"(?<!\w)[+-]?\d[\d,]*(?:\.\d+)?")
+
+
+def _numbers_in(value: Any) -> set[Decimal]:
+    rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    numbers: set[Decimal] = set()
+    for token in _NUMBER_TOKEN.findall(rendered):
+        try:
+            numbers.add(Decimal(token.replace(",", "")))
+        except InvalidOperation:
+            continue
+    return numbers
+
+
+def _validate_report_number_grounding(
+    report: AgentReport,
+    *,
+    original_request: str,
+    executions: list[ToolExecutionRow],
+) -> None:
+    """Reject model-created financial figures not present in trusted evidence."""
+
+    if not executions:
+        return
+    claims = _numbers_in(
+        {
+            "summary": report.summary,
+            "actions": report.actions,
+            "result": report.result,
+            "interaction_context": report.interaction_context.model_dump(mode="json"),
+        }
+    )
+    evidence = _numbers_in(original_request)
+    for execution in executions:
+        evidence.update(_numbers_in(execution.arguments or {}))
+        evidence.update(_numbers_in(execution.result or {}))
+    if not claims.issubset(evidence):
+        raise ValueError("report contains a numeric claim not grounded in authoritative evidence")
+
+
+def _localized(language: str, english: str, arabic: str) -> str:
+    return arabic if language == "ar" else english
 
 
 class AgentService:
@@ -168,7 +214,11 @@ class AgentService:
                         request_id=request.request_id,
                         session_id=request.session_id,
                         event_type=AgentEventType.ACCEPTED,
-                        user_safe_summary="The request was accepted.",
+                        user_safe_summary=_localized(
+                            request.language,
+                            "The request was accepted.",
+                            "تم قبول الطلب.",
+                        ),
                     )
                 )
                 outbox_id = outbox.id
@@ -176,7 +226,11 @@ class AgentService:
             request_id=request.request_id,
             task_id=UUID(task_id),
             status="accepted",
-            user_safe_message="The financial task was accepted.",
+            user_safe_message=_localized(
+                request.language,
+                "The financial task was accepted.",
+                "تم قبول المهمة المالية.",
+            ),
         )
         if outbox_id is not None:
             await self._deliver_outbox_id(outbox_id)
@@ -321,8 +375,10 @@ class AgentService:
                             request_id=UUID(row.request_id),
                             session_id=UUID(row.session_id),
                             event_type=AgentEventType.REJECTED,
-                            user_safe_summary=(
-                                "The user declined the requested financial action."
+                            user_safe_summary=_localized(
+                                row.language,
+                                "The user declined the requested financial action.",
+                                "رفض المستخدم العملية المالية المطلوبة.",
                             ),
                             details={"reason_code": "user_rejected_confirmation"},
                         )
@@ -376,6 +432,7 @@ class AgentService:
             otp_verified=request.authorization_token is not None,
             original_request=original.natural_language_request,
             explicit_user_values=explicit_user_values,
+            resuming_from_clarification=request.clarification_id is not None,
         )
         await self._invoke(
             task_id_str,
@@ -515,8 +572,11 @@ class AgentService:
                     session_id=request.session_id,
                     event_type=event_type,
                     user_safe_summary=(
-                        payload.get(
-                            "question", "Confirmation is required before continuing."
+                        payload.get("question")
+                        or _localized(
+                            request.language,
+                            "Confirmation is required before continuing.",
+                            "يلزم التأكيد قبل المتابعة.",
                         )
                     ),
                     details=payload,
@@ -578,6 +638,11 @@ class AgentService:
         authoritative_receipts = {
             row.receipt_id for row in executions if row.receipt_id and row.status == "completed"
         }
+        _validate_report_number_grounding(
+            report,
+            original_request=request.original_user_message,
+            executions=executions,
+        )
         if not set(report.receipt_ids).issubset(authoritative_receipts):
             raise ValueError("report contains a receipt not returned by an authoritative tool")
         required_tool_names = self.config.policies.financial_actions.require_authoritative_receipt
@@ -656,8 +721,10 @@ class AgentService:
                         request_id=request.request_id,
                         session_id=request.session_id,
                         event_type=AgentEventType.FAILED,
-                        user_safe_summary=(
-                            "The financial task could not be completed safely."
+                        user_safe_summary=_localized(
+                            request.language,
+                            "The financial task could not be completed safely.",
+                            "تعذّر إكمال المهمة المالية بأمان.",
                         ),
                         details={"error_code": error_code},
                     )

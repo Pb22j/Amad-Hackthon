@@ -13,7 +13,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 # From the repository root, copy .env.backend.example to .env.backend once.
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
 The integrated frontend is the Next.js app at the repository root. Frontend requirements: Node.js

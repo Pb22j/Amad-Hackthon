@@ -54,6 +54,7 @@ class AgentRuntimeContext:
     otp_verified: bool = False
     original_request: str = ""
     explicit_user_values: tuple[Any, ...] = ()
+    resuming_from_clarification: bool = False
 
 
 def _idempotency_key(task_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -83,15 +84,110 @@ def _argument_is_explicit(
         except InvalidOperation:
             return False
         for item in evidence:
-            for token in re.findall(r"(?<!\w)\d+(?:[.,]\d+)?", item):
+            # Preserve an explicit sign. Matching only the magnitude would let a
+            # model turn a user-stated negative amount into a positive action.
+            for token in re.findall(r"(?<!\w)[+-]?\d+(?:[.,]\d+)?", item):
                 try:
                     if Decimal(token.replace(",", ".")) == expected:
                         return True
                 except InvalidOperation:
                     continue
+            for word_value in _word_number_values(item):
+                if word_value == expected:
+                    return True
         return False
     rendered = str(value).strip().casefold()
     return bool(rendered) and any(rendered in item.casefold() for item in evidence)
+
+
+_EN_NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_EN_SCALES = {
+    "hundred": 100,
+    "hundreds": 100,
+    "thousand": 1_000,
+    "thousands": 1_000,
+    "million": 1_000_000,
+    "millions": 1_000_000,
+}
+
+
+def _parse_english_number(words: list[str]) -> Decimal | None:
+    """Parse a contiguous English number phrase, including casual plurals."""
+
+    sign = 1
+    if words and words[0] in {"minus", "negative"}:
+        sign = -1
+        words = words[1:]
+    if not words:
+        return None
+    total = 0
+    current = 0
+    saw_number = False
+    for word in words:
+        if word == "and":
+            continue
+        if word in _EN_NUMBER_WORDS:
+            current += _EN_NUMBER_WORDS[word]
+            saw_number = True
+            continue
+        scale = _EN_SCALES.get(word)
+        if scale is None:
+            return None
+        saw_number = True
+        if scale == 100:
+            current = (current or 1) * scale
+        else:
+            total += (current or 1) * scale
+            current = 0
+    return Decimal(sign * (total + current)) if saw_number else None
+
+
+def _word_number_values(text: str) -> tuple[Decimal, ...]:
+    """Extract signed word-number values without matching unrelated prose."""
+
+    tokens = re.findall(r"[a-z]+", text.casefold().replace("-", " "))
+    allowed = set(_EN_NUMBER_WORDS) | set(_EN_SCALES) | {"and", "minus", "negative"}
+    values: list[Decimal] = []
+    phrase: list[str] = []
+    for token in (*tokens, ""):
+        if token in allowed:
+            phrase.append(token)
+            continue
+        if phrase:
+            parsed = _parse_english_number(phrase)
+            if parsed is not None:
+                values.append(parsed)
+            phrase = []
+    return tuple(values)
 
 
 class GuardedToolFactory:
@@ -156,7 +252,13 @@ class GuardedToolFactory:
                             ),
                             "question": f"What value should be used for {field_name}?",
                             "reason_code": f"missing_explicit_{field_name}",
-                            "expected_answer": {"type": "string", "field": field_name},
+                            "expected_answer": {
+                                "type": "string",
+                                "field": field_name,
+                                "label": field_name.replace("_", " ").title(),
+                                "minLength": 1,
+                                "maxLength": 500,
+                            },
                             "expires_in_seconds": 900,
                         }
                     )
@@ -187,6 +289,21 @@ class GuardedToolFactory:
 
             token = context.initial_authorization_token
             if metadata.requires_confirmation:
+                # A clarification resume and confirmation interrupt cannot safely
+                # share one LangGraph tool invocation: the prior answer can be
+                # replayed into the next interrupt. Return control to the model
+                # once, then let it repeat the exact normalized call so the
+                # confirmation starts in a fresh invocation.
+                if context.resuming_from_clarification:
+                    context.resuming_from_clarification = False
+                    return json.dumps(
+                        {
+                            "status": "input_received",
+                            "summary": "The missing information was received. Repeat this exact tool call once to continue.",
+                            "arguments": redact(arguments),
+                        },
+                        ensure_ascii=False,
+                    )
                 # The interrupt is presented by the interaction layer. Its
                 # signed response is bound to these exact normalized arguments.
                 if not token:

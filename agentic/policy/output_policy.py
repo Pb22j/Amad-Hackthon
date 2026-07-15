@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from agentic.agent.report import AgentReport
 from agentic.config.loader import ReportLimits
 from agentic.security.redaction import redact
@@ -12,6 +14,16 @@ FORBIDDEN_OUTPUT_PHRASES = (
     "developer message",
     "hidden instruction",
     "chain of thought",
+    "agentic layer",
+    "interaction agent",
+    "backend agent",
+    "another agent",
+    "tool call",
+    "request_user_input",
+    "capability catalog",
+    "backend",
+    "internal service",
+    "delegation",
 )
 
 
@@ -25,7 +37,14 @@ class OutputPolicy:
             raise ValueError("report summary exceeds the configured limit")
         if len(safe.actions) > self.limits.max_actions:
             raise ValueError("report contains too many actions")
-        combined = " ".join([safe.summary, *safe.actions]).lower()
+        combined = json.dumps(
+            {
+                "summary": safe.summary,
+                "actions": safe.actions,
+                "interaction_context": safe.interaction_context.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+        ).lower()
         if any(phrase in combined for phrase in FORBIDDEN_OUTPUT_PHRASES):
             raise ValueError("report attempts to expose internal instructions")
         return safe

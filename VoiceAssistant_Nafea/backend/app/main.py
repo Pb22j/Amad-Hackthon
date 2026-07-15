@@ -190,6 +190,63 @@ class ResumeTaskRequest(StrictModel):
     user_answer: Any
 
 
+def _normalize_clarification_answer(answer: Any, schema: Any) -> Any:
+    """Validate and coerce the safe scalar clarification contract used by UI and voice."""
+
+    if not isinstance(schema, dict):
+        if isinstance(answer, str) and answer.strip():
+            return answer.strip()
+        raise HTTPException(status_code=422, detail="A non-empty answer is required")
+
+    answer_type = schema.get("type", "string")
+    try:
+        if answer_type == "string":
+            if not isinstance(answer, str):
+                raise ValueError
+            normalized: Any = answer.strip()
+            if not normalized:
+                raise ValueError
+            if len(normalized) < int(schema.get("minLength", 1)) or len(normalized) > int(
+                schema.get("maxLength", 500)
+            ):
+                raise ValueError
+        elif answer_type == "integer":
+            if isinstance(answer, bool):
+                raise ValueError
+            numeric = float(answer)
+            if not numeric.is_integer():
+                raise ValueError
+            normalized = int(numeric)
+        elif answer_type == "number":
+            if isinstance(answer, bool):
+                raise ValueError
+            normalized = float(answer)
+        elif answer_type == "boolean":
+            if isinstance(answer, bool):
+                normalized = answer
+            elif isinstance(answer, str) and answer.strip().lower() in {"true", "yes", "1"}:
+                normalized = True
+            elif isinstance(answer, str) and answer.strip().lower() in {"false", "no", "0"}:
+                normalized = False
+            else:
+                raise ValueError
+        else:
+            raise ValueError
+
+        if "enum" in schema and normalized not in schema["enum"]:
+            raise ValueError
+        if answer_type in {"number", "integer"}:
+            if "minimum" in schema and normalized < schema["minimum"]:
+                raise ValueError
+            if "maximum" in schema and normalized > schema["maximum"]:
+                raise ValueError
+        return normalized
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(
+            status_code=422, detail="The answer does not match the requested information"
+        ) from None
+
+
 class ConfirmTaskRequest(StrictModel):
     task_id: str
     approved: bool
@@ -649,13 +706,15 @@ async def resume_task(request: Request, payload: ResumeTaskRequest) -> dict[str,
     clarification_id = event.get("details", {}).get("clarification_id")
     if not clarification_id:
         raise HTTPException(status_code=409, detail="Clarification event is incomplete")
+    expected_answer = event.get("details", {}).get("expected_answer")
+    normalized_answer = _normalize_clarification_answer(payload.user_answer, expected_answer)
     resume_payload = {
         "request_id": task.request_id,
         "session_id": session.session_id,
         "user_id": session.user_id,
         "tenant_id": session.tenant_id,
         "clarification_id": clarification_id,
-        "answer": payload.user_answer,
+        "answer": normalized_answer,
     }
     try:
         response = await _agentic_post(

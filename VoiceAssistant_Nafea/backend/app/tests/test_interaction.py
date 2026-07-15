@@ -15,7 +15,7 @@ from app.config import settings
 from app.config import Settings
 from app.interaction import AgentEvent, InteractionStore, sign_message
 from app.main import _relay_provider_to_browser, app, interaction_store, limiter
-from app.prompts import gemini_setup
+from app.prompts import gemini_setup, instructions_for
 
 
 client = TestClient(app)
@@ -228,6 +228,92 @@ def test_clarification_resume_preserves_full_identity(mock_post):
         "clarification_id": clarification_id,
         "answer": "Savings",
     }
+
+
+@patch("app.main._agentic_post", new_callable=AsyncMock)
+def test_clarification_resume_normalizes_number_from_voice(mock_post):
+    session = create_session()
+
+    async def respond(url, payload):
+        if url.endswith("/agentic/request"):
+            return accepted_response(payload)
+        return httpx.Response(202, request=httpx.Request("POST", url))
+
+    mock_post.side_effect = respond
+    accepted = client.post(
+        "/api/submit-task", json={"natural_language_request": "Buy Aramco"}
+    ).json()
+    clarification_id = str(uuid4())
+    assert webhook(
+        {
+            "task_id": accepted["task_id"],
+            "request_id": accepted["request_id"],
+            "session_id": session["session_id"],
+            "event_type": "input_needed",
+            "user_safe_summary": "How many shares?",
+            "details": {
+                "kind": "clarification",
+                "clarification_id": clarification_id,
+                "question": "How many shares?",
+                "expected_answer": {
+                    "type": "integer",
+                    "field": "quantity",
+                    "label": "Number of shares",
+                    "minimum": 1,
+                },
+            },
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ).status_code == 200
+
+    response = client.post(
+        "/api/resume-task",
+        json={"task_id": accepted["task_id"], "user_answer": "3"},
+    )
+
+    assert response.status_code == 202
+    assert mock_post.await_args.args[1]["answer"] == 3
+
+
+@patch("app.main._agentic_post", new_callable=AsyncMock)
+def test_clarification_resume_rejects_invalid_choice_before_agentic(mock_post):
+    session = create_session()
+
+    async def respond(url, payload):
+        return accepted_response(payload)
+
+    mock_post.side_effect = respond
+    accepted = client.post(
+        "/api/submit-task", json={"natural_language_request": "Select an account"}
+    ).json()
+    assert webhook(
+        {
+            "task_id": accepted["task_id"],
+            "request_id": accepted["request_id"],
+            "session_id": session["session_id"],
+            "event_type": "input_needed",
+            "user_safe_summary": "Which account?",
+            "details": {
+                "kind": "clarification",
+                "clarification_id": str(uuid4()),
+                "question": "Which account?",
+                "expected_answer": {
+                    "type": "string",
+                    "field": "account",
+                    "enum": ["Checking", "Savings"],
+                },
+            },
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ).status_code == 200
+
+    response = client.post(
+        "/api/resume-task",
+        json={"task_id": accepted["task_id"], "user_answer": "Brokerage"},
+    )
+
+    assert response.status_code == 422
+    assert mock_post.await_count == 1
 
 
 @patch("app.main._agentic_post", new_callable=AsyncMock)
@@ -507,6 +593,14 @@ def test_realtime_setup_pins_the_configured_single_voice():
         resume_handle="resume-token",
     )
     assert resumed["setup"]["sessionResumption"] == {"handle": "resume-token"}
+
+
+def test_interaction_persona_is_polite_seamless_and_backend_grounded():
+    prompt = instructions_for("en")
+    assert "polite, respectful" in prompt
+    assert "submit every financial" in prompt
+    assert "Submit unexpected requests" in prompt
+    assert "Never mention agents, tools, a backend" in prompt
 
 
 def test_voice_memory_is_encrypted_bounded_and_never_recalls_assistant_claims():

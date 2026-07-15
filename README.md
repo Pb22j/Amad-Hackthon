@@ -34,7 +34,7 @@ docker compose up -d postgres
 ## Integrated web app
 
 The merged Next.js frontend lives at the repository root. It connects to the Nafea interaction
-service on port `8000`, which in turn calls the agentic API on port `9000`. Both Python services
+service on port `8001`, which in turn calls the agentic API on port `9000`. Both Python services
 load the same root `.env.backend`, so shared secrets, identity, and database URLs cannot drift.
 
 After the database setup above, run the three processes in separate terminals:
@@ -45,7 +45,7 @@ After the database setup above, run the three processes in separate terminals:
 
 # Authenticated interaction/voice service
 cd VoiceAssistant_Nafea/backend
-PYTHONPATH=. ../../.venv/bin/uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+PYTHONPATH=. ../../.venv/bin/uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
 
 # Next.js frontend (from the repository root)
 npm ci

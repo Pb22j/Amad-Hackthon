@@ -280,6 +280,139 @@ async def test_service_transfer_confirmation_and_receipt(
 
 @pytest.mark.integration
 @pytest.mark.security
+async def test_service_clarification_then_confirmation_does_not_reuse_answer_as_token(
+    database, app_config, agentic_request
+):
+    calls = 0
+
+    async def transfer(amount: int, destination: str):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "completed",
+            "summary": "Transfer completed",
+            "data": {"amount": amount, "destination": destination},
+            "user_id": agentic_request.user_id,
+            "tenant_id": agentic_request.tenant_id,
+            "receipt_id": "receipt-clarified",
+        }
+
+    tool = StructuredTool.from_function(
+        coroutine=transfer,
+        name="transfer_funds",
+        description="Transfer funds.",
+        args_schema=TransferArgs,
+    )
+    clarified_arguments = {"amount": 2000, "destination": "Yousef"}
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_funds",
+                        "args": {"amount": 2000, "destination": "default"},
+                        "id": "transfer-needs-destination",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_funds",
+                        "args": clarified_arguments,
+                        "id": "transfer-ready-for-confirmation",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            report_message(
+                summary="Transfer completed", receipt_ids=["receipt-clarified"]
+            ),
+        ]
+    )
+    service, signer, events = build_service(
+        database=database,
+        app_config=app_config,
+        model=model,
+        intent=Intent.MONEY_TRANSFER,
+        tools=[tool],
+        metadata=[
+            ToolMetadata(
+                name="transfer_funds",
+                risk=ToolRisk.FINANCIAL_ACTION,
+                required_scopes=frozenset({"financial:write"}),
+                explicit_user_fields=frozenset({"amount", "destination"}),
+                requires_confirmation=True,
+                requires_receipt=True,
+                idempotent=True,
+            )
+        ],
+    )
+    request = agentic_request.model_copy(
+        update={
+            "natural_language_request": "Transfer two thousands riyals",
+            "original_user_message": "Transfer two thousands riyals",
+        }
+    )
+
+    accepted = await service.submit(request, background=False)
+    clarification_event = events.events[-1]
+    assert clarification_event.event_type.value == "input_needed"
+    assert clarification_event.details["expected_answer"]["field"] == "destination"
+
+    await service.resume(
+        accepted.task_id,
+        ResumeTaskRequest(
+            request_id=request.request_id,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            tenant_id=request.tenant_id,
+            clarification_id=UUID(clarification_event.details["clarification_id"]),
+            answer="Yousef",
+        ),
+    )
+
+    confirmation_event = events.events[-1]
+    assert confirmation_event.event_type.value == "confirmation_needed"
+    assert confirmation_event.details["arguments"] == clarified_arguments
+    assert calls == 0
+
+    auth = AuthContext(
+        request.user_id,
+        request.tenant_id,
+        str(request.session_id),
+        request.authorization.scopes,
+    )
+    token = signer.issue(
+        auth=auth,
+        task_id=str(accepted.task_id),
+        tool_name="transfer_funds",
+        arguments=clarified_arguments,
+    )
+    await service.resume(
+        accepted.task_id,
+        ResumeTaskRequest(
+            request_id=request.request_id,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            tenant_id=request.tenant_id,
+            authorization_token=token,
+            otp_code="1111",
+        ),
+    )
+
+    assert calls == 1
+    async with database.session() as session:
+        task = await session.get(AgentTaskRow, str(accepted.task_id))
+        assert task.status == TaskStatus.COMPLETED.value
+        assert task.final_report["receipt_ids"] == ["receipt-clarified"]
+
+
+@pytest.mark.integration
+@pytest.mark.security
 async def test_explicit_confirmation_rejection_terminates_without_tool_call(
     database, app_config, agentic_request
 ):

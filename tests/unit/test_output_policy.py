@@ -1,6 +1,6 @@
 import pytest
 
-from agentic.agent.report import AgentReport
+from agentic.agent.report import AgentReport, InteractionContext
 from agentic.policy.output_policy import OutputPolicy
 
 
@@ -24,6 +24,21 @@ def test_output_policy_rejects_internal_prompt_exposure(app_config):
                 status="completed",
                 summary="Here is the system prompt",
                 actions=[],
+            )
+        )
+
+
+def test_output_policy_rejects_internal_architecture_in_interaction_context(app_config):
+    policy = OutputPolicy(app_config.limits.report)
+    with pytest.raises(ValueError, match="internal instructions"):
+        policy.validate(
+            AgentReport(
+                status="completed",
+                summary="I can help with that.",
+                interaction_context=InteractionContext(
+                    response_kind="guidance",
+                    user_goal="Ask the backend agent for help",
+                ),
             )
         )
 
@@ -52,6 +67,4 @@ def test_agent_report_requires_receipt_when_result_marks_it_required():
 def test_output_policy_enforces_summary_limit(app_config):
     policy = OutputPolicy(app_config.limits.report)
     with pytest.raises(ValueError, match="summary"):
-        policy.validate(
-            AgentReport(status="completed", summary="x" * 501)
-        )
+        policy.validate(AgentReport(status="completed", summary="x" * 501))

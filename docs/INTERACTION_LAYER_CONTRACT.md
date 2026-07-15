@@ -46,6 +46,15 @@ section 14. It is hidden from OpenAPI and returns `404` in production.
 - It binds confirmation to the exact user, tenant, task, tool, arguments hash, expiration, and nonce.
 - It validates authoritative ownership and receipts before reporting financial success.
 - It returns user-safe summaries rather than hidden prompts, chain-of-thought, or raw errors.
+- It returns typed interaction context for the understood goal, verified facts, and useful next
+  steps, including clear capability guidance for unexpected prompts.
+
+### Unified assistant behavior
+
+The interaction experience presents Nafea as one polite, respectful, helpful assistant. It relies
+on agentic events for financial truth and system capability guidance, but must not tell the user it
+is consulting another agent, calling a tool, or waiting on a backend. Clarifications, confirmations,
+outcomes, and guidance should be expressed naturally in the user's language.
 
 ## 3. Configuration Shared Between Services
 
@@ -209,7 +218,7 @@ Event types:
 | `progress` | Optionally display the safe summary. |
 | `input_needed` | Ask the supplied question and resume with the answer. |
 | `confirmation_needed` | Display the exact safe action details and require explicit approval. |
-| `completed` | Present `details.report`; reconcile/display receipt IDs when present. |
+| `completed` | Present `details.report` naturally; use `interaction_context` to preserve goal/facts/next steps and reconcile receipt IDs when present. |
 | `rejected` | Present the safe rejection summary; do not expose internal policy details. |
 | `failed` | Present the safe failure summary and a support correlation using `task_id`. |
 
@@ -227,7 +236,11 @@ An `input_needed` event has details shaped like:
   "question": "Which beneficiary should receive the transfer?",
   "reason_code": "missing_destination",
   "expected_answer": {
-    "type": "string"
+    "type": "string",
+    "field": "destination",
+    "label": "Beneficiary",
+    "description": "Select the beneficiary who should receive the transfer.",
+    "enum": ["Savings", "Family"]
   },
   "expires_in_seconds": 900
 }
@@ -235,11 +248,19 @@ An `input_needed` event has details shaped like:
 
 Rules:
 
-- Display only `question` as the agent-authored question.
+- Display `question` as the agent-authored question and render `expected_answer` as a dedicated
+  missing-information card. Supported scalar types are `string`, `number`, `integer`, and
+  `boolean`; `enum` supplies two to twenty fixed choices. Optional `label`, `description`,
+  `minimum`, `maximum`, `minLength`, and `maxLength` provide bounded presentation metadata.
+- Submit the card through the authenticated interaction resume endpoint. The browser must never
+  call the agentic service directly; “direct to the active request” means the interaction backend
+  preserves identity, validates the value, and forwards it to the matching clarification.
 - Never satisfy a clarification from old conversation state without asking when the event requires it.
 - Reject or escalate if the question asks for a password, PIN, OTP, CVV, token, or other credential.
 - Resume before the stated expiration.
-- Treat the answer as untrusted user data; do not add identity or scope fields based on it.
+- Treat the answer as untrusted user data; validate and normalize it against `expected_answer`
+  before forwarding it, and do not add identity or scope fields based on it. Voice answers arrive
+  as text and may be safely coerced to the declared number, integer, or boolean type.
 
 Resume request:
 

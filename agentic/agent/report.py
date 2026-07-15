@@ -7,6 +7,17 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class InteractionContext(BaseModel):
+    """Safe handoff context for the user-facing interaction experience."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    response_kind: Literal["answer", "guidance", "outcome", "refusal"] = "outcome"
+    user_goal: str = Field(default="", max_length=500)
+    key_facts: list[str] = Field(default_factory=list, max_length=8)
+    suggested_next_steps: list[str] = Field(default_factory=list, max_length=5)
+
+
 class AgentReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -17,6 +28,7 @@ class AgentReport(BaseModel):
     warnings: list[str] = Field(default_factory=list, max_length=5)
     receipt_ids: list[str] = Field(default_factory=list, max_length=20)
     needs_follow_up: bool = False
+    interaction_context: InteractionContext = Field(default_factory=InteractionContext)
 
     @model_validator(mode="after")
     def completed_financial_actions_have_receipts(self) -> "AgentReport":

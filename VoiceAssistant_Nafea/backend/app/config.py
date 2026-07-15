@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
-    PORT: int = 8000
+    PORT: int = 8001
     HOST: str = "0.0.0.0"
 
     STT_PROVIDER: str = "openai"
