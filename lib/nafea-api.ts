@@ -1,4 +1,5 @@
 const configuredBaseUrl = process.env.NEXT_PUBLIC_NAFEA_API_URL?.trim();
+let sessionToken: string | undefined;
 
 /**
  * The exported Next.js app cannot use server-side rewrites, so its browser API
@@ -8,6 +9,10 @@ const configuredBaseUrl = process.env.NEXT_PUBLIC_NAFEA_API_URL?.trim();
 export const NAFEA_API_BASE_URL = (
   configuredBaseUrl || "http://localhost:8001"
 ).replace(/\/$/, "");
+
+export function setNafeaSessionToken(token: string): void {
+  sessionToken = token;
+}
 
 export class NafeaApiError extends Error {
   constructor(
@@ -39,6 +44,7 @@ function endpoint(path: string): string {
 export function nafeaWebSocketUrl(path: string): string {
   const url = new URL(endpoint(path));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  if (sessionToken) url.searchParams.set("session_token", sessionToken);
   return url.toString();
 }
 
@@ -51,6 +57,7 @@ export async function nafeaRequest<T>(
     credentials: "include",
     headers: {
       ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(sessionToken ? { "X-Session-Token": sessionToken } : {}),
       ...init.headers,
     },
   });

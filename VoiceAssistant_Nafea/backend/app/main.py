@@ -177,6 +177,7 @@ class SessionRequest(StrictModel):
 
 class SessionResponse(StrictModel):
     session_id: str
+    session_token: str
     language: str
     expires_at: float
 
@@ -317,6 +318,12 @@ async def create_session(payload: SessionRequest, response: Response) -> Session
     )
     return SessionResponse(
         session_id=session.session_id,
+        # Browsers cannot attach custom headers to WebSocket handshakes and may
+        # reject third-party cookies when the static frontend and this API use
+        # different hostnames. The frontend keeps this short-lived demo token
+        # in memory, sends it as X-Session-Token for HTTP, and includes it only
+        # on authenticated WebSocket handshakes.
+        session_token=token,
         language=session.language,
         expires_at=session.expires_at,
     )

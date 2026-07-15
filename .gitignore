@@ -29,5 +29,6 @@ out/
 next-env.d.ts
 *.tsbuildinfo
 CONVERSATION.md
+.run/
 .github/
 .claude/

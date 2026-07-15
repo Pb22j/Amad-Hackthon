@@ -22,6 +22,7 @@ import {
   nafeaPost,
   nafeaRequest,
   nafeaWebSocketUrl,
+  setNafeaSessionToken,
 } from "@/lib/nafea-api";
 import { BrandLogo } from "@/components/nafi/brand-logo";
 import { LanguageToggle } from "@/components/i18n/language-toggle";
@@ -47,6 +48,7 @@ type AgentEvent = {
 
 type SessionResponse = {
   session_id: string;
+  session_token: string;
   language: "en" | "ar";
   expires_at: number;
 };
@@ -143,6 +145,7 @@ function bootstrapSession(language: "en" | "ar"): Promise<SessionResponse> {
   sessionBootstrap = record;
   void record.promise
     .then((session) => {
+      setNafeaSessionToken(session.session_token);
       record.expiresAt = session.expires_at;
     })
     .catch(() => {

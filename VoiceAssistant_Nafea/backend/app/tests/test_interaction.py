@@ -32,6 +32,19 @@ def create_session(language: str = "ar") -> dict:
     return response.json()
 
 
+def test_session_token_authenticates_cross_origin_http_requests():
+    with TestClient(app) as isolated:
+        session = isolated.post("/api/session", json={"language": "en"}).json()
+        isolated.cookies.clear()
+        response = isolated.get(
+            "/api/active-task",
+            headers={"X-Session-Token": session["session_token"]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"active_task": None}
+
+
 @pytest.mark.parametrize("path", ["/api/submit-task", "/api/realtime-token"])
 def test_cors_preflight_does_not_require_an_authenticated_session(path):
     with TestClient(app) as isolated:
