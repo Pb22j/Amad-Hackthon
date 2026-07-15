@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Nafi — deep-navy bento dashboard.
+ * A dark blue canvas with rounded bento cards, soft borders, and warm
+ * orange / cool purple call-to-action accents. Bilingual (EN + AR).
+ */
+:root {
+  --background: #0d1119;
+  --foreground: #e9eef6;
+  --card: #171e2b;
+  --card-2: #1f2836;
+  --card-foreground: #e9eef6;
+  --popover: #1a2130;
+  --popover-foreground: #e9eef6;
+  --primary: #6f8dff;
+  --primary-foreground: #0b0f18;
+  --secondary: #1f2836;
+  --secondary-foreground: #e9eef6;
+  --muted: #1f2836;
+  --muted-foreground: #8b99ad;
+  --faint: #5d6a7e;
+  --accent: #222c3c;
+  --accent-foreground: #e9eef6;
+  --orange: #d97b4c;
+  --purple: #8f82ea;
+  --positive: #55b394;
+  --negative: #e2726a;
+  --destructive: #e2726a;
+  --border: #273246;
+  --input: #273246;
+  --ring: #6f8dff;
+  --radius: 1rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-2: var(--card-2);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-orange: var(--orange);
+  --color-purple: var(--purple);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 6px);
+  --radius-md: calc(var(--radius) - 4px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", monospace;
+  --animate-eq: eq 0.9s ease-in-out infinite;
+}
+
+/* Voice waveform bars — animate only while active. */
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    /* Subtle navy vignette — lighter toward the top, deep at the edges. */
+    background-image:
+      radial-gradient(1200px 680px at 50% -8%, rgb(38 52 78 / 0.55), transparent 62%),
+      radial-gradient(900px 700px at 100% 0%, rgb(30 40 62 / 0.35), transparent 60%);
+    background-attachment: fixed;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}

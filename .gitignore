@@ -1,4 +1,6 @@
 .env
+.env*
+!.env.example
 .venv/
 agentic/tools/data/
 chat_agent.db
@@ -21,3 +23,9 @@ build/
 VoiceAssistant_Nafea/backend/cache_dir/
 VoiceAssistant_Nafea/backend/app.log
 VoiceAssistant_Nafea/frontend/node_modules/
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+CONVERSATION.md
