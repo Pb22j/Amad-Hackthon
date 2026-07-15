@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "build:sites": "next build && node scripts/prepare-sites-dist.mjs",
+    "dev": "node scripts/dev-all.mjs",
+    "dev:web": "NEXT_DIST_DIR=.next-dev next dev",
+    "dev:agentic": ".venv/bin/uvicorn main:app --reload --host 127.0.0.1 --port 9000",
+    "dev:interaction": "cd VoiceAssistant_Nafea/backend && PYTHONPATH=. ../../.venv/bin/uvicorn app.main:app --reload --host 127.0.0.1 --port 8001",
+    "build": "NEXT_DIST_DIR=.next-build next build",
+    "build:sites": "NEXT_DIST_DIR=.next-build next build && node scripts/prepare-sites-dist.mjs",
     "start": "next start"
   },
   "dependencies": {

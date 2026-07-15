@@ -2,13 +2,25 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock, AsyncMock
 
 # Import app to test
+from app.auth import AuthenticatedUser, RegistrationConflict
 from app.main import app
 
 client = TestClient(app)
 
 
 def authenticate(language="ar"):
-    response = client.post("/api/session", json={"language": language})
+    with patch(
+        "app.main.authentication_store.authenticate",
+        return_value=AuthenticatedUser(
+            user_id="evaluation-user",
+            tenant_id="evaluation-tenant",
+            language=language,
+        ),
+    ):
+        response = client.post(
+            "/api/auth/login",
+            json={"identifier": "test-user", "password": "password123", "language": language},
+        )
     assert response.status_code == 200
     return response.json()
 
@@ -24,6 +36,65 @@ def test_config_endpoint():
     assert "stt_provider" in data
     assert "llm_provider" in data
     assert "tts_provider" in data
+
+
+@patch("app.main.authentication_store.register")
+def test_register_creates_authenticated_session(mock_register):
+    mock_register.return_value = AuthenticatedUser(
+        user_id="new-user",
+        tenant_id="evaluation-tenant",
+        language="en",
+    )
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "full_name": "New User",
+            "username": "new-user",
+            "email": "new.user@example.com",
+            "phone_e164": "+966500000001",
+            "password": "secure123",
+            "language": "en",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["language"] == "en"
+    assert response.cookies.get("nafea_session")
+
+
+@patch("app.main.authentication_store.register")
+def test_register_reports_duplicate_identifier(mock_register):
+    mock_register.side_effect = RegistrationConflict("email")
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "full_name": "New User",
+            "username": "another-user",
+            "email": "taken@example.com",
+            "phone_e164": "+966500000002",
+            "password": "secure123",
+            "language": "en",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "email_taken"
+
+
+def test_register_rejects_weak_password():
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "full_name": "New User",
+            "username": "weak-user",
+            "email": "weak@example.com",
+            "phone_e164": "+966500000003",
+            "password": "passwordonly",
+            "language": "en",
+        },
+    )
+
+    assert response.status_code == 422
 
 @patch("app.main.get_stt_service")
 @patch("app.main.get_llm_service")

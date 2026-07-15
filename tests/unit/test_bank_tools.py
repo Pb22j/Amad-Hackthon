@@ -15,7 +15,7 @@ import psycopg
 from psycopg import sql
 import pytest
 
-from agentic.tools.add_benefit import add_benefit
+from agentic.tools.add_benefit import add_benefit, list_beneficiaries
 from agentic.tools.accounts import get_balance, search_transactions
 from agentic.tools.analyze_finances import analyze_finances
 from agentic.tools.fatoorah import list_fatoorahs, pay_fatoorah
@@ -184,10 +184,19 @@ async def test_add_benefit_activates_verified_account():
     assert result.operation_id
     assert result.user_id == "evaluation-user"
     assert result.data["beneficiary"]["status"] == "active"
-    assert result.data["automatically_activated"] is True
 
 
-async def test_add_benefit_reactivates_existing_inactive_beneficiary():
+async def test_list_beneficiaries_returns_authoritative_active_entries():
+    result = _validated(await list_beneficiaries())
+
+    assert result.status == "completed"
+    assert result.data["count"] == len(result.data["beneficiaries"])
+    assert result.data["count"] > 0
+    assert all(item["status"] == "active" for item in result.data["beneficiaries"])
+    assert any(item["account_number"] == LATIFA_ACCOUNT for item in result.data["beneficiaries"])
+
+
+async def test_add_benefit_rejects_existing_inactive_beneficiary():
     with psycopg.connect(os.environ["BANK_DATABASE_URL"]) as connection:
         connection.execute(
             "UPDATE beneficiaries SET status = 'inactive'"
@@ -204,9 +213,8 @@ async def test_add_benefit_reactivates_existing_inactive_beneficiary():
         )
     )
 
-    assert result.status == "completed"
-    assert result.data["beneficiary"]["status"] == "active"
-    assert result.data["automatically_activated"] is True
+    assert result.status == "failed"
+    assert result.error_code == "beneficiary_already_exists"
 
 
 async def test_add_benefit_rejects_duplicate_beneficiary():
@@ -271,6 +279,18 @@ async def test_transfer_completes_with_receipt_and_updates_balance():
 async def test_transfer_accepts_saved_short_name():
     result = _validated(
         await transfer_between_accounts(destination_account="لطيفة", amount=Decimal("10.00"))
+    )
+    assert result.status == "completed"
+    assert result.data["destination"]["account_number"] == LATIFA_ACCOUNT
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["لطيفة العنزي", "لطيفه العنزي", "Latifa", "Latifa Al-Anzi", "LATIFA AL ANZI"],
+)
+async def test_transfer_accepts_saved_full_name_and_arabic_spelling_variants(destination):
+    result = _validated(
+        await transfer_between_accounts(destination_account=destination, amount=Decimal("10.00"))
     )
     assert result.status == "completed"
     assert result.data["destination"]["account_number"] == LATIFA_ACCOUNT

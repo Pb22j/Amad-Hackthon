@@ -11,17 +11,20 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from app.auth import AuthenticatedUser, hash_password, verify_password
 from app.config import settings
 from app.config import Settings
 from app.interaction import AgentEvent, InteractionStore, sign_message
 from app.main import (
+    _relay_browser_to_provider,
     _relay_provider_to_browser,
+    _wait_for_provider_setup,
     app,
     interaction_store,
     limiter,
     task_watchdogs,
 )
-from app.prompts import gemini_setup, instructions_for
+from app.prompts import gemini_initial_history, gemini_setup, instructions_for
 
 
 client = TestClient(app)
@@ -29,22 +32,67 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def reset_rate_limiter():
-    limiter.buckets.clear()
-    yield
-    for watchdog in task_watchdogs.values():
-        watchdog.cancel()
-    task_watchdogs.clear()
+    def authenticate(*, identifier: str, password: str):
+        if identifier != "admin" or password != "password123":
+            return None
+        return AuthenticatedUser(
+            user_id="admin",
+            tenant_id="evaluation-tenant",
+            language="ar",
+            verified=True,
+        )
+
+    with patch("app.main.authentication_store.authenticate", side_effect=authenticate):
+        limiter.buckets.clear()
+        yield
+        for watchdog in task_watchdogs.values():
+            watchdog.cancel()
+        task_watchdogs.clear()
 
 
 def create_session(language: str = "ar") -> dict:
-    response = client.post("/api/session", json={"language": language})
+    response = client.post(
+        "/api/auth/login",
+        json={"identifier": "admin", "password": "password123", "language": language},
+    )
     assert response.status_code == 200
     return response.json()
 
 
+def test_password_hashing_and_server_authenticated_session_lifecycle():
+    encoded = hash_password("correct horse battery staple", salt=b"s" * 16)
+    assert verify_password("correct horse battery staple", encoded)
+    assert not verify_password("wrong", encoded)
+
+    with TestClient(app) as isolated:
+        assert (
+            isolated.post(
+                "/api/auth/login",
+                json={"identifier": "admin", "password": "wrong", "language": "en"},
+            ).status_code
+            == 401
+        )
+        login = isolated.post(
+            "/api/auth/login",
+            json={"identifier": "admin", "password": "password123", "language": "en"},
+        )
+        assert login.status_code == 200
+        assert isolated.get("/api/auth/session").status_code == 200
+        assert isolated.post("/api/auth/logout", json={}).status_code == 204
+        assert isolated.get("/api/auth/session").status_code == 401
+
+
+def test_anonymous_demo_session_bootstrap_is_disabled():
+    with TestClient(app) as isolated:
+        assert isolated.post("/api/session", json={"language": "en"}).status_code == 401
+
+
 def test_session_token_authenticates_cross_origin_http_requests():
     with TestClient(app) as isolated:
-        session = isolated.post("/api/session", json={"language": "en"}).json()
+        session = isolated.post(
+            "/api/auth/login",
+            json={"identifier": "admin", "password": "password123", "language": "en"},
+        ).json()
         isolated.cookies.clear()
         response = isolated.get(
             "/api/active-task",
@@ -57,7 +105,10 @@ def test_session_token_authenticates_cross_origin_http_requests():
 
 def test_session_is_reused_across_reload_and_language_change():
     with TestClient(app) as isolated:
-        first = isolated.post("/api/session", json={"language": "en"}).json()
+        first = isolated.post(
+            "/api/auth/login",
+            json={"identifier": "admin", "password": "password123", "language": "en"},
+        ).json()
         second = isolated.post(
             "/api/session",
             json={"language": "ar", "reuse_existing": True},
@@ -137,7 +188,7 @@ def test_submit_uses_server_owned_session_identity(mock_post):
     assert response.status_code == 202
     sent = mock_post.await_args.args[1]
     assert sent["session_id"] == session["session_id"]
-    assert sent["user_id"] == settings.DEMO_USER_ID
+    assert sent["user_id"] == "admin"
     assert sent["tenant_id"] == settings.DEMO_TENANT_ID
     assert sent["language"] == "en"
     assert "financial:read" in sent["authorization"]["scopes"]
@@ -273,6 +324,45 @@ def test_session_rejects_a_second_concurrent_financial_task(mock_post):
 
 
 @patch("app.main._agentic_post", new_callable=AsyncMock)
+def test_user_can_cancel_a_lagging_task_and_start_a_fresh_chat(mock_post):
+    session = create_session("en")
+
+    async def respond(url, payload, **_kwargs):
+        if url.endswith("/agentic/request"):
+            return accepted_response(payload)
+        return httpx.Response(
+            202,
+            request=httpx.Request("POST", url),
+            json={"cancelled": True},
+        )
+
+    mock_post.side_effect = respond
+    accepted = client.post(
+        "/api/submit-task",
+        json={"natural_language_request": "Show balance", "idempotency_key": "cancel-me"},
+    ).json()
+    cancelled = client.post("/api/cancel-task", json={"task_id": accepted["task_id"]})
+    assert cancelled.status_code == 202
+    assert cancelled.json()["status"] == "cancelled"
+    assert interaction_store.get_active_task(session_id=session["session_id"]) is None
+
+    interaction_store.record_conversation_turn(
+        session_id=session["session_id"],
+        role="user",
+        text="Remember this only in the old chat",
+        provenance="test",
+    )
+    fresh = client.post("/api/new-chat", json={})
+    assert fresh.status_code == 200
+    fresh_session = fresh.json()
+    assert fresh_session["session_id"] != session["session_id"]
+    assert fresh_session["session_token"] != session["session_token"]
+    assert interaction_store.recent_user_statements(session_id=session["session_id"]) == []
+    assert interaction_store.recent_user_statements(session_id=fresh_session["session_id"]) == []
+    assert interaction_store.get_session(session["session_token"]) is None
+
+
+@patch("app.main._agentic_post", new_callable=AsyncMock)
 def test_clarification_resume_preserves_full_identity(mock_post):
     session = create_session()
 
@@ -309,7 +399,7 @@ def test_clarification_resume_preserves_full_identity(mock_post):
     assert sent == {
         "request_id": accepted["request_id"],
         "session_id": session["session_id"],
-        "user_id": settings.DEMO_USER_ID,
+        "user_id": "admin",
         "tenant_id": settings.DEMO_TENANT_ID,
         "clarification_id": clarification_id,
         "answer": "Savings",
@@ -675,7 +765,6 @@ def test_demo_confirmation_adapter_is_rejected_in_production():
     with pytest.raises(ValueError, match="demo OTP confirmation adapter"):
         Settings(
             ENVIRONMENT="production",
-            ALLOW_DEMO_SESSION_BOOTSTRAP=False,
             DEMO_CONFIRMATION_OTP="2222",
         )
 
@@ -703,7 +792,13 @@ def test_realtime_setup_pins_the_configured_single_voice():
         "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Charon"}}
     }
     assert payload["setup"]["sessionResumption"] == {}
-    assert payload["setup"]["contextWindowCompression"] == {"slidingWindow": {}}
+    assert payload["setup"]["contextWindowCompression"] == {
+        "triggerTokens": 12_000,
+        "slidingWindow": {"targetTokens": 6000},
+    }
+    assert payload["setup"]["historyConfig"] == {
+        "initialHistoryInClientContent": True
+    }
     assert "صوت رجالي بالغ واحد وثابت" in payload["setup"]["systemInstruction"]["parts"][0]["text"]
 
     resumed = gemini_setup(
@@ -713,6 +808,60 @@ def test_realtime_setup_pins_the_configured_single_voice():
         resume_handle="resume-token",
     )
     assert resumed["setup"]["sessionResumption"] == {"handle": "resume-token"}
+    assert "historyConfig" not in resumed["setup"]
+
+
+def test_realtime_initial_history_always_closes_the_protocol_phase():
+    empty = gemini_initial_history({})
+    assert empty == {"clientContent": {"turns": [], "turnComplete": True}}
+
+    seeded = gemini_initial_history(
+        {"explicit_user_statements_untrusted": ["Call savings Rainy Day"]}
+    )
+    assert seeded["clientContent"]["turnComplete"] is True
+    assert "continuity only" in seeded["clientContent"]["turns"][0]["parts"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_realtime_waits_for_setup_acknowledgement():
+    class Provider:
+        async def recv(self):
+            return json.dumps({"setupComplete": {}})
+
+    await _wait_for_provider_setup(Provider())
+
+
+@pytest.mark.asyncio
+async def test_browser_cannot_inject_unbounded_realtime_context():
+    class Browser:
+        def __init__(self, messages):
+            self.messages = iter(messages)
+
+        async def receive_text(self):
+            try:
+                return next(self.messages)
+            except StopIteration as exc:
+                raise RuntimeError("done") from exc
+
+    class Provider:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, raw):
+            self.sent.append(raw)
+
+    provider = Provider()
+    with pytest.raises(ValueError, match="unsupported realtime client message"):
+        await _relay_browser_to_provider(
+            Browser([json.dumps({"clientContent": {"turns": []}})]), provider
+        )
+    assert provider.sent == []
+
+    with patch.object(settings, "VOICE_REALTIME_MAX_TEXT_CHARACTERS", 10):
+        with pytest.raises(ValueError, match="text input is too large"):
+            await _relay_browser_to_provider(
+                Browser([json.dumps({"realtimeInput": {"text": "x" * 11}})]), provider
+            )
 
 
 def test_interaction_persona_is_polite_seamless_and_backend_grounded():
@@ -766,6 +915,36 @@ def test_voice_memory_is_encrypted_bounded_and_never_recalls_assistant_claims():
         ).fetchall()
     assert encrypted
     assert all(b"Prefer short reports" not in bytes(row[0]) for row in encrypted)
+
+
+def test_voice_reconnect_context_has_one_aggregate_character_budget():
+    store = InteractionStore(
+        settings.INTERACTION_DATABASE_URL,
+        encryption_key="m" * 32,
+        max_user_turns=8,
+        max_memory_text_characters=1000,
+        max_context_characters=500,
+    )
+    session, _ = store.create_session(
+        user_id="user-budget",
+        tenant_id="tenant-budget",
+        language="en",
+        scopes=("financial:read",),
+        ttl_seconds=60,
+    )
+    for index in range(8):
+        assert store.record_voice_turn(
+            session_id=session.session_id,
+            role="user",
+            text=f"Preference {index}: " + ("brief " * 30),
+            provenance="provider_input_audio_transcription",
+        )
+
+    context = store.grounded_voice_context(session_id=session.session_id, limit=8)
+    serialized = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    assert len(serialized) <= 500
+    assert "Preference 7" in serialized
+    assert "Preference 0" not in serialized
 
 
 def test_voice_memory_rejects_credentials_and_instruction_injection():

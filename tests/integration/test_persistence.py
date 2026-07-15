@@ -26,6 +26,28 @@ async def test_task_creation_is_idempotent_per_tenant(database, agentic_request)
 
 
 @pytest.mark.integration
+async def test_task_persists_conversation_evidence_for_safe_resume(database, agentic_request):
+    contextual = agentic_request.model_copy(
+        update={
+            "metadata": agentic_request.metadata.model_copy(
+                update={
+                    "conversation_context_summary": "The user is continuing a transfer.",
+                    "conversation_user_statements": ["Yousef is the recipient."],
+                }
+            )
+        }
+    )
+    async with database.session() as session:
+        task = await TaskRepository(session).create(contextual, config_hash="a" * 64)
+        assert task.request_context["conversation_context_summary"] == (
+            "The user is continuing a transfer."
+        )
+        assert task.request_context["conversation_user_statements"] == [
+            "Yousef is the recipient."
+        ]
+
+
+@pytest.mark.integration
 async def test_task_creation_rejects_conflicting_request_id_reuse(database, agentic_request):
     conflicting = agentic_request.model_copy(
         update={"natural_language_request": "Transfer 500 SAR."}
@@ -90,6 +112,31 @@ async def test_clarification_validates_schema_and_expiry(database, agentic_reque
         clarification.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
         with pytest.raises(ValueError, match="expired"):
             await repository.answer(clarification.id, task_id=task.id, answer=5)
+
+
+@pytest.mark.integration
+async def test_generic_clarification_answer_is_bound_by_missing_field_reason(
+    database, agentic_request
+):
+    async with database.session() as session:
+        task = await TaskRepository(session).create(agentic_request, config_hash="a" * 64)
+        repository = ClarificationRepository(session)
+        clarification = await repository.create(
+            task_id=task.id,
+            question="Which beneficiary account?",
+            reason_code="missing_benefit_account_number",
+            expected_answer={"type": "string", "field": "answer"},
+            expires_in_seconds=60,
+        )
+        await repository.answer(
+            clarification.id,
+            task_id=task.id,
+            answer="SA82000094331951278286",
+        )
+
+        assert await repository.answered_field_values(task.id) == {
+            "benefit_account_number": ("SA82000094331951278286",)
+        }
 
 
 @pytest.mark.integration

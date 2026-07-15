@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Intent(StrEnum):
@@ -40,9 +40,26 @@ class IntentClassification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     intent: Intent
+    related_intents: tuple[Intent, ...] = Field(default=(), max_length=4)
     confidence: float = Field(ge=0, le=1)
     rationale_code: str = Field(max_length=100)
     required_information: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def related_intents_are_distinct(self) -> "IntentClassification":
+        if self.intent in self.related_intents:
+            raise ValueError("related_intents must not repeat the primary intent")
+        if len(set(self.related_intents)) != len(self.related_intents):
+            raise ValueError("related_intents must be unique")
+        if Intent.UNKNOWN in self.related_intents:
+            raise ValueError("UNKNOWN can only be the primary intent")
+        return self
+
+    @property
+    def all_intents(self) -> tuple[Intent, ...]:
+        """Return the primary and explicitly requested compound intents."""
+
+        return (self.intent, *self.related_intents)
 
 
 class RiskAssessment(BaseModel):

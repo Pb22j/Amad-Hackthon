@@ -12,6 +12,8 @@ import {
   ReceiptText,
   Send,
   ShieldCheck,
+  SquarePen,
+  StopCircle,
   X,
 } from "lucide-react";
 
@@ -24,6 +26,7 @@ import {
   nafeaPost,
   nafeaRequest,
   nafeaWebSocketUrl,
+  startNewNafeaChat,
 } from "@/lib/nafea-api";
 import { BrandLogo } from "@/components/nafi/brand-logo";
 import { LanguageToggle } from "@/components/i18n/language-toggle";
@@ -86,6 +89,7 @@ type RealtimeMessage = {
       }>;
     };
     interrupted?: boolean;
+    generationComplete?: boolean;
     turnComplete?: boolean;
   };
   toolCall?: { functionCalls?: RealtimeFunctionCall[] };
@@ -135,6 +139,7 @@ const SENSITIVE_QUESTION =
   /password|passcode|\bpin\b|\botp\b|\bcvv\b|access token|recovery secret|كلمة المرور|الرقم السري|رمز التحقق|رمز الدخول/i;
 const SENSITIVE_ARGUMENT = /password|passcode|pin|otp|cvv|token|secret/i;
 const EQ_BARS = [0.4, 0.8, 1, 0.6, 0.85];
+const MAX_VOICE_RELAY_CHARACTERS = 4_000;
 
 function isAgentEvent(value: unknown): value is AgentEvent {
   if (!value || typeof value !== "object") return false;
@@ -175,7 +180,23 @@ function eventText(event: AgentEvent): string {
   }
   if (event.event_type === "completed") {
     const report = record(event.details.report);
-    return typeof report?.summary === "string" ? report.summary : event.user_safe_summary;
+    const summary = typeof report?.summary === "string" ? report.summary : event.user_safe_summary;
+    const result = record(report?.result);
+    const beneficiaries = Array.isArray(result?.beneficiaries)
+      ? result.beneficiaries.map(record).filter((item): item is Record<string, unknown> => Boolean(item))
+      : [];
+    if (beneficiaries.length === 0) return summary;
+    const lines = beneficiaries.map((beneficiary) => {
+      const fullName = beneficiary.full_name ?? beneficiary["الاسم الكامل"];
+      const shortName = beneficiary.short_name ?? beneficiary["الاسم المختصر"];
+      const bankName = beneficiary.bank_name ?? beneficiary["اسم البنك"];
+      const names = [shortName, fullName]
+        .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
+        .filter((value, index, values) => values.indexOf(value) === index)
+        .join(" — ");
+      return `• ${names}${typeof bankName === "string" ? ` (${bankName})` : ""}`;
+    });
+    return `${summary}\n${lines.join("\n")}`;
   }
   return event.user_safe_summary;
 }
@@ -285,19 +306,30 @@ function reportMetadata(event: AgentEvent): { warnings: string[]; receipts: stri
   return { warnings, receipts };
 }
 
-function resampleTo16Khz(input: Float32Array, sourceRate: number): Float32Array {
-  if (sourceRate === 16_000) return input;
-  const ratio = sourceRate / 16_000;
+function resamplePcm(
+  input: Float32Array,
+  sourceRate: number,
+  targetRate: number
+): Float32Array {
+  if (sourceRate === targetRate) return input;
+  const ratio = sourceRate / targetRate;
   const length = Math.max(1, Math.round(input.length / ratio));
   const output = new Float32Array(length);
   for (let index = 0; index < length; index += 1) {
-    const start = Math.floor(index * ratio);
-    const end = Math.min(input.length, Math.floor((index + 1) * ratio));
-    let total = 0;
-    for (let source = start; source < end; source += 1) total += input[source];
-    output[index] = total / Math.max(1, end - start);
+    const position = index * ratio;
+    const left = Math.min(input.length - 1, Math.floor(position));
+    const right = Math.min(input.length - 1, left + 1);
+    const weight = position - left;
+    output[index] = input[left] * (1 - weight) + input[right] * weight;
   }
   return output;
+}
+
+function boundedVoiceJson(value: Record<string, unknown>, fallback: string): string {
+  const serialized = JSON.stringify(value);
+  return serialized.length <= MAX_VOICE_RELAY_CHARACTERS
+    ? serialized
+    : JSON.stringify({ summary: fallback.slice(0, 1_000), detail_omitted: true });
 }
 
 function float32ToBase64Pcm(input: Float32Array): string {
@@ -318,10 +350,11 @@ function base64PcmToFloat32(base64: string): Float32Array {
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index);
   }
-  const source = new Int16Array(bytes.buffer);
-  const output = new Float32Array(source.length);
-  for (let index = 0; index < source.length; index += 1) {
-    output[index] = source[index] / (source[index] >= 0 ? 32767 : 32768);
+  const view = new DataView(bytes.buffer);
+  const output = new Float32Array(Math.floor(bytes.length / 2));
+  for (let index = 0; index < output.length; index += 1) {
+    const sample = view.getInt16(index * 2, true);
+    output[index] = sample / (sample >= 0 ? 32767 : 32768);
   }
   return output;
 }
@@ -339,6 +372,10 @@ export function ChatScreen() {
   const [clarificationValue, setClarificationValue] = React.useState("");
   const [confirmationOtp, setConfirmationOtp] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const [cancelling, setCancelling] = React.useState(false);
+  const [startingNewChat, setStartingNewChat] = React.useState(false);
+  const [sessionGeneration, setSessionGeneration] = React.useState(0);
+  const [taskElapsed, setTaskElapsed] = React.useState(0);
   const [errorMessage, setErrorMessage] = React.useState("");
 
   const messageIdRef = React.useRef(0);
@@ -348,6 +385,7 @@ export function ChatScreen() {
   const realtimeSocketRef = React.useRef<WebSocket | null>(null);
   const knownTasksRef = React.useRef(new Map<string, string>());
   const queuedEventsRef = React.useRef<AgentEvent[]>([]);
+  const ignoredTaskIdsRef = React.useRef(new Set<string>());
   const currentTaskIdRef = React.useRef<string | null>(null);
   const pendingEventRef = React.useRef<AgentEvent | null>(null);
   const processEventRef = React.useRef<((event: AgentEvent) => void) | null>(null);
@@ -446,18 +484,21 @@ export function ChatScreen() {
       const args = Object.fromEntries(safeArguments(event.details));
       text =
         "Authoritative confirmation. Naturally ask the user to review and use the authenticated " +
-        `on-screen controls. Exact safe action: ${JSON.stringify(args)}`;
+        `on-screen controls. Exact safe action: ${boundedVoiceJson(args, event.user_safe_summary)}`;
     } else {
       const report = record(event.details.report);
       const interactionContext = record(report?.interaction_context);
       text =
         "Authoritative result. Present it naturally as Nafea, the user's single assistant. " +
         "Do not mention agents, tools, delegation, or internal processing. " +
-        JSON.stringify({
-          status: event.event_type,
-          summary: eventText(event),
-          interaction_context: interactionContext,
-        });
+        boundedVoiceJson(
+          {
+            status: event.event_type,
+            summary: eventText(event),
+            interaction_context: interactionContext,
+          },
+          eventText(event)
+        );
     }
 
     socket.send(
@@ -473,6 +514,7 @@ export function ChatScreen() {
   }
 
   function processAgentEvent(event: AgentEvent) {
+    if (ignoredTaskIdsRef.current.has(event.task_id)) return;
     if (event.session_id !== sessionIdRef.current) return;
 
     const blockedClarification =
@@ -737,7 +779,9 @@ export function ChatScreen() {
 
       for (const part of content?.modelTurn?.parts ?? []) {
         if (part.inlineData?.data) {
-          playerRef.current?.port.postMessage(base64PcmToFloat32(part.inlineData.data));
+          const decoded = base64PcmToFloat32(part.inlineData.data);
+          const outputRate = outputContextRef.current?.sampleRate ?? 24_000;
+          playerRef.current?.port.postMessage(resamplePcm(decoded, 24_000, outputRate));
         }
         if (part.text && !outputChunk) voiceOutputRef.current += part.text;
       }
@@ -747,6 +791,9 @@ export function ChatScreen() {
         voicePlaybackActiveRef.current = false;
         suppressMicUntilRef.current = performance.now() + 200;
         voiceOutputRef.current = "";
+      }
+      if (content?.generationComplete) {
+        playerRef.current?.port.postMessage({ action: "flush" });
       }
 
       for (const call of message.toolCall?.functionCalls ?? []) {
@@ -833,7 +880,7 @@ export function ChatScreen() {
             ) {
               return;
             }
-            const pcm = resampleTo16Khz(audioEvent.data, inputContext.sampleRate);
+            const pcm = resamplePcm(audioEvent.data, inputContext.sampleRate, 16_000);
             socket.send(
               JSON.stringify({
                 realtimeInput: {
@@ -849,6 +896,10 @@ export function ChatScreen() {
           const player = new AudioWorkletNode(outputContext, "pcm-player");
           player.port.onmessage = (playbackEvent: MessageEvent) => {
             const playback = playbackEvent.data as { type?: string; active?: boolean };
+            if (playback.type === "playback-error") {
+              setErrorMessage(t("voiceError"));
+              return;
+            }
             if (playback.type !== "playback-state") return;
             voicePlaybackActiveRef.current = Boolean(playback.active);
             if (!playback.active) suppressMicUntilRef.current = performance.now() + 200;
@@ -881,6 +932,7 @@ export function ChatScreen() {
     sessionIdRef.current = null;
     knownTasksRef.current.clear();
     queuedEventsRef.current = [];
+    ignoredTaskIdsRef.current.clear();
     currentTaskIdRef.current = null;
     realtimeToolCallsRef.current.clear();
     relayedVoiceEventsRef.current.clear();
@@ -907,6 +959,7 @@ export function ChatScreen() {
         try {
           const event = JSON.parse(String(message.data)) as unknown;
           if (!isAgentEvent(event) || event.session_id !== sessionIdRef.current) return;
+          if (ignoredTaskIdsRef.current.has(event.task_id)) return;
           const requestId = knownTasksRef.current.get(event.task_id);
           if (!requestId) {
             queuedEventsRef.current.push(event);
@@ -956,11 +1009,90 @@ export function ChatScreen() {
       eventSocketRef.current = null;
       stopVoice();
     };
-  }, [lang, stopVoice, t]);
+  }, [lang, sessionGeneration, stopVoice, t]);
 
   React.useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, pendingEvent, liveTranscript]);
+
+  React.useEffect(() => {
+    if (!activeTaskId) {
+      setTaskElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setTaskElapsed(0);
+    const interval = window.setInterval(() => {
+      setTaskElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [activeTaskId]);
+
+  async function cancelActiveTask(forNewChat = false): Promise<boolean> {
+    const taskId = currentTaskIdRef.current;
+    if (!taskId) return true;
+    setCancelling(true);
+    setErrorMessage("");
+    try {
+      await nafeaPost("/api/cancel-task", { task_id: taskId });
+      currentTaskIdRef.current = null;
+      setActiveTaskId(null);
+      setPending(null);
+      if (!forNewChat) {
+        setMessages((current) =>
+          current.map((message) =>
+            message.taskId === taskId
+              ? {
+                  ...message,
+                  text: t("requestCancelled"),
+                  event: undefined,
+                  pending: false,
+                }
+              : message
+          )
+        );
+      }
+      return true;
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("requestError"));
+      return false;
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  async function startNewChat() {
+    if (startingNewChat || submitting) return;
+    setStartingNewChat(true);
+    setErrorMessage("");
+    const previousTaskId = currentTaskIdRef.current;
+    if (previousTaskId) ignoredTaskIdsRef.current.add(previousTaskId);
+    try {
+      if (!(await cancelActiveTask(true))) {
+        if (previousTaskId) ignoredTaskIdsRef.current.delete(previousTaskId);
+        return;
+      }
+      const session = await startNewNafeaChat();
+      stopVoice();
+      eventSocketRef.current?.close();
+      eventSocketRef.current = null;
+      sessionIdRef.current = session.session_id;
+      knownTasksRef.current.clear();
+      queuedEventsRef.current = [];
+      realtimeToolCallsRef.current.clear();
+      relayedVoiceEventsRef.current.clear();
+      setInput("");
+      setPending(null);
+      setSessionStatus("connecting");
+      setMessages([{ id: nextMessageId(), role: "nafi", text: t("chatGreeting") }]);
+      setSessionGeneration((current) => current + 1);
+    } catch {
+      if (previousTaskId) ignoredTaskIdsRef.current.delete(previousTaskId);
+      setErrorMessage(t("newChatError"));
+    } finally {
+      setStartingNewChat(false);
+    }
+  }
 
   async function send(text: string) {
     const body = text.trim();
@@ -1120,6 +1252,20 @@ export function ChatScreen() {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void startNewChat()}
+            disabled={startingNewChat || submitting}
+            aria-label={activeTaskId ? t("cancelAndNewChat") : t("newChat")}
+            title={activeTaskId ? t("cancelAndNewChat") : t("newChat")}
+            className="grid size-9 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
+          >
+            {startingNewChat ? (
+              <Loader2 className="size-4 animate-spin" aria-hidden />
+            ) : (
+              <SquarePen className="size-4" aria-hidden />
+            )}
+          </button>
           <LanguageToggle disabled={Boolean(activeTaskId) || submitting} />
           <Link
             href="/dashboard"
@@ -1186,11 +1332,11 @@ export function ChatScreen() {
                       <p>{message.text}</p>
                     </div>
                     <p className="mt-1.5 text-[10px] text-muted-foreground">
-                      {t("chatWorkingHint")}
+                      {taskElapsed >= 5 ? t("chatStillWorking") : t("chatWorkingHint")}
                     </p>
                   </div>
                 ) : (
-                  <p>{message.text}</p>
+                  <p className="whitespace-pre-line">{message.text}</p>
                 )}
 
                 {metadata && metadata.warnings.length > 0 && (
@@ -1401,6 +1547,32 @@ export function ChatScreen() {
         <div className="mx-4 mb-2 flex items-start gap-2 rounded-xl border border-negative/30 bg-negative/10 px-3 py-2 text-[12px] text-negative sm:mx-5">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
           <span>{errorMessage}</span>
+        </div>
+      )}
+
+      {activeTaskId && (
+        <div className="mx-4 mb-2 flex items-center justify-between gap-3 rounded-xl border border-primary/20 bg-primary/[0.07] px-3 py-2 sm:mx-5">
+          <div className="min-w-0">
+            <p className="text-[11px] font-medium text-foreground">
+              {taskElapsed >= 5 ? t("chatStillWorking") : t("chatWorkingHint")}
+            </p>
+            <p className="mt-0.5 text-[10px] tabular-nums text-muted-foreground">
+              {taskElapsed}s
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void cancelActiveTask()}
+            disabled={cancelling}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-negative/30 bg-negative/10 px-3 py-1.5 text-[11px] font-semibold text-negative transition-colors hover:bg-negative/20 disabled:opacity-50"
+          >
+            {cancelling ? (
+              <Loader2 className="size-3 animate-spin" aria-hidden />
+            ) : (
+              <StopCircle className="size-3" aria-hidden />
+            )}
+            {cancelling ? t("cancellingRequest") : t("cancelRequest")}
+          </button>
         </div>
       )}
 

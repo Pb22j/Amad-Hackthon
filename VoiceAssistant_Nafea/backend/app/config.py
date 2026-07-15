@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     LLM_MODEL: str = "gpt-4o-mini"
     LLM_SYSTEM_PROMPT: str = "You are a helpful and conversational AI assistant."
-    REALTIME_MODEL: str = "gpt-realtime-2.1"
+    REALTIME_MODEL: str = "gemini-3.1-flash-live-preview"
     REALTIME_VOICE: str = "Charon"
 
     AGENTIC_BASE_URL: str = "http://localhost:9000"
@@ -36,12 +36,15 @@ class Settings(BaseSettings):
     DEMO_USER_ID: str = "evaluation-user"
     DEMO_TENANT_ID: str = "evaluation-tenant"
     DEMO_SCOPES: str = "financial:read,financial:write,investment:trade"
-    ALLOW_DEMO_SESSION_BOOTSTRAP: bool = True
     SESSION_TTL_SECONDS: int = 3600
     VOICE_MEMORY_MAX_USER_TURNS: int = 12
     VOICE_MEMORY_MAX_ASSISTANT_TURNS: int = 6
     VOICE_MEMORY_CONTEXT_TURNS: int = 8
     VOICE_MEMORY_MAX_TEXT_CHARACTERS: int = 2000
+    VOICE_MEMORY_CONTEXT_MAX_CHARACTERS: int = Field(default=6000, ge=1000, le=20_000)
+    VOICE_CONTEXT_TRIGGER_TOKENS: int = Field(default=12_000, ge=4000, le=120_000)
+    VOICE_CONTEXT_TARGET_TOKENS: int = Field(default=6000, ge=2000, le=60_000)
+    VOICE_REALTIME_MAX_TEXT_CHARACTERS: int = Field(default=8000, ge=1000, le=20_000)
     SESSION_COOKIE_SECURE: bool = False
     FRONTEND_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
     MAX_AUDIO_BYTES: int = 10_000_000
@@ -82,10 +85,13 @@ class Settings(BaseSettings):
             raise ValueError("DEMO_CONFIRMATION_OTP must contain exactly four digits")
         if self.ENVIRONMENT == "production" and not self.SSL_VERIFY:
             raise ValueError("SSL verification cannot be disabled in production")
-        if self.ENVIRONMENT == "production" and self.ALLOW_DEMO_SESSION_BOOTSTRAP:
-            raise ValueError("demo session bootstrap must be disabled in production")
         if self.ENVIRONMENT == "production":
             raise ValueError("the demo OTP confirmation adapter is not supported in production")
+        if self.VOICE_CONTEXT_TARGET_TOKENS >= self.VOICE_CONTEXT_TRIGGER_TOKENS:
+            raise ValueError(
+                "VOICE_CONTEXT_TARGET_TOKENS must be lower than "
+                "VOICE_CONTEXT_TRIGGER_TOKENS"
+            )
         return self
 
 

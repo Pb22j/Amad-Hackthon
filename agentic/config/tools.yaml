@@ -9,6 +9,12 @@ tools:
     requires_owner_metadata: true
     idempotent: true
     max_calls_per_task: 2
+  list_beneficiaries:
+    risk: sensitive_read
+    intents: [beneficiary_management, money_transfer]
+    required_scopes: [financial:read]
+    requires_owner_metadata: true
+    max_calls_per_task: 3
   transfer_between_accounts:
     risk: financial_action
     intents: [money_transfer]

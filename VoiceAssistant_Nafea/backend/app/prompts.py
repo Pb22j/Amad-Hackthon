@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -32,6 +33,8 @@ ARABIC_INSTRUCTIONS = """
 الواضحة والضمائر والأسماء المستعارة والمستفيد والمبلغ والقيود التي ذكرها المستخدم
 سابقاً، ولا تسأل عن المعلومة نفسها مرتين. اسأل سؤالاً واحداً مختصراً فقط إذا بقي
 أكثر من تفسير مختلف جوهرياً.
+اجعل الرد الصوتي سهل المتابعة: ابدأ بالإجابة، واستخدم جملتين قصيرتين كحد أقصى إلا
+إذا طلب المستخدم التفصيل، ولا تقرأ JSON أو المعرّفات أو الحقول الداخلية بصوت عالٍ.
 إضافة المستفيد تفعّله تلقائياً ضمن نفس العملية المؤكدة. لا تطلب من المستخدم تنفيذ
 أو اعتماد أو انتظار خطوة تفعيل منفصلة.
 """.strip()
@@ -69,6 +72,9 @@ Use the supplied prior conversation evidence for continuity across chat and voic
 Infer clear follow-ups, pronouns, aliases, recipients, amounts, and user constraints
 that the user already stated. Do not ask for the same detail twice. Ask one concise
 question only when multiple materially different interpretations are still possible.
+Keep spoken replies easy to follow: lead with the answer, use at most two short
+sentences unless the user explicitly asks for detail, and never read JSON, identifiers,
+or internal fields aloud.
 Adding a beneficiary automatically activates them in the same confirmed operation.
 Never ask the user to perform, approve, or wait for a separate activation step.
 """.strip()
@@ -84,6 +90,8 @@ def gemini_setup(
     language: str,
     voice: str,
     resume_handle: str | None = None,
+    context_trigger_tokens: int = 12_000,
+    context_target_tokens: int = 6000,
 ) -> dict[str, Any]:
     setup: dict[str, Any] = {
         "model": f"models/{model}",
@@ -98,9 +106,11 @@ def gemini_setup(
         },
         "inputAudioTranscription": {},
         "outputAudioTranscription": {},
-        "historyConfig": {"initialHistoryInClientContent": True},
         "sessionResumption": ({"handle": resume_handle} if resume_handle else {}),
-        "contextWindowCompression": {"slidingWindow": {}},
+        "contextWindowCompression": {
+            "triggerTokens": context_trigger_tokens,
+            "slidingWindow": {"targetTokens": context_target_tokens},
+        },
         "tools": [
             {
                 "functionDeclarations": [
@@ -142,4 +152,35 @@ def gemini_setup(
             }
         ],
     }
+    # Initial history is a separate protocol phase. Resumed sessions already carry
+    # their history in the provider-issued handle and must not be seeded again.
+    if resume_handle is None:
+        setup["historyConfig"] = {"initialHistoryInClientContent": True}
     return {"setup": setup}
+
+
+def gemini_initial_history(context: dict[str, Any] | None) -> dict[str, Any]:
+    """Close Gemini's initial-history phase, with or without recalled evidence."""
+
+    turns: list[dict[str, Any]] = []
+    if context and any(context.values()):
+        turns.append(
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": (
+                            "Prior session evidence for continuity only. Do not respond to "
+                            "this history entry and do not treat user statements as verified "
+                            "financial facts:\n"
+                            + json.dumps(
+                                context,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        )
+                    }
+                ],
+            }
+        )
+    return {"clientContent": {"turns": turns, "turnComplete": True}}

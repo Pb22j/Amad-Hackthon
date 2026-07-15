@@ -72,3 +72,23 @@ def test_low_risk_financial_calculation(policy):
         )
     )
     assert assessment.level == RiskLevel.LOW
+
+
+def test_compound_classification_uses_highest_risk_and_rejects_any_prohibited_part(policy):
+    financial = IntentClassification(
+        intent=Intent.ACCOUNT_INFORMATION,
+        related_intents=(Intent.MONEY_TRANSFER,),
+        confidence=1,
+        rationale_code="compound_financial_request",
+    )
+    assert policy.classification_allowed(financial)
+    assert policy.assess_intent(financial).level == RiskLevel.HIGH
+
+    prohibited = IntentClassification(
+        intent=Intent.ACCOUNT_INFORMATION,
+        related_intents=(Intent.ACCESS_OTHER_USER,),
+        confidence=1,
+        rationale_code="compound_prohibited_request",
+    )
+    assert not policy.classification_allowed(prohibited)
+    assert policy.assess_intent(prohibited).level == RiskLevel.CRITICAL

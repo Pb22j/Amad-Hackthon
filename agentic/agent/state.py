@@ -24,6 +24,7 @@ class FinancialAgentState(TypedDict, total=False):
     intent: dict[str, Any] | None
     risk: dict[str, Any] | None
     available_tools: list[str]
+    agent_context: str
     model_calls: int
     tool_calls: int
     clarification_rounds: int

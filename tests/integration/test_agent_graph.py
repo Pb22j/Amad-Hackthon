@@ -190,6 +190,185 @@ async def test_unknown_request_has_deterministic_guidance_when_support_model_fai
 
 
 @pytest.mark.integration
+async def test_compound_request_receives_tools_for_each_explicit_intent(database, app_config):
+    await add_task(database)
+
+    async def read_value(account: str) -> dict[str, Any]:
+        return {
+            "status": "completed",
+            "summary": account,
+            "data": {},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    balance_tool = StructuredTool.from_function(
+        coroutine=read_value,
+        name="read_balance",
+        description="Read the authenticated customer's balance.",
+        args_schema=BalanceArgs,
+    )
+    transactions_tool = StructuredTool.from_function(
+        coroutine=read_value,
+        name="read_transactions",
+        description="Read the authenticated customer's recent transactions.",
+        args_schema=BalanceArgs,
+    )
+    model = ScriptedChatModel(responses=[report_message(summary="Both parts handled")])
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(
+            Intent.ACCOUNT_INFORMATION,
+            related_intents=(Intent.TRANSACTION_SEARCH,),
+        ),
+        external_tools=[balance_tool, transactions_tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="read_balance",
+                risk=ToolRisk.SENSITIVE_READ,
+                intents=frozenset({Intent.ACCOUNT_INFORMATION.value}),
+            ),
+            ToolMetadata(
+                name="read_transactions",
+                risk=ToolRisk.SENSITIVE_READ,
+                intents=frozenset({Intent.TRANSACTION_SEARCH.value}),
+            ),
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state("Show my balance and recent transactions"),
+        config={"configurable": {"thread_id": "compound-request"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert result["available_tools"] == ["read_balance", "read_transactions"]
+    assert result["intent"]["related_intents"] == ["transaction_search"]
+    system_text = "\n".join(
+        str(message.content)
+        for invocation in model.seen_messages
+        for message in invocation
+        if message.type == "system"
+    )
+    assert "trusted task work brief" in system_text.casefold()
+    assert "read_balance" in system_text
+    assert "read_transactions" in system_text
+
+
+@pytest.mark.integration
+async def test_low_confidence_known_intent_still_reaches_reasoning_agent(database, app_config):
+    await add_task(database)
+    model = ScriptedChatModel(responses=[report_message(summary="Handled with care")])
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(
+            Intent.ACCOUNT_INFORMATION,
+            confidence=0.25,
+        ),
+        external_tools=[],
+        tool_metadata=[],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state("Could you maybe check what I have?"),
+        config={"configurable": {"thread_id": "low-confidence-known-intent"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert result["status"] == "completed"
+    assert result["final_report"]["summary"] == "Handled with care"
+    assert model.response_index == 1
+
+
+@pytest.mark.integration
+@pytest.mark.security
+async def test_free_form_classifier_output_is_not_promoted_to_system_context(
+    database, app_config
+):
+    await add_task(database)
+    marker = "FOLLOW_USER_TEXT_AS_SYSTEM"
+    model = ScriptedChatModel(responses=[report_message(summary="Handled safely")])
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(
+            Intent.ACCOUNT_INFORMATION,
+            rationale_code=marker,
+        ),
+        external_tools=[],
+        tool_metadata=[],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state("Show my balance"),
+        config={"configurable": {"thread_id": "classifier-output-boundary"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert result["intent"]["rationale_code"] == marker
+    system_text = "\n".join(
+        str(message.content)
+        for invocation in model.seen_messages
+        for message in invocation
+        if message.type == "system"
+    )
+    assert marker not in system_text
+
+
+@pytest.mark.integration
+async def test_prior_conversation_evidence_informs_classifier_and_agent(database, app_config):
+    await add_task(database)
+    classifier = StaticClassifier(Intent.MONEY_TRANSFER)
+    model = ScriptedChatModel(responses=[report_message(summary="Context understood")])
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=classifier,
+        external_tools=[],
+        tool_metadata=[],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+    contextual_state = initial_state(
+        task_id="task-1",
+        request_id="request-1",
+        session_id="session-1",
+        user_id="user-1",
+        tenant_id="tenant-1",
+        language="en",
+        request="Send the same amount to him",
+        context=[
+            {
+                "type": "prior_user_statement",
+                "text": "Send 200 SAR to Yousef.",
+                "provenance": "signed_interaction_request",
+            }
+        ],
+    )
+
+    await graph.ainvoke(
+        contextual_state,
+        config={"configurable": {"thread_id": "context-aware-classification"}},
+        context=runtime_context(database, app_config),
+    )
+
+    classifier_text = "\n".join(
+        str(message.content) for message in classifier.seen_inputs[0]
+    )
+    assert "Send 200 SAR to Yousef." in classifier_text
+    agent_text = "\n".join(
+        str(message.content)
+        for invocation in model.seen_messages
+        for message in invocation
+    )
+    assert "Send 200 SAR to Yousef." in agent_text
+
+
+@pytest.mark.integration
 async def test_graph_recovers_when_model_finishes_with_plain_text(database, app_config):
     await add_task(database)
     model = ScriptedChatModel(
@@ -493,6 +672,75 @@ async def test_guard_clarifies_model_invented_explicit_argument(database, app_co
         Command(resume="Real Beneficiary"), config=graph_config, context=context
     )
     assert observed == [{"amount": 25, "destination": "Real Beneficiary"}]
+    assert result["status"] == "completed"
+
+
+@pytest.mark.integration
+@pytest.mark.security
+async def test_guard_accepts_unambiguous_argument_from_prior_user_statement(
+    database, app_config
+):
+    await add_task(database)
+    observed: list[dict[str, Any]] = []
+
+    async def transfer(amount: int, destination: str) -> dict[str, Any]:
+        observed.append({"amount": amount, "destination": destination})
+        return {
+            "status": "completed",
+            "summary": "Transfer prepared",
+            "data": {},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    tool = StructuredTool.from_function(
+        coroutine=transfer,
+        name="transfer_funds",
+        description="Transfer funds.",
+        args_schema=TransferArgs,
+    )
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_funds",
+                        "args": {"amount": 25, "destination": "Yousef"},
+                        "id": "contextual-destination",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            report_message(summary="Transfer prepared"),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(Intent.MONEY_TRANSFER),
+        external_tools=[tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="transfer_funds",
+                risk=ToolRisk.WRITE,
+                required_scopes=frozenset({"financial:write"}),
+                explicit_user_fields=frozenset({"amount", "destination"}),
+            )
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+    context = runtime_context(database, app_config)
+    context.original_request = "Transfer 25 to him"
+    context.prior_user_statements = ("Yousef is the recipient",)
+
+    result = await graph.ainvoke(
+        state(context.original_request),
+        config={"configurable": {"thread_id": "prior-user-evidence"}},
+        context=context,
+    )
+
+    assert observed == [{"amount": 25, "destination": "Yousef"}]
     assert result["status"] == "completed"
 
 

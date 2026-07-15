@@ -38,6 +38,6 @@ models:
     max_retries: 1
     required_capabilities: [structured_output, async]
   embeddings:
-    provider: openai
-    model: text-embedding-3-small
+    provider: openrouter
+    model: openai/text-embedding-3-small
     required_capabilities: [embeddings]

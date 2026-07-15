@@ -27,7 +27,8 @@ def test_dashboard_uses_only_the_server_owned_session_identity(monkeypatch) -> N
 
     with TestClient(app) as client:
         session = client.post(
-            "/api/session", json={"language": "en", "reuse_existing": True}
+            "/api/auth/login",
+            json={"identifier": "admin", "password": "password123", "language": "en"},
         ).json()
         client.cookies.clear()
         response = client.get(
@@ -38,6 +39,6 @@ def test_dashboard_uses_only_the_server_owned_session_identity(monkeypatch) -> N
     assert response.status_code == 200
     assert response.json() == snapshot
     read_snapshot.assert_called_once_with(
-        user_id=settings.DEMO_USER_ID,
+        user_id="admin",
         tenant_id=settings.DEMO_TENANT_ID,
     )

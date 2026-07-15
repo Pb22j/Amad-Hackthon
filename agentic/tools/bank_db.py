@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import unicodedata
 from calendar import monthrange
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
@@ -110,6 +111,52 @@ def normalize_account_number(value: str) -> str:
     return "".join(value.split()).replace("-", "").upper()
 
 
+def normalize_beneficiary_name(value: str) -> str:
+    """Normalize harmless spelling differences used when resolving saved names."""
+
+    folded = unicodedata.normalize("NFKC", value).casefold().strip()
+    folded = "".join(
+        character
+        for character in folded
+        if not unicodedata.combining(character) and character != "ـ"
+    )
+    folded = folded.translate(
+        str.maketrans(
+            {"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ة": "ه", "ى": "ي"}
+        )
+    )
+    return " ".join(folded.split())
+
+
+_ARABIC_TRANSLITERATION = str.maketrans(
+    {
+        "ا": "a", "أ": "a", "إ": "a", "آ": "a", "ٱ": "a",
+        "ب": "b", "ت": "t", "ث": "th", "ج": "j", "ح": "h",
+        "خ": "kh", "د": "d", "ذ": "dh", "ر": "r", "ز": "z",
+        "س": "s", "ش": "sh", "ص": "s", "ض": "d", "ط": "t",
+        "ظ": "z", "ع": "", "غ": "gh", "ف": "f", "ق": "q",
+        "ك": "k", "ل": "l", "م": "m", "ن": "n", "ه": "h",
+        "ة": "a", "و": "u", "ؤ": "u", "ي": "i", "ى": "i",
+        "ئ": "i", "ء": "",
+    }
+)
+
+
+def beneficiary_name_key(value: str) -> str:
+    """Return a conservative consonant key for Arabic/Latin name matching."""
+
+    normalized = unicodedata.normalize("NFKC", value).casefold().strip()
+    normalized = "".join(
+        character
+        for character in normalized
+        if not unicodedata.combining(character) and character != "ـ"
+    )
+    transliterated = normalized.translate(_ARABIC_TRANSLITERATION)
+    latin = unicodedata.normalize("NFKD", transliterated)
+    letters = "".join(character for character in latin if character.isascii() and character.isalpha())
+    return "".join(character for character in letters if character not in "aeiouy")
+
+
 def riyadh_now() -> datetime:
     return datetime.now(RIYADH_TZ)
 
@@ -189,11 +236,23 @@ def find_beneficiary(
     ).fetchone()
     if row is not None:
         return row
-    return connection.execute(
-        "SELECT * FROM beneficiaries WHERE owner_uuid = %s"
-        " AND (Short_Name = %s OR LOWER(Full_Name) = LOWER(%s))",
-        (owner_uuid, destination.strip(), destination.strip()),
-    ).fetchone()
+    requested_name = normalize_beneficiary_name(destination)
+    requested_key = beneficiary_name_key(destination)
+    transliterated_matches: list[BankRow] = []
+    for beneficiary in connection.execute(
+        "SELECT * FROM beneficiaries WHERE owner_uuid = %s", (owner_uuid,)
+    ).fetchall():
+        raw_names = {
+            str(beneficiary["Short_Name"]),
+            str(beneficiary["Full_Name"]),
+        }
+        if requested_name in {normalize_beneficiary_name(name) for name in raw_names}:
+            return beneficiary
+        if len(requested_key) >= 2 and requested_key in {
+            beneficiary_name_key(name) for name in raw_names
+        }:
+            transliterated_matches.append(beneficiary)
+    return transliterated_matches[0] if len(transliterated_matches) == 1 else None
 
 
 def spent_today(connection: BankConnection, user_uuid: str) -> Decimal:

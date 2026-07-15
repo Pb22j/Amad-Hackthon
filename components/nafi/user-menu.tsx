@@ -42,10 +42,10 @@ export function UserMenu() {
     };
   }, [open]);
 
-  function handleSignOut() {
+  async function handleSignOut() {
     setOpen(false);
+    await signOut();
     invalidateNafeaSession();
-    signOut();
     router.replace("/");
   }
 
@@ -84,7 +84,7 @@ export function UserMenu() {
           <button
             type="button"
             role="menuitem"
-            onClick={handleSignOut}
+            onClick={() => void handleSignOut()}
             className="flex w-full items-center gap-2.5 px-4 py-3 text-start text-sm text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
           >
             <LogOut className="size-4 shrink-0 rtl:-scale-x-100" aria-hidden />

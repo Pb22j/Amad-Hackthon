@@ -447,7 +447,10 @@ class GuardedToolFactory:
                             "clarification_id": str(
                                 uuid5(
                                     NAMESPACE_URL,
-                                    f"{context.task_id}:{metadata.name}:{field_name}",
+                                    (
+                                        f"{context.task_id}:{metadata.name}:{field_name}:"
+                                        f"{runtime.tool_call_id or 'unknown'}"
+                                    ),
                                 )
                             ),
                             "question": question,

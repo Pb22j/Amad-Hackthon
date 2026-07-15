@@ -34,13 +34,15 @@ code owns identity, authorization, confirmation, isolation, persistence, and rep
    accepted only when the complete logical request fingerprint and identity tuple match.
 4. The service loads only memory matching the authenticated tenant and user.
 5. The outer graph screens prohibited requests and uses a structured-output model to classify
-   intent and risk.
-6. Unknown or low-confidence requests route to a tool-free support responder. It receives the
-   runtime capability catalog as untrusted context and returns clear guidance without inventing
-   data or exposing internal architecture. A deterministic localized fallback remains available if
-   that response model fails.
-7. The bounded inner agent sees only tools registered for this deployment. LangChain middleware
-   enforces model-call, tool-call, clarification, and per-tool limits.
+   intent and risk. Classification sees provenance-labelled conversation evidence, can identify up
+   to four additional independently requested intents, and applies the highest applicable risk.
+6. Truly unknown requests route to a tool-free support responder. A recognized intent reaches the
+   reasoning agent even when classifier confidence is low, where it can resolve the request from
+   context or ask one precise question. The support path retains a deterministic localized fallback.
+7. The bounded inner agent sees only tools registered for the classified primary and related
+   intents. Middleware injects a trusted task brief containing the advisory classification,
+   selected capability descriptions, evidence rules, and a compact execution protocol. Model-call,
+   tool-call, clarification, and per-tool limits remain deterministic middleware controls.
 8. Every external tool has already been replaced with a guarded wrapper. The wrapper checks trusted
    scopes, exact confirmation, idempotency, ownership, receipts, output size, and safe retries.
 9. Missing information or confirmation produces a LangGraph interrupt. The service persists the
@@ -48,6 +50,8 @@ code owns identity, authorization, confirmation, isolation, persistence, and rep
    signed webhook delivery in task order until the interaction layer acknowledges it.
 10. `POST /agentic/tasks/{task_id}/resume` verifies the same task/user/tenant/session relationship and
    resumes with a clarification answer or the exact authorization token plus dedicated demo OTP.
+   Signed prior-user statements and the interaction summary are stored encrypted with the task and
+   restored into both the model context and guarded argument-provenance checks after every resume.
 11. The final `AgentReport` is validated against authoritative tool executions before it is stored
     and emitted. It includes typed `interaction_context` containing the understood goal, safe key
     facts, and suggested next steps. A financial action cannot be reported as completed without its
@@ -105,9 +109,11 @@ without Pydantic schemas, and empty production tool lists. These checks ensure t
 functionalities are exactly the tools supplied by the tool team—there is no hard-coded capability
 list in the agent.
 
-Intent metadata additionally filters the tools attached to each model call. Broad authenticated
-scopes do not justify unrelated data access: for example, a portfolio request cannot call the
-balance tool when only `get_portfolio` declares the classified investment-research intent.
+Intent metadata additionally filters the tools attached to each model call. A compound request gets
+the union of tools for its explicit primary and related intents; it does not get tools for contextual
+facts or undeclared goals. Broad authenticated scopes still do not justify unrelated data access:
+for example, a portfolio request cannot call the balance tool when only `get_portfolio` declares the
+classified investment-research intent.
 
 See `docs/TOOL_CONTRACT.md` for the required result envelope. In particular, results that contain
 user data must identify their user and tenant, and completed financial actions must supply a receipt

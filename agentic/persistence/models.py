@@ -50,6 +50,9 @@ class AgentTaskRow(Base):
     authorized_scopes: Mapped[list[str]] = mapped_column(EncryptedJSON, nullable=False, default=list)
     assurance_level: Mapped[str] = mapped_column(String(50), nullable=False)
     original_request: Mapped[str] = mapped_column(EncryptedText, nullable=False)
+    request_context: Mapped[dict[str, Any] | None] = mapped_column(
+        EncryptedJSON, nullable=True, default=dict
+    )
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="received")
     intent: Mapped[str | None] = mapped_column(String(80))
     risk: Mapped[str | None] = mapped_column(String(40))

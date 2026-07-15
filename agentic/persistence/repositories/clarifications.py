@@ -85,7 +85,11 @@ class ClarificationRepository:
         """Return authenticated clarification answers bound to their requested field."""
 
         statement = (
-            select(ClarificationRow.expected_answer, ClarificationRow.answer)
+            select(
+                ClarificationRow.expected_answer,
+                ClarificationRow.reason_code,
+                ClarificationRow.answer,
+            )
             .where(
                 ClarificationRow.task_id == task_id,
                 ClarificationRow.status == "answered",
@@ -93,8 +97,18 @@ class ClarificationRepository:
             .order_by(ClarificationRow.answered_at)
         )
         values: dict[str, list[Any]] = {}
-        for expected_answer, answer in await self.session.execute(statement):
+        for expected_answer, reason_code, answer in await self.session.execute(statement):
             field_name = expected_answer.get("field") if isinstance(expected_answer, dict) else None
+            # Models sometimes use the generic clarification field name
+            # ``answer`` even though the reason code identifies the protected
+            # tool argument. Preserve the authenticated answer as evidence for
+            # that exact argument so a resumed guarded tool does not ask the
+            # same question again and reuse an already-answered interrupt.
+            if field_name in {None, "", "answer"}:
+                for prefix in ("missing_explicit_", "missing_"):
+                    if reason_code.startswith(prefix) and len(reason_code) > len(prefix):
+                        field_name = reason_code[len(prefix) :]
+                        break
             if isinstance(field_name, str) and field_name:
                 values.setdefault(field_name, []).append(answer)
         return {name: tuple(answers) for name, answers in values.items()}

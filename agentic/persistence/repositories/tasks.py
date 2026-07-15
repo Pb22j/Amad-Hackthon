@@ -74,6 +74,7 @@ class TaskRepository:
             authorized_scopes=sorted(request.authorization.scopes),
             assurance_level=request.authorization.assurance_level,
             original_request=request.natural_language_request,
+            request_context=request.metadata.model_dump(mode="json"),
             status=TaskStatus.RECEIVED.value,
             config_hash=config_hash,
             request_fingerprint=fingerprint,

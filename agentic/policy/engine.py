@@ -52,20 +52,22 @@ class PolicyEngine:
         return RequestPolicyDecision(True, "allowed", signals)
 
     def assess_intent(self, classification: IntentClassification) -> RiskAssessment:
-        if classification.intent in PROHIBITED_INTENTS:
+        intents = set(classification.all_intents)
+        prohibited = intents & PROHIBITED_INTENTS
+        if prohibited:
             return RiskAssessment(
                 level=RiskLevel.CRITICAL,
-                reason_codes=(classification.intent.value,),
+                reason_codes=tuple(sorted(intent.value for intent in prohibited)),
                 requires_confirmation=False,
                 contains_sensitive_data=True,
             )
-        if classification.intent in HIGH_RISK_INTENTS:
+        if intents & HIGH_RISK_INTENTS:
             return RiskAssessment(
                 level=RiskLevel.HIGH,
                 reason_codes=("financial_action",),
                 requires_confirmation=True,
             )
-        if classification.intent in {Intent.ACCOUNT_INFORMATION, Intent.TRANSACTION_SEARCH}:
+        if intents & {Intent.ACCOUNT_INFORMATION, Intent.TRANSACTION_SEARCH}:
             return RiskAssessment(
                 level=RiskLevel.MEDIUM,
                 reason_codes=("sensitive_financial_data",),
@@ -75,3 +77,8 @@ class PolicyEngine:
 
     def intent_allowed(self, intent: Intent) -> bool:
         return intent not in PROHIBITED_INTENTS and intent.value not in self.config.security.blocked_intents
+
+    def classification_allowed(self, classification: IntentClassification) -> bool:
+        """Reject a compound request when any requested intent is prohibited."""
+
+        return all(self.intent_allowed(intent) for intent in classification.all_intents)

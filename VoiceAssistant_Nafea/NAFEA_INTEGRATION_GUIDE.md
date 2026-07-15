@@ -42,10 +42,13 @@ under `legacy/vite-voice-ui` remains only as a reference implementation.
 - Next.js loads only the repository-root `.env.local`.
 - Keep `SSL_VERIFY=true`. Production configuration rejects disabled verification.
 
-The demo bootstrap endpoint derives identity and scopes from server configuration and issues an
-opaque HttpOnly session cookie. Set `ALLOW_DEMO_SESSION_BOOTSTRAP=false` in production and replace
-that endpoint with the platform's real authenticated identity adapter. Production startup rejects
-demo bootstrap.
+`/api/auth/login` verifies an active banking user by username or email and issues an opaque,
+HttpOnly interaction-session cookie. Legacy SHA-256 seed hashes are upgraded to salted scrypt on
+successful login. `/api/auth/register` creates a validated, zero-balance starter banking profile,
+stores a salted scrypt password hash, and signs the new user in. Duplicate usernames, emails, and
+mobile numbers are rejected. Self-registered profiles receive read-only financial scope until their
+banking identity is verified. `/api/session` can refresh an authenticated session but cannot create
+an anonymous or demo identity.
 
 ## Agentic communication
 

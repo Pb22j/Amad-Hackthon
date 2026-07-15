@@ -41,18 +41,30 @@ class ScriptedChatModel(BaseChatModel):
 
 
 class StaticClassifier:
-    def __init__(self, intent: Intent, *, confidence: float = 1.0) -> None:
+    def __init__(
+        self,
+        intent: Intent,
+        *,
+        confidence: float = 1.0,
+        related_intents: tuple[Intent, ...] = (),
+        rationale_code: str = "test_fixture",
+    ) -> None:
         self.intent = intent
         self.confidence = confidence
+        self.related_intents = related_intents
+        self.rationale_code = rationale_code
+        self.seen_inputs: list[Any] = []
 
     def with_structured_output(self, _: Any, **__: Any) -> "StaticClassifier":
         return self
 
-    async def ainvoke(self, _: Any) -> IntentClassification:
+    async def ainvoke(self, value: Any) -> IntentClassification:
+        self.seen_inputs.append(value)
         return IntentClassification(
             intent=self.intent,
+            related_intents=self.related_intents,
             confidence=self.confidence,
-            rationale_code="test_fixture",
+            rationale_code=self.rationale_code,
         )
 
 

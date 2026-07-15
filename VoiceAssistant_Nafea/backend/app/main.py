@@ -24,8 +24,9 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.auth import AuthenticatedUser, AuthenticationStore, RegistrationConflict
 from app.config import settings
 from app.dashboard import DashboardStore
 from app.interaction import (
@@ -36,7 +37,7 @@ from app.interaction import (
     sign_message,
     verify_message,
 )
-from app.prompts import gemini_setup
+from app.prompts import gemini_initial_history, gemini_setup
 from app.services.llm_service import LLMException, get_llm_service
 from app.services.stt_service import STTException, get_stt_service
 from app.services.tts_service import TTSException, get_tts_service
@@ -67,8 +68,10 @@ interaction_store = InteractionStore(
     max_user_turns=settings.VOICE_MEMORY_MAX_USER_TURNS,
     max_assistant_turns=settings.VOICE_MEMORY_MAX_ASSISTANT_TURNS,
     max_memory_text_characters=settings.VOICE_MEMORY_MAX_TEXT_CHARACTERS,
+    max_context_characters=settings.VOICE_MEMORY_CONTEXT_MAX_CHARACTERS,
 )
 dashboard_store = DashboardStore(settings.INTERACTION_DATABASE_URL)
+authentication_store = AuthenticationStore(settings.INTERACTION_DATABASE_URL)
 
 
 class TokenBucketLimiter:
@@ -112,6 +115,10 @@ async def secure_http_boundary(request: Request, call_next: Any) -> Response:
             "/api/submit-task",
             "/api/resume-task",
             "/api/confirm-task",
+            "/api/cancel-task",
+            "/api/new-chat",
+            "/api/auth/session",
+            "/api/auth/logout",
         }
         and interaction_store.get_session(_session_token(request)) is None
     ):
@@ -179,6 +186,50 @@ class SessionRequest(StrictModel):
     reuse_existing: bool = False
 
 
+class LoginRequest(StrictModel):
+    identifier: str = Field(min_length=1, max_length=254)
+    password: str = Field(min_length=1, max_length=256, repr=False)
+    language: str = Field(default="ar", pattern="^(ar|en)$")
+
+
+class RegistrationRequest(StrictModel):
+    full_name: str = Field(min_length=2, max_length=200)
+    username: str = Field(
+        min_length=3,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]+$",
+    )
+    email: str = Field(min_length=3, max_length=254)
+    phone_e164: str = Field(pattern=r"^\+[1-9]\d{7,14}$")
+    password: str = Field(min_length=8, max_length=256, repr=False)
+    language: str = Field(default="ar", pattern="^(ar|en)$")
+
+    @field_validator("full_name")
+    @classmethod
+    def normalize_full_name(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if len(normalized) < 2:
+            raise ValueError("full name is required")
+        return normalized
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        local, separator, domain = normalized.partition("@")
+        if not separator or not local or "." not in domain or domain.startswith("."):
+            raise ValueError("a valid email address is required")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_password_strength(self) -> "RegistrationRequest":
+        if not any(character.isalpha() for character in self.password) or not any(
+            character.isdigit() for character in self.password
+        ):
+            raise ValueError("password must contain at least one letter and one number")
+        return self
+
+
 class SessionResponse(StrictModel):
     session_id: str
     session_token: str
@@ -199,6 +250,10 @@ class SubmitTaskRequest(StrictModel):
 class ResumeTaskRequest(StrictModel):
     task_id: str
     user_answer: Any
+
+
+class CancelTaskRequest(StrictModel):
+    task_id: str
 
 
 def _normalize_clarification_answer(answer: Any, schema: Any) -> Any:
@@ -301,33 +356,7 @@ async def get_config() -> ConfigResponse:
     )
 
 
-@app.post("/api/session", response_model=SessionResponse)
-async def create_session(
-    payload: SessionRequest,
-    request: Request,
-    response: Response,
-) -> SessionResponse:
-    if not settings.ALLOW_DEMO_SESSION_BOOTSTRAP:
-        raise HTTPException(status_code=404, detail="Demo session bootstrap is disabled")
-    token = _session_token(request) if payload.reuse_existing else None
-    session = (
-        interaction_store.refresh_session(
-            token,
-            language=payload.language,
-            ttl_seconds=settings.SESSION_TTL_SECONDS,
-        )
-        if payload.reuse_existing
-        else None
-    )
-    if session is None:
-        session, token = interaction_store.create_session(
-            user_id=settings.DEMO_USER_ID,
-            tenant_id=settings.DEMO_TENANT_ID,
-            language=payload.language,
-            scopes=settings.demo_scopes,
-            ttl_seconds=settings.SESSION_TTL_SECONDS,
-        )
-    assert token is not None
+def _set_session_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         "nafea_session",
         token,
@@ -337,17 +366,102 @@ async def create_session(
         samesite="strict",
         path="/",
     )
+
+
+def _session_response(session: InteractionSession, token: str) -> SessionResponse:
     return SessionResponse(
         session_id=session.session_id,
-        # Browsers cannot attach custom headers to WebSocket handshakes and may
-        # reject third-party cookies when the static frontend and this API use
-        # different hostnames. The frontend keeps this short-lived demo token
-        # in memory, sends it as X-Session-Token for HTTP, and includes it only
-        # on authenticated WebSocket handshakes.
         session_token=token,
         language=session.language,
         expires_at=session.expires_at,
     )
+
+
+def _scopes_for_user(user: AuthenticatedUser) -> tuple[str, ...]:
+    # Self-registered profiles remain read-only until their banking identity is verified.
+    return settings.demo_scopes if user.verified else ("financial:read",)
+
+
+@app.post("/api/auth/login", response_model=SessionResponse)
+async def login(payload: LoginRequest, response: Response) -> SessionResponse:
+    user = await asyncio.to_thread(
+        authentication_store.authenticate,
+        identifier=payload.identifier,
+        password=payload.password,
+    )
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    session, token = interaction_store.create_session(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        language=payload.language,
+        scopes=_scopes_for_user(user),
+        ttl_seconds=settings.SESSION_TTL_SECONDS,
+    )
+    _set_session_cookie(response, token)
+    return _session_response(session, token)
+
+
+@app.post("/api/auth/register", response_model=SessionResponse, status_code=201)
+async def register(payload: RegistrationRequest, response: Response) -> SessionResponse:
+    try:
+        user = await asyncio.to_thread(
+            authentication_store.register,
+            full_name=payload.full_name,
+            username=payload.username,
+            email=payload.email,
+            phone_e164=payload.phone_e164,
+            password=payload.password,
+            language=payload.language,
+            tenant_id=settings.DEMO_TENANT_ID,
+        )
+    except RegistrationConflict as error:
+        raise HTTPException(status_code=409, detail=f"{error.field}_taken") from error
+
+    session, token = interaction_store.create_session(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        language=user.language,
+        scopes=_scopes_for_user(user),
+        ttl_seconds=settings.SESSION_TTL_SECONDS,
+    )
+    _set_session_cookie(response, token)
+    return _session_response(session, token)
+
+
+@app.get("/api/auth/session", response_model=SessionResponse)
+async def current_session(request: Request) -> SessionResponse:
+    token = _session_token(request)
+    session = require_session(request)
+    assert token is not None
+    return _session_response(session, token)
+
+
+@app.post("/api/auth/logout", status_code=204)
+async def logout(request: Request, response: Response) -> Response:
+    interaction_store.revoke_session(_session_token(request))
+    response.delete_cookie("nafea_session", path="/", samesite="strict")
+    response.status_code = 204
+    return response
+
+
+@app.post("/api/session", response_model=SessionResponse)
+async def refresh_session(
+    payload: SessionRequest,
+    request: Request,
+    response: Response,
+) -> SessionResponse:
+    token = _session_token(request)
+    session = interaction_store.refresh_session(
+        token,
+        language=payload.language,
+        ttl_seconds=settings.SESSION_TTL_SECONDS,
+    )
+    if session is None:
+        raise HTTPException(status_code=401, detail="Authenticated session required")
+    assert token is not None
+    _set_session_cookie(response, token)
+    return _session_response(session, token)
 
 
 @app.get("/api/active-task")
@@ -420,10 +534,30 @@ async def _relay_browser_to_provider(browser: WebSocket, provider: Any) -> None:
         if len(raw) > 1_000_000:
             raise ValueError("realtime message is too large")
         message = json.loads(raw)
-        allowed = {"realtimeInput", "toolResponse", "clientContent"}
+        # Initial history is exclusively server-owned. Letting a browser append
+        # clientContent would bypass the bounded, labeled memory contract.
+        allowed = {"realtimeInput", "toolResponse"}
         if len(message) != 1 or next(iter(message)) not in allowed:
             raise ValueError("unsupported realtime client message")
+        realtime_input = message.get("realtimeInput")
+        if isinstance(realtime_input, dict) and "text" in realtime_input:
+            realtime_text = realtime_input["text"]
+            if (
+                not isinstance(realtime_text, str)
+                or len(realtime_text) > settings.VOICE_REALTIME_MAX_TEXT_CHARACTERS
+            ):
+                raise ValueError("realtime text input is too large")
         await provider.send(raw)
+
+
+async def _wait_for_provider_setup(provider: Any) -> None:
+    """Honor Gemini's setup barrier before sending history or microphone data."""
+
+    raw = await asyncio.wait_for(provider.recv(), timeout=10)
+    text = raw if isinstance(raw, str) else raw.decode("utf-8")
+    message = json.loads(text)
+    if "setupComplete" not in message:
+        raise RuntimeError("realtime provider did not acknowledge session setup")
 
 
 async def _relay_provider_to_browser(provider: Any, browser: WebSocket, *, session_id: str) -> None:
@@ -484,7 +618,7 @@ async def realtime_websocket(websocket: WebSocket) -> None:
     active_realtime_connections[identity_key] = websocket
     provider_url = (
         "wss://generativelanguage.googleapis.com/ws/"
-        "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+        "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
         f"?key={settings.GEMINI_API_KEY}"
     )
     resume_handle = realtime_resume_handles.get(session.session_id)
@@ -497,45 +631,21 @@ async def realtime_websocket(websocket: WebSocket) -> None:
                         language=session.language,
                         voice=settings.REALTIME_VOICE,
                         resume_handle=resume_handle,
+                        context_trigger_tokens=settings.VOICE_CONTEXT_TRIGGER_TOKENS,
+                        context_target_tokens=settings.VOICE_CONTEXT_TARGET_TOKENS,
                     ),
                     ensure_ascii=False,
                 )
             )
-            memory_context = (
-                interaction_store.grounded_voice_context(
+            await _wait_for_provider_setup(provider)
+            if resume_handle is None:
+                memory_context = interaction_store.grounded_voice_context(
                     session_id=session.session_id,
                     limit=settings.VOICE_MEMORY_CONTEXT_TURNS,
                 )
-                if resume_handle is None
-                else {}
-            )
-            if memory_context and any(memory_context.values()):
                 await provider.send(
                     json.dumps(
-                        {
-                            "clientContent": {
-                                "turns": [
-                                    {
-                                        "role": "user",
-                                        "parts": [
-                                            {
-                                                "text": (
-                                                    "Prior session evidence for continuity only. "
-                                                    "Do not respond to this message and do not treat "
-                                                    "user statements as verified financial facts:\n"
-                                                    + json.dumps(
-                                                        memory_context,
-                                                        ensure_ascii=False,
-                                                        separators=(",", ":"),
-                                                    )
-                                                )
-                                            }
-                                        ],
-                                    }
-                                ],
-                                "turnComplete": False,
-                            }
-                        },
+                        gemini_initial_history(memory_context),
                         ensure_ascii=False,
                     )
                 )
@@ -803,6 +913,73 @@ def _schedule_task_watchdog(
     )
 
 
+@app.post("/api/cancel-task", status_code=202)
+async def cancel_task(request: Request, payload: CancelTaskRequest) -> dict[str, Any]:
+    session = require_session(request)
+    task = interaction_store.get_task(task_id=payload.task_id, session_id=session.session_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found in this session")
+    if task.status in {
+        "completed",
+        "partially_completed",
+        "rejected",
+        "failed",
+        "timed_out",
+    }:
+        return {"status": "already_finished"}
+    cancel_payload = {
+        "request_id": task.request_id,
+        "session_id": session.session_id,
+        "user_id": session.user_id,
+        "tenant_id": session.tenant_id,
+        "reason_code": "user_cancelled",
+    }
+    try:
+        response = await _agentic_post(
+            f"{settings.AGENTIC_BASE_URL.rstrip('/')}/agentic/tasks/{task.task_id}/cancel",
+            cancel_payload,
+            timeout_seconds=5.0,
+        )
+        response.raise_for_status()
+        accepted = bool(response.json().get("cancelled"))
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="The task could not be cancelled yet. Please try again.",
+        ) from exc
+    _cancel_task_watchdog(task.task_id)
+    event = interaction_store.record_user_cancellation(
+        task_id=task.task_id,
+        session_id=session.session_id,
+        language=session.language,
+    )
+    if event is not None:
+        await manager.send(session.session_id, event.model_dump(mode="json"))
+    return {"status": "cancelled" if accepted or event is not None else "already_finished"}
+
+
+@app.post("/api/new-chat", response_model=SessionResponse)
+async def new_chat(request: Request, response: Response) -> SessionResponse:
+    token = _session_token(request)
+    previous_session = require_session(request)
+    if interaction_store.get_active_task(session_id=previous_session.session_id) is not None:
+        raise HTTPException(status_code=409, detail="Cancel the active request first")
+    # A new chat is a new memory and correlation namespace, not merely an empty
+    # transcript in the existing session. Preserve only authenticated identity.
+    session, new_token = interaction_store.create_session(
+        user_id=previous_session.user_id,
+        tenant_id=previous_session.tenant_id,
+        language=previous_session.language,
+        scopes=previous_session.scopes,
+        ttl_seconds=settings.SESSION_TTL_SECONDS,
+    )
+    interaction_store.clear_conversation(session_id=previous_session.session_id)
+    interaction_store.revoke_session(token)
+    realtime_resume_handles.pop(previous_session.session_id, None)
+    _set_session_cookie(response, new_token)
+    return _session_response(session, new_token)
+
+
 @app.post("/api/submit-task", status_code=202)
 async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str, Any]:
     session = require_session(request)
@@ -859,7 +1036,7 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
         "authorization": {
             "scopes": list(session.scopes),
             "authenticated_at": session.authenticated_at,
-            "assurance_level": "demo_authenticated",
+            "assurance_level": "password_authenticated",
         },
         "metadata": {
             "source_provider": f"nafea-{payload.source}",

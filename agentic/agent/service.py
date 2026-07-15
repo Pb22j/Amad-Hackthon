@@ -32,6 +32,7 @@ from agentic.api.schemas import (
     AgenticRequest,
     AuthorizationContext,
     CancelTaskRequest,
+    RequestMetadata,
     ResumeTaskRequest,
     TERMINAL_TASK_STATUSES,
     TaskStatus,
@@ -108,6 +109,30 @@ def _localized(language: str, english: str, arabic: str) -> str:
     return arabic if language == "ar" else english
 
 
+def _conversation_context(metadata: RequestMetadata) -> list[dict[str, Any]]:
+    """Normalize signed interaction context into provenance-labelled evidence."""
+
+    context: list[dict[str, Any]] = []
+    if metadata.conversation_context_summary:
+        context.append(
+            {
+                "type": "interaction_summary",
+                "text": metadata.conversation_context_summary,
+                "provenance": "signed_interaction_request",
+            }
+        )
+    context.extend(
+        {
+            "type": "prior_user_statement",
+            "text": statement,
+            "sequence": index,
+            "provenance": "signed_interaction_request",
+        }
+        for index, statement in enumerate(metadata.conversation_user_statements)
+    )
+    return context
+
+
 class AgentService:
     """Run, pause, resume, and audit authenticated agent tasks."""
 
@@ -166,6 +191,19 @@ class AgentService:
             update={
                 "natural_language_request": redact_text(request.natural_language_request),
                 "original_user_message": redact_text(request.original_user_message),
+                "metadata": request.metadata.model_copy(
+                    update={
+                        "conversation_context_summary": (
+                            redact_text(request.metadata.conversation_context_summary)
+                            if request.metadata.conversation_context_summary
+                            else None
+                        ),
+                        "conversation_user_statements": [
+                            redact_text(statement)
+                            for statement in request.metadata.conversation_user_statements
+                        ],
+                    }
+                ),
             }
         )
         try:
@@ -273,16 +311,7 @@ class AgentService:
             tenant_id=request.tenant_id,
             language=request.language,
             request=request.natural_language_request,
-            context=(
-                [
-                    {
-                        "type": "interaction_summary",
-                        "text": request.metadata.conversation_context_summary,
-                    }
-                ]
-                if request.metadata.conversation_context_summary
-                else []
-            ),
+            context=_conversation_context(request.metadata),
         )
         # Only the signed request envelope supplies identity and scopes. Neither
         # the user message nor model output can mutate this runtime object.
@@ -418,6 +447,7 @@ class AgentService:
                         authenticated_at=row.created_at,
                         assurance_level=row.assurance_level,
                     ),
+                    metadata=RequestMetadata.model_validate(row.request_context or {}),
                 )
         if rejection_outbox_id is not None:
             await self._deliver_outbox_id(rejection_outbox_id)
@@ -441,6 +471,9 @@ class AgentService:
             confirmation_signer=self.confirmation_signer,
             otp_verified=request.authorization_token is not None,
             original_request=original.natural_language_request,
+            prior_user_statements=tuple(
+                original.metadata.conversation_user_statements
+            ),
             explicit_user_field_values=explicit_user_field_values,
             resuming_from_clarification=request.clarification_id is not None,
         )
@@ -488,7 +521,11 @@ class AgentService:
                 handle.cancel()
             await repository.transition(
                 row,
-                TaskStatus.FAILED,
+                (
+                    TaskStatus.REJECTED
+                    if request.reason_code == "user_cancelled"
+                    else TaskStatus.FAILED
+                ),
                 payload={"error_code": request.reason_code},
             )
             outbox = await EventOutboxRepository(session).enqueue(
@@ -496,11 +533,23 @@ class AgentService:
                     task_id=task_id,
                     request_id=request.request_id,
                     session_id=request.session_id,
-                    event_type=AgentEventType.FAILED,
+                    event_type=(
+                        AgentEventType.REJECTED
+                        if request.reason_code == "user_cancelled"
+                        else AgentEventType.FAILED
+                    ),
                     user_safe_summary=_localized(
                         row.language,
-                        "The request took too long, so it was cancelled safely.",
-                        "استغرق الطلب وقتاً طويلاً، لذلك تم إلغاؤه بأمان.",
+                        (
+                            "Request cancelled. You can start a new request now."
+                            if request.reason_code == "user_cancelled"
+                            else "The request took too long, so it was cancelled safely."
+                        ),
+                        (
+                            "ألغيت الطلب. يمكنك بدء طلب جديد الآن."
+                            if request.reason_code == "user_cancelled"
+                            else "استغرق الطلب وقتاً طويلاً، لذلك تم إلغاؤه بأمان."
+                        ),
                     ),
                     details={
                         "reason_code": request.reason_code,
@@ -510,7 +559,7 @@ class AgentService:
             )
             outbox_id = outbox.id
         await self._deliver_outbox_id(outbox_id)
-        TASKS.labels(outcome="interaction_timeout", language=row.language).inc()
+        TASKS.labels(outcome=request.reason_code, language=row.language).inc()
         return True
 
     async def get_task_status(

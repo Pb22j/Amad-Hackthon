@@ -201,6 +201,7 @@ class InteractionStore:
         max_user_turns: int = 12,
         max_assistant_turns: int = 6,
         max_memory_text_characters: int = 2000,
+        max_context_characters: int = 6000,
     ) -> None:
         self.path = path
         if not path.startswith(("postgresql://", "postgresql+psycopg://")):
@@ -210,6 +211,7 @@ class InteractionStore:
         self.max_user_turns = max_user_turns
         self.max_assistant_turns = max_assistant_turns
         self.max_memory_text_characters = max_memory_text_characters
+        self.max_context_characters = max_context_characters
         self._initialize()
 
     def _connect(self) -> _PostgresConnection:
@@ -360,6 +362,31 @@ class InteractionStore:
             authenticated_at=row["authenticated_at"],
             expires_at=row["expires_at"],
         )
+
+    def revoke_session(self, token: str | None) -> None:
+        if not token:
+            return
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute(
+                    "UPDATE interaction_sessions SET expires_at = %s WHERE token_hash = %s",
+                    (time.time() - 1, _token_hash(token)),
+                )
+                connection.commit()
+            finally:
+                self._close(connection)
+
+    def clear_conversation(self, *, session_id: str) -> None:
+        """Start a fresh chat while retaining authenticated audit/task records."""
+
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute("DELETE FROM voice_turns WHERE session_id = %s", (session_id,))
+                connection.commit()
+            finally:
+                self._close(connection)
 
     def reserve_request(
         self, *, session_id: str, request_id: str, natural_language_request: str
@@ -694,6 +721,76 @@ class InteractionStore:
             finally:
                 self._close(connection)
 
+    def record_user_cancellation(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        language: str = "en",
+    ) -> AgentEvent | None:
+        """Atomically mark an active task cancelled after the agent accepts cancellation."""
+
+        with self._lock:
+            connection = self._connect()
+            try:
+                task = connection.execute(
+                    """
+                    SELECT request_id, status FROM interaction_tasks
+                    WHERE task_id = %s AND session_id = %s
+                    """,
+                    (task_id, session_id),
+                ).fetchone()
+                if task is None or task["status"] in {
+                    "completed",
+                    "partially_completed",
+                    "rejected",
+                    "failed",
+                    "timed_out",
+                }:
+                    return None
+                event = AgentEvent(
+                    task_id=task_id,
+                    request_id=task["request_id"],
+                    session_id=session_id,
+                    event_type="rejected",
+                    user_safe_summary=(
+                        "ألغيت الطلب. يمكنك بدء طلب جديد الآن."
+                        if language == "ar"
+                        else "Request cancelled. You can start a new request now."
+                    ),
+                    details={"reason_code": "user_cancelled", "action_cancelled": True},
+                    created_at=datetime.now(timezone.utc),
+                )
+                payload = event.model_dump_json()
+                event_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+                connection.execute(
+                    """
+                    INSERT INTO interaction_events
+                    (event_hash, task_id, session_id, event_type, payload_json, created_at)
+                    VALUES (%s, %s, %s, 'rejected', %s, %s)
+                    ON CONFLICT (event_hash) DO NOTHING
+                    """,
+                    (
+                        event_hash,
+                        task_id,
+                        session_id,
+                        payload,
+                        event.created_at.timestamp(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE interaction_tasks
+                    SET status = 'rejected', pending_event_json = NULL, updated_at = %s
+                    WHERE task_id = %s AND session_id = %s
+                    """,
+                    (time.time(), task_id, session_id),
+                )
+                connection.commit()
+                return event
+            finally:
+                self._close(connection)
+
     def recent_events(self, *, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
         with self._lock:
             connection = self._connect()
@@ -862,7 +959,32 @@ class InteractionStore:
             for event in self.recent_events(session_id=session_id, limit=5)
             if event.get("event_type") in {"completed", "rejected", "failed"}
         ]
-        return {
-            "explicit_user_statements_untrusted": statements,
-            "signed_agentic_outcomes": verified_events,
+        # Apply one aggregate budget in addition to the per-turn admission limit.
+        # Prefer signed outcomes, then the newest user statements; keeping every
+        # individually-safe turn could create a surprisingly large reconnect prompt.
+        context: dict[str, Any] = {
+            "explicit_user_statements_untrusted": [],
+            "signed_agentic_outcomes": [],
         }
+        event_candidates: list[dict[str, Any]] = []
+        for event in reversed(verified_events):
+            candidate = [event, *event_candidates]
+            context["signed_agentic_outcomes"] = candidate
+            if len(json.dumps(context, ensure_ascii=False, separators=(",", ":"))) > (
+                self.max_context_characters
+            ):
+                context["signed_agentic_outcomes"] = event_candidates
+                break
+            event_candidates = candidate
+
+        statement_candidates: list[str] = []
+        for statement in reversed(statements):
+            candidate = [statement, *statement_candidates]
+            context["explicit_user_statements_untrusted"] = candidate
+            if len(json.dumps(context, ensure_ascii=False, separators=(",", ":"))) > (
+                self.max_context_characters
+            ):
+                context["explicit_user_statements_untrusted"] = statement_candidates
+                break
+            statement_candidates = candidate
+        return context

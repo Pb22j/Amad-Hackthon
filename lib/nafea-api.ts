@@ -11,6 +11,15 @@ export type NafeaSession = {
   expires_at: number;
 };
 
+export type NafeaRegistration = {
+  full_name: string;
+  username: string;
+  email: string;
+  phone_e164: string;
+  password: string;
+  language: NafeaLanguage;
+};
+
 let sessionBootstrap:
   | {
       language: NafeaLanguage;
@@ -58,6 +67,72 @@ export function invalidateNafeaSession(): void {
       // In-memory invalidation still prevents reuse in hardened browsers.
     }
   }
+}
+
+export async function authenticateNafea(
+  identifier: string,
+  password: string,
+  language: NafeaLanguage
+): Promise<NafeaSession> {
+  invalidateNafeaSession();
+  const session = await nafeaPost<NafeaSession>("/api/auth/login", {
+    identifier,
+    password,
+    language,
+  });
+  setNafeaSessionToken(session.session_token);
+  sessionBootstrap = {
+    language,
+    expiresAt: session.expires_at,
+    promise: Promise.resolve(session),
+  };
+  return session;
+}
+
+export async function registerNafea(
+  registration: NafeaRegistration
+): Promise<NafeaSession> {
+  invalidateNafeaSession();
+  const session = await nafeaPost<NafeaSession>("/api/auth/register", registration);
+  setNafeaSessionToken(session.session_token);
+  sessionBootstrap = {
+    language: registration.language,
+    expiresAt: session.expires_at,
+    promise: Promise.resolve(session),
+  };
+  return session;
+}
+
+export async function getNafeaSession(): Promise<NafeaSession> {
+  const session = await nafeaRequest<NafeaSession>("/api/auth/session");
+  setNafeaSessionToken(session.session_token);
+  sessionBootstrap = {
+    language: session.language,
+    expiresAt: session.expires_at,
+    promise: Promise.resolve(session),
+  };
+  return session;
+}
+
+export async function logoutNafea(): Promise<void> {
+  try {
+    await nafeaPost<void>("/api/auth/logout", {});
+  } catch {
+    // Local credentials must still be removed when the service is unavailable.
+  } finally {
+    invalidateNafeaSession();
+  }
+}
+
+export async function startNewNafeaChat(): Promise<NafeaSession> {
+  const session = await nafeaPost<NafeaSession>("/api/new-chat", {});
+  setNafeaSessionToken(session.session_token);
+  sessionBootstrap = {
+    language: session.language,
+    expiresAt: session.expires_at,
+    promise: Promise.resolve(session),
+  };
+  return session;
 }
 
 /**
@@ -143,6 +218,14 @@ export async function nafeaRequest<T>(
   });
 
   if (!response.ok) {
+    if (
+      response.status === 401 &&
+      path !== "/api/auth/login" &&
+      path !== "/api/auth/register" &&
+      typeof window !== "undefined"
+    ) {
+      window.dispatchEvent(new Event("nafea:unauthorized"));
+    }
     let message = "Nafi could not complete that request.";
     // Backend 5xx details are intentionally not surfaced to the user.
     if (response.status < 500 || response.status === 504) {

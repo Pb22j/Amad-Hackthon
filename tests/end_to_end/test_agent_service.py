@@ -74,6 +74,55 @@ class StaticMemoryExtractor:
         ]
 
 
+class ContextResumeGraph:
+    """Small resumable graph double that records trusted runtime evidence."""
+
+    def __init__(self) -> None:
+        self.runtime_statements: list[tuple[str, ...]] = []
+        self.initial_relevant_context: list[dict] = []
+
+    async def ainvoke(self, graph_input, config, context):
+        del config
+        self.runtime_statements.append(tuple(context.prior_user_statements))
+        if len(self.runtime_statements) == 1:
+            self.initial_relevant_context = list(graph_input["relevant_context"])
+            return {
+                "__interrupt__": [
+                    {
+                        "kind": "clarification",
+                        "clarification_id": "11111111-2222-3333-4444-555555555555",
+                        "question": "Which account?",
+                        "reason_code": "missing_account",
+                        "expected_answer": {
+                            "type": "string",
+                            "field": "account_reference",
+                            "minLength": 1,
+                            "maxLength": 100,
+                        },
+                        "expires_in_seconds": 900,
+                    }
+                ]
+            }
+        return {
+            "status": "completed",
+            "final_report": {
+                "status": "completed",
+                "summary": "Context survived the resume.",
+                "actions": [],
+                "result": {},
+                "warnings": [],
+                "receipt_ids": [],
+                "needs_follow_up": False,
+                "interaction_context": {
+                    "response_kind": "outcome",
+                    "user_goal": "Continue the contextual request",
+                    "key_facts": [],
+                    "suggested_next_steps": [],
+                },
+            },
+        }
+
+
 @pytest.mark.integration
 async def test_service_completes_and_persists_report(database, app_config, agentic_request):
     service, _, events = build_service(
@@ -99,6 +148,53 @@ async def test_service_completes_and_persists_report(database, app_config, agent
     assert status.final_report["summary"] == "Balance retrieved"
     assert status.pending_action is None
     assert [event.event_type.value for event in events.events] == ["accepted", "completed"]
+
+
+@pytest.mark.integration
+async def test_service_preserves_prior_user_evidence_across_resume(
+    database, app_config, agentic_request
+):
+    request = agentic_request.model_copy(
+        update={
+            "metadata": agentic_request.metadata.model_copy(
+                update={
+                    "conversation_context_summary": "The user is continuing a transfer.",
+                    "conversation_user_statements": ["Yousef is the recipient."],
+                }
+            )
+        }
+    )
+    graph = ContextResumeGraph()
+    service = AgentService(
+        graph=graph,
+        database=database,
+        config=app_config,
+        confirmation_signer=ConfirmationSigner("c" * 32),
+        events=InMemoryEventPublisher(),
+    )
+
+    accepted = await service.submit(request, background=False)
+    await service.resume(
+        accepted.task_id,
+        ResumeTaskRequest(
+            request_id=request.request_id,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            tenant_id=request.tenant_id,
+            clarification_id=UUID("11111111-2222-3333-4444-555555555555"),
+            answer="checking",
+        ),
+    )
+
+    assert graph.runtime_statements == [
+        ("Yousef is the recipient.",),
+        ("Yousef is the recipient.",),
+    ]
+    assert any(
+        item["type"] == "prior_user_statement"
+        and item["text"] == "Yousef is the recipient."
+        for item in graph.initial_relevant_context
+    )
 
 
 @pytest.mark.integration

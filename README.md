@@ -37,20 +37,16 @@ The merged Next.js frontend lives at the repository root. It connects to the Naf
 service on port `8001`, which in turn calls the agentic API on port `9000`. Both Python services
 load the same root `.env.backend`, so shared secrets, identity, and database URLs cannot drift.
 
-After the database setup above, run the three processes in separate terminals:
+After the database setup above, start the complete development stack from the repository root:
 
 ```bash
-# Agentic service
-.venv/bin/uvicorn main:app --reload --host 127.0.0.1 --port 9000
-
-# Authenticated interaction/voice service
-cd VoiceAssistant_Nafea/backend
-PYTHONPATH=. ../../.venv/bin/uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
-
-# Next.js frontend (from the repository root)
 npm ci
 npm run dev
 ```
+
+This launches the agentic service on `9000`, the interaction/voice service on `8001`, and Next.js
+on `3000`, and stops the stack if any required service exits. For frontend-only work while the
+Python services are already running, use `npm run dev:web`.
 
 Open `http://localhost:3000`. The browser creates an HttpOnly demo session, receives correlated
 task events over `/api/ws`, and uses the backend `/api/realtime` proxy for live voice. Next.js reads

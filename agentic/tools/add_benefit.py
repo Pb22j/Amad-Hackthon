@@ -47,6 +47,58 @@ class AddBenefitArgs(BankToolArgs):
     )
 
 
+class ListBeneficiariesArgs(BankToolArgs):
+    active_only: bool = Field(
+        default=True,
+        description="Return only beneficiaries currently active for transfers.",
+    )
+
+
+async def list_beneficiaries(active_only: bool = True) -> dict[str, Any]:
+    """Return the authenticated customer's authoritative beneficiary list."""
+
+    username, _ = owner_identity()
+
+    def work(connection: BankConnection) -> dict[str, Any]:
+        owner = find_user_by_username(connection, username)
+        if owner is None:
+            return tool_result(
+                status="failed",
+                summary="The authenticated customer profile was not found.",
+                data={},
+                error_code="customer_not_found",
+            )
+        statement = (
+            "SELECT b.Full_Name, b.Short_Name, b.Account_Number, b.status,"
+            " target.Bank_Name_Ar FROM beneficiaries b"
+            " LEFT JOIN users target ON target.Account_Number = b.Account_Number"
+            " WHERE b.owner_uuid = %s"
+        )
+        parameters: list[Any] = [owner["uuid"]]
+        if active_only:
+            statement += " AND b.status = %s"
+            parameters.append("active")
+        statement += " ORDER BY b.Short_Name, b.Full_Name"
+        rows = connection.execute(statement, tuple(parameters)).fetchall()
+        beneficiaries = [
+            {
+                "full_name": row["Full_Name"],
+                "short_name": row["Short_Name"],
+                "account_number": row["Account_Number"],
+                "bank_name": row["Bank_Name_Ar"],
+                "status": row["status"],
+            }
+            for row in rows
+        ]
+        return tool_result(
+            status="completed",
+            summary=f"Found {len(beneficiaries)} saved beneficiaries.",
+            data={"beneficiaries": beneficiaries, "count": len(beneficiaries)},
+        )
+
+    return await run_in_bank_db(work)
+
+
 async def add_benefit(
     full_name_of_benefit_account: str,
     benefit_account_number: str,
@@ -67,48 +119,11 @@ async def add_benefit(
                 error_code="customer_not_found",
             )
 
-        existing = find_beneficiary(connection, owner["uuid"], normalized)
-        if existing is not None:
-            if existing["status"] == "inactive":
-                target = find_user_by_account_number(connection, normalized)
-                if target is None or target["status"] != "active":
-                    return tool_result(
-                        status="failed",
-                        summary=(
-                            "The destination bank account is not active, so the "
-                            "beneficiary cannot be activated."
-                        ),
-                        data={"benefit_account_number": normalized},
-                        error_code="account_inactive",
-                    )
-                now = timestamp()
-                connection.execute(
-                    "UPDATE beneficiaries SET status = 'active', updatedAt = %s"
-                    " WHERE uuid = %s",
-                    (now, existing["uuid"]),
-                )
-                return tool_result(
-                    status="completed",
-                    summary=(
-                        f"Beneficiary {existing['Short_Name']} was automatically "
-                        "activated for transfers."
-                    ),
-                    data={
-                        "beneficiary": {
-                            "full_name": existing["Full_Name"],
-                            "short_name": existing["Short_Name"],
-                            "account_number": existing["Account_Number"],
-                            "bank_name": target["Bank_Name_Ar"],
-                            "status": "active",
-                        },
-                        "automatically_activated": True,
-                    },
-                    operation_id=str(existing["uuid"]),
-                )
+        if find_beneficiary(connection, owner["uuid"], normalized) is not None:
             return tool_result(
                 status="failed",
-                summary="This account is already active in the beneficiary list, so it was not added again.",
-                data={"benefit_account_number": normalized, "status": "active"},
+                summary="This account is already in the beneficiary list, so it was not added again.",
+                data={"benefit_account_number": normalized},
                 error_code="beneficiary_already_exists",
             )
 
@@ -175,8 +190,7 @@ async def add_benefit(
                     "account_number": normalized,
                     "bank_name": target["Bank_Name_Ar"],
                     "status": "active",
-                },
-                "automatically_activated": True,
+                }
             },
             operation_id=beneficiary_id,
         )
@@ -193,4 +207,16 @@ TOOL: BaseTool = StructuredTool.from_function(
         "already registered. Required before any transfer to that account."
     ),
     args_schema=AddBenefitArgs,
+)
+
+
+LIST_TOOL: BaseTool = StructuredTool.from_function(
+    coroutine=list_beneficiaries,
+    name="list_beneficiaries",
+    description=(
+        "List the authenticated customer's saved beneficiaries and their active status. "
+        "Use this authoritative read when the user asks to view beneficiaries or when a "
+        "saved name must be resolved before a transfer. Do not use Qatta tools for this."
+    ),
+    args_schema=ListBeneficiariesArgs,
 )

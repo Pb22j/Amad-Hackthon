@@ -7,6 +7,7 @@ The in-memory ``DUMMY_TOOLS`` sandbox remains available through the
 ``AGENTIC_TOOL_PROVIDER=agentic.tools.dummy:DUMMY_TOOLS`` override.
 """
 
+from agentic.tools.add_benefit import LIST_TOOL as LIST_BENEFICIARIES_TOOL
 from agentic.tools.add_benefit import TOOL as ADD_BENEFIT_TOOL
 from agentic.tools.accounts import GET_BALANCE_TOOL, SEARCH_TRANSACTIONS_TOOL
 from agentic.tools.analyze_finances import TOOL as ANALYZE_FINANCES_TOOL
@@ -33,6 +34,7 @@ BANK_TOOLS = (
     GET_BALANCE_TOOL,
     SEARCH_TRANSACTIONS_TOOL,
     ADD_BENEFIT_TOOL,
+    LIST_BENEFICIARIES_TOOL,
     TRANSFER_BETWEEN_ACCOUNTS_TOOL,
     MONTHLY_REPORT_TOOL,
     CREATE_QATTA_TOOL,

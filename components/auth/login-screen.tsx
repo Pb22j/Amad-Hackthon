@@ -2,42 +2,102 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Loader2, Lock, Mail, User } from "lucide-react";
+import { ArrowRight, AtSign, Loader2, Lock, Mail, Phone, UserRound } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
 import { useLang } from "@/lib/i18n";
-import { ensureNafeaSession } from "@/lib/nafea-api";
+import { NafeaApiError } from "@/lib/nafea-api";
 import { BrandLogo } from "@/components/nafi/brand-logo";
 import { LanguageToggle } from "@/components/i18n/language-toggle";
 
-type Mode = "signin" | "register";
-
 /**
- * Login / registration gate. This is a front-end mock — it does NOT
- * authenticate or store any real credentials. As an Open Banking product there
- * is no anonymous entry: signing in or registering are the only ways through.
+ * Banking login gate. Credentials are verified by the interaction backend and
+ * never stored by the frontend.
  */
 export function LoginScreen() {
   const { t, dir, lang } = useLang();
-  const { signIn } = useAuth();
+  const { isAuthenticated, ready, signIn, signUp } = useAuth();
   const router = useRouter();
-  const [mode, setMode] = React.useState<Mode>("signin");
+  const [mode, setMode] = React.useState<"login" | "register">("login");
+  const [identifier, setIdentifier] = React.useState("");
+  const [fullName, setFullName] = React.useState("");
+  const [username, setUsername] = React.useState("");
+  const [email, setEmail] = React.useState("");
+  const [phone, setPhone] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [confirmPassword, setConfirmPassword] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState("");
 
+  React.useEffect(() => {
+    if (ready && isAuthenticated) router.replace("/chat");
+  }, [isAuthenticated, ready, router]);
+
+  if (!ready || isAuthenticated) {
+    return (
+      <div className="grid min-h-dvh place-items-center" role="status">
+        <Loader2 className="size-5 animate-spin text-primary" aria-hidden />
+      </div>
+    );
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (
+      mode === "register" &&
+      (password.length < 8 || !/\p{L}/u.test(password) || !/\d/u.test(password))
+    ) {
+      setErrorMessage(t("passwordRequirements"));
+      return;
+    }
+    if (mode === "register" && password !== confirmPassword) {
+      setErrorMessage(t("passwordsDoNotMatch"));
+      return;
+    }
     setSubmitting(true);
     setErrorMessage("");
     try {
-      await ensureNafeaSession(lang);
-      signIn();
+      if (mode === "register") {
+        await signUp({
+          full_name: fullName,
+          username,
+          email,
+          phone_e164: phone,
+          password,
+          language: lang,
+        });
+      } else {
+        await signIn(identifier, password, lang);
+      }
       router.push("/chat");
-    } catch {
-      setErrorMessage(t("sessionError"));
+    } catch (error) {
+      if (mode === "login") {
+        setErrorMessage(
+          error instanceof NafeaApiError && error.status === 401
+            ? t("invalidCredentials")
+            : t("sessionError")
+        );
+      } else if (error instanceof NafeaApiError && error.status === 409) {
+        const conflictMessages: Record<string, string> = {
+          username_taken: t("usernameTaken"),
+          email_taken: t("emailTaken"),
+          phone_taken: t("phoneTaken"),
+        };
+        setErrorMessage(conflictMessages[error.message] || t("registrationError"));
+      } else {
+        setErrorMessage(t("registrationError"));
+      }
+    } finally {
       setSubmitting(false);
     }
+  }
+
+  function switchMode() {
+    setMode((current) => (current === "login" ? "register" : "login"));
+    setPassword("");
+    setConfirmPassword("");
+    setErrorMessage("");
   }
 
   return (
@@ -59,58 +119,110 @@ export function LoginScreen() {
 
         {/* Card */}
         <div className="mt-7 rounded-2xl border border-white/[0.06] bg-card p-5 shadow-[inset_0_1px_0_0_rgb(255_255_255/0.04),0_18px_40px_-24px_rgb(0_0_0/0.8)] sm:p-6">
-          {/* Mode tabs */}
-          <div className="mb-5 flex rounded-full border border-white/10 bg-white/[0.03] p-0.5 text-sm font-medium">
-            {(["signin", "register"] as Mode[]).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                aria-pressed={mode === m}
-                className={cn(
-                  "flex-1 rounded-full px-3 py-1.5 transition-colors",
-                  mode === m ? "bg-white/10 text-foreground" : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {m === "signin" ? t("signIn") : t("register")}
-              </button>
-            ))}
-          </div>
-
           <form onSubmit={submit} className="space-y-3">
-            {mode === "register" && (
-              <Field icon={User} label={t("fullName")}>
+            {mode === "register" ? (
+              <>
+                <Field icon={UserRound} label={t("fullName")}>
+                  <input
+                    type="text"
+                    autoComplete="name"
+                    required
+                    minLength={2}
+                    maxLength={200}
+                    value={fullName}
+                    onChange={(event) => setFullName(event.target.value)}
+                    placeholder={t("fullName")}
+                    className="w-full bg-transparent text-sm outline-none placeholder:text-faint text-start"
+                  />
+                </Field>
+                <Field icon={AtSign} label={t("username")}>
+                  <input
+                    type="text"
+                    autoComplete="username"
+                    required
+                    minLength={3}
+                    maxLength={32}
+                    pattern="[A-Za-z0-9][A-Za-z0-9._-]+"
+                    dir="ltr"
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value)}
+                    placeholder={t("username")}
+                    className="w-full bg-transparent text-sm outline-none placeholder:text-faint text-start"
+                  />
+                </Field>
+                <Field icon={Mail} label={t("email")}>
+                  <input
+                    type="email"
+                    autoComplete="email"
+                    required
+                    dir="ltr"
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    placeholder={t("emailPlaceholder")}
+                    className="w-full bg-transparent text-sm outline-none placeholder:text-faint text-start"
+                  />
+                </Field>
+                <Field icon={Phone} label={t("phone")}>
+                  <input
+                    type="tel"
+                    autoComplete="tel"
+                    required
+                    pattern="\+[1-9][0-9]{7,14}"
+                    dir="ltr"
+                    value={phone}
+                    onChange={(event) => setPhone(event.target.value)}
+                    placeholder="+9665XXXXXXXX"
+                    className="w-full bg-transparent text-sm outline-none placeholder:text-faint text-start"
+                  />
+                </Field>
+              </>
+            ) : (
+              <Field icon={UserRound} label={t("usernameOrEmail")}>
                 <input
                   type="text"
-                  autoComplete="name"
+                  autoComplete="username"
                   required
-                  placeholder={t("fullName")}
-                  className="w-full bg-transparent text-sm outline-none placeholder:text-faint"
+                  dir="ltr"
+                  value={identifier}
+                  onChange={(event) => setIdentifier(event.target.value)}
+                  placeholder={t("usernameOrEmail")}
+                  className="w-full bg-transparent text-sm outline-none placeholder:text-faint text-start"
                 />
               </Field>
             )}
 
-            <Field icon={Mail} label={t("email")}>
-              <input
-                type="email"
-                autoComplete="email"
-                required
-                dir="ltr"
-                placeholder={t("emailPlaceholder")}
-                className="w-full bg-transparent text-sm outline-none placeholder:text-faint text-start"
-              />
-            </Field>
-
             <Field icon={Lock} label={t("password")}>
               <input
                 type="password"
-                autoComplete={mode === "signin" ? "current-password" : "new-password"}
+                autoComplete={mode === "register" ? "new-password" : "current-password"}
                 required
+                minLength={mode === "register" ? 8 : 1}
                 dir="ltr"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
                 placeholder="••••••••"
                 className="w-full bg-transparent text-sm outline-none placeholder:text-faint text-start"
               />
             </Field>
+
+            {mode === "register" ? (
+              <>
+                <Field icon={Lock} label={t("confirmPassword")}>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    required
+                    minLength={8}
+                    dir="ltr"
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    placeholder={t("confirmPassword")}
+                    className="w-full bg-transparent text-sm outline-none placeholder:text-faint text-start"
+                  />
+                </Field>
+                <p className="px-1 text-[11px] text-faint">{t("passwordRequirements")}</p>
+              </>
+            ) : null}
 
             <button
               type="submit"
@@ -118,7 +230,13 @@ export function LoginScreen() {
               className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-br from-primary to-purple py-2.5 text-sm font-semibold text-white shadow-[0_10px_24px_-10px_rgba(111,141,255,0.7)] transition-transform hover:scale-[1.01] active:scale-[0.99] disabled:cursor-wait disabled:opacity-70"
             >
               {submitting ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
-              {submitting ? t("connecting") : mode === "signin" ? t("signIn") : t("register")}
+              {submitting
+                ? mode === "register"
+                  ? t("creatingAccount")
+                  : t("connecting")
+                : mode === "register"
+                  ? t("register")
+                  : t("signIn")}
               {!submitting ? (
                 <ArrowRight className={cn("size-4", dir === "rtl" && "-scale-x-100")} aria-hidden />
               ) : null}
@@ -129,9 +247,23 @@ export function LoginScreen() {
               </p>
             ) : null}
           </form>
+
+          <div className="mt-4 border-t border-white/[0.06] pt-4 text-center text-xs text-muted-foreground">
+            {mode === "register" ? t("haveAccount") : t("noAccount")} {" "}
+            <button
+              type="button"
+              onClick={switchMode}
+              disabled={submitting}
+              className="font-semibold text-primary hover:underline disabled:opacity-50"
+            >
+              {mode === "register" ? t("signIn") : t("register")}
+            </button>
+          </div>
         </div>
 
-        <p className="mt-5 text-center text-[11px] leading-relaxed text-faint">{t("demoNote")}</p>
+        <p className="mt-5 text-center text-[11px] leading-relaxed text-faint">
+          {mode === "register" ? t("createAccountHelp") : t("bankCredentials")}
+        </p>
       </div>
     </div>
   );

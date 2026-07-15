@@ -126,12 +126,12 @@ All colors are CSS variables in `app/globals.css` (`:root`), exposed to Tailwind
 
 ## 6. Full File Map
 
-**App flow:** `/` (demo login) → `/chat` (voice-first chat) → `/dashboard` (bento). The chat's **X** and the login's "Continue as guest" both reach the dashboard; the dashboard's **VoiceFAB** links back to `/chat`.
+**App flow:** `/` (server-backed login/create account) → `/chat` (voice-first chat) → `/dashboard` (bento). Authenticated users can move between chat and dashboard; the dashboard's **VoiceFAB** links back to `/chat`.
 
 ```
 app/
   layout.tsx              Root layout — Inter font, metadata, wraps <Providers> (LanguageProvider)
-  page.tsx                / — demo login/register gate (renders <LoginScreen>)
+  page.tsx                / — authenticated login/register gate (renders <LoginScreen>)
   chat/page.tsx           /chat — voice-first chat (renders <ChatScreen>)
   globals.css             Navy theme tokens + @theme inline + keyframes + vignette
   (dash)/                 Route group for the authenticated dashboard area (URLs have no "(dash)")
@@ -145,7 +145,7 @@ components/
   layout/
     providers.tsx         Wraps the whole app in LanguageProvider (all screens bilingual)
   auth/
-    login-screen.tsx      Demo login/register form (mock; submit→/chat, guest→/dashboard)
+    login-screen.tsx      Server-backed login/register form (successful auth→/chat)
   chat/
     chat-screen.tsx       Secure backend chat + realtime voice + task/confirmation UI
   nafi/                   ← THE DASHBOARD (edit here)
@@ -375,7 +375,7 @@ git push origin front-end
 
 - [ ] Drop **real official bank logos** into `public/logos/` (same filenames) — currently placeholders.
 - [ ] Remove **`recharts` + `react-is`** from `package.json` (unused).
-- [ ] Replace the demo session bootstrap/login gate with the platform's production identity provider.
+- [x] Replace the demo login gate with backend-verified banking credentials and revocable sessions.
 - [ ] Flesh out the placeholder routes (`accounts`, `advisor`, `settings`).
 - [ ] Remove the archived `legacy/` implementations after the product team confirms they are no longer needed.
 - [ ] Decide whether to **redeploy** the navy bento to Cloudflare (live is still indigo by choice — §12).

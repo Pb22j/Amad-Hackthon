@@ -25,6 +25,8 @@ VoiceAssistant_Nafea/backend/cache_dir/
 VoiceAssistant_Nafea/backend/app.log
 node_modules/
 .next/
+.next-dev/
+.next-build/
 out/
 next-env.d.ts
 *.tsbuildinfo
