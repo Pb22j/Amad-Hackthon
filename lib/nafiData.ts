@@ -3,7 +3,16 @@
  * Every user-facing string carries an EN + AR pair. Amounts are illustrative (USD).
  */
 
-export type BankId = "rajhi" | "alinma" | "sab" | "snb" | "mishari";
+export type BankId =
+  | "rajhi"
+  | "alinma"
+  | "sab"
+  | "snb"
+  | "riyad"
+  | "albilad"
+  | "fransi"
+  | "anb"
+  | "mishari";
 
 export type Bank = {
   id: BankId;
@@ -33,15 +42,19 @@ export const netWorth = {
 };
 
 export const connectedBanks: Bank[] = [
-  { id: "rajhi", name: "Al Rajhi Bank", nameAr: "مصرف الراجحي", code: "890", logo: "/logos/al-rajhi.svg", tile: "#ffffff" },
-  { id: "alinma", name: "Alinma Bank", nameAr: "مصرف الإنماء", logo: "/logos/alinma.svg", tile: "#ffffff" },
-  { id: "sab", name: "SAB", nameAr: "البنك السعودي الأول", sub: "Saudi Awwal Bank", subAr: "البنك السعودي الأول", logo: "/logos/sab.svg", tile: "#ffffff" },
-  { id: "snb", name: "SNB", nameAr: "البنك الأهلي السعودي", sub: "Saudi National Bank", subAr: "البنك الأهلي السعودي", logo: "/logos/snb.svg", tile: "#ffffff" },
+  { id: "rajhi", name: "Al Rajhi Bank", nameAr: "مصرف الراجحي", code: "890", logo: "/logos/alrajhi.png", tile: "#ffffff" },
+  { id: "alinma", name: "Alinma Bank", nameAr: "مصرف الإنماء", logo: "/logos/alinma.png", tile: "#ffffff" },
+  { id: "sab", name: "SAB", nameAr: "البنك السعودي الأول", sub: "Saudi Awwal Bank", subAr: "البنك السعودي الأول", logo: "/logos/sab.png", tile: "#ffffff" },
+  { id: "snb", name: "SNB", nameAr: "البنك الأهلي السعودي", sub: "Saudi National Bank", subAr: "البنك الأهلي السعودي", logo: "/logos/snb.png", tile: "#ffffff" },
+  { id: "riyad", name: "Riyad Bank", nameAr: "بنك الرياض", logo: "/logos/riyad.png", tile: "#ffffff" },
+  { id: "albilad", name: "Bank Albilad", nameAr: "بنك البلاد", logo: "/logos/albilad.png", tile: "#ffffff" },
+  { id: "fransi", name: "Banque Saudi Fransi", nameAr: "البنك السعودي الفرنسي", logo: "/logos/fransi.png", tile: "#ffffff" },
+  { id: "anb", name: "Arab National Bank", nameAr: "البنك العربي الوطني", logo: "/logos/anb.png", tile: "#ffffff" },
 ];
 
 export const integratedServices: Bank[] = [
-  { id: "rajhi", name: "Al Rajhi Bank", nameAr: "مصرف الراجحي", code: "890", logo: "/logos/al-rajhi.svg", tile: "#ffffff" },
-  { id: "alinma", name: "Alinma Bank", nameAr: "مصرف الإنماء", code: "132", logo: "/logos/alinma.svg", tile: "#ffffff" },
+  { id: "rajhi", name: "Al Rajhi Bank", nameAr: "مصرف الراجحي", code: "890", logo: "/logos/alrajhi.png", tile: "#ffffff" },
+  { id: "alinma", name: "Alinma Bank", nameAr: "مصرف الإنماء", code: "132", logo: "/logos/alinma.png", tile: "#ffffff" },
 ];
 
 /* ----------------------------------------------------------------- */
@@ -101,19 +114,19 @@ export const recipients: Recipient[] = [
     id: "reema",
     name: "Reema Al-Dosari",
     nameAr: "ريما الدوسري",
-    bank: { id: "rajhi", name: "Al Rajhi Bank", nameAr: "مصرف الراجحي", logo: "/logos/al-rajhi.svg", tile: "#ffffff" },
+    bank: { id: "rajhi", name: "Al Rajhi Bank", nameAr: "مصرف الراجحي", logo: "/logos/alrajhi.png", tile: "#ffffff" },
   },
   {
     id: "mishari",
     name: "Mishari Al-Saud",
     nameAr: "مشاري آل سعود",
-    bank: { id: "alinma", name: "Alinma Bank", nameAr: "مصرف الإنماء", logo: "/logos/alinma.svg", tile: "#ffffff" },
+    bank: { id: "alinma", name: "Alinma Bank", nameAr: "مصرف الإنماء", logo: "/logos/alinma.png", tile: "#ffffff" },
   },
   {
     id: "yousef",
     name: "Yousef Al-Fahad",
     nameAr: "يوسف الفهد",
-    bank: { id: "snb", name: "SNB", nameAr: "البنك الأهلي السعودي", logo: "/logos/snb.svg", tile: "#ffffff" },
+    bank: { id: "snb", name: "SNB", nameAr: "البنك الأهلي السعودي", logo: "/logos/snb.png", tile: "#ffffff" },
   },
 ];
 
