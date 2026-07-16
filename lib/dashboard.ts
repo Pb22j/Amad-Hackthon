@@ -17,6 +17,8 @@ export type DashboardHolding = {
   ticker: string;
   name: string;
   name_ar: string;
+  quantity: string;
+  value_sar: string;
   weight_percent: number;
   return_percent: number;
 };

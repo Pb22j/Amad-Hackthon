@@ -49,7 +49,15 @@ export function PortfolioCard({
               <span className="w-12 shrink-0 font-mono text-[11px] text-muted-foreground" dir="ltr">
                 {hd.ticker}
               </span>
-              <span className="min-w-0 flex-1 truncate">{loc(hd.name, hd.name_ar)}</span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate">{loc(hd.name, hd.name_ar)}</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {fmt.num(Number(hd.quantity))} {t("shares")}
+                </p>
+              </div>
+              <span className="w-20 text-end font-mono text-[12px] tabular-nums" dir="ltr">
+                {fmt.money(Number(hd.value_sar))}
+              </span>
               <span className="w-10 text-end font-mono text-[12px] tabular-nums text-muted-foreground" dir="ltr">
                 {hd.weight_percent}%
               </span>

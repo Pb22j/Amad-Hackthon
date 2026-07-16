@@ -32,6 +32,13 @@ def _money(value: Any) -> str:
     return format(Decimal(str(value or 0)).quantize(Decimal("0.01")), "f")
 
 
+def _quantity(value: Any) -> str:
+    # Holdings are stored with eight decimal places to support fractional units;
+    # whole share counts must still read as "2" rather than "2.00000000".
+    quantity = Decimal(str(value or 0)).normalize()
+    return format(quantity, "f")
+
+
 def _percent(numerator: Decimal, denominator: Decimal) -> float:
     if denominator == 0:
         return 0.0
@@ -242,6 +249,8 @@ class DashboardStore:
                         "ticker": holding["symbol"],
                         "name": holding["name"],
                         "name_ar": _ASSET_NAMES_AR.get(holding["symbol"], holding["name"]),
+                        "quantity": _quantity(holding["quantity"]),
+                        "value_sar": _money(market_value),
                         "weight_percent": _percent(market_value, portfolio_value),
                         "return_percent": _percent(market_value - cost_value, cost_value),
                     }
