@@ -1,0 +1,210 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Nafi — deep-navy glass bento dashboard.
+ * A near-black canvas lit by ambient colour fields, with frosted translucent
+ * bento cards floating above it. Bilingual (EN + AR).
+ *
+ * The cards are genuinely translucent: `backdrop-filter` samples the ambient
+ * gradients painted on <body>, so the glass picks up colour from whatever sits
+ * behind it. Deepening the canvas is what gives the frost something to do.
+ */
+:root {
+  /*
+   * Softer midnight-navy canvas. Lifted well off black so the UI reads as a
+   * considered dark theme rather than an abyss, and so the cards have somewhere
+   * to sit above it. Every foreground tone below is checked against the
+   * composited card surface (~#1e2739) for WCAG AAA on body text.
+   */
+  --background: #0f1524;
+  --foreground: #f3f7fd;
+  --card: #253047;
+  --card-2: #263146;
+  --card-foreground: #f3f7fd;
+  --popover: #212b3e;
+  --popover-foreground: #f3f7fd;
+  --primary: #8ba3ff;
+  --primary-foreground: #0f1524;
+  --secondary: #263146;
+  --secondary-foreground: #f3f7fd;
+  --muted: #263146;
+  --muted-foreground: #b3c0d6;
+  --faint: #94a3b8;
+  --accent: #2b3750;
+  --accent-foreground: #f3f7fd;
+  --orange: #e79167;
+  --purple: #a596f4;
+  --teal: #5ad9cd;
+  --positive: #5ad0a4;
+  --negative: #f08a82;
+  --destructive: #f08a82;
+  --border: #313d55;
+  --input: #313d55;
+  --ring: #8ba3ff;
+  --radius: 1rem;
+
+  /*
+   * Glass surface + hairline. A tinted slate rather than a white wash: over the
+   * lifted canvas a white tint greys out, whereas a slate tint at high opacity
+   * keeps the card distinctly lighter than the background while the blur still
+   * picks up the ambient fields behind it.
+   */
+  --glass: rgb(45 59 84 / 0.72);
+  --glass-hover: rgb(56 73 103 / 0.8);
+  --glass-border: rgb(255 255 255 / 0.1);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-2: var(--card-2);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-orange: var(--orange);
+  --color-purple: var(--purple);
+  --color-teal: var(--teal);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-glass: var(--glass);
+  --color-glass-border: var(--glass-border);
+  --radius-sm: calc(var(--radius) - 6px);
+  --radius-md: calc(var(--radius) - 4px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", monospace;
+  --animate-eq: eq 0.9s ease-in-out infinite;
+  --animate-breathe: breathe 4.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-rise: rise 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Voice waveform bars — animate only while active. */
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+/* Voice FAB halo — a slow inhale/exhale rather than a hard ping. */
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1.3);
+    opacity: 0.12;
+  }
+}
+
+/* Card entrance — a short spring-eased lift, staggered per card. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    /*
+     * Ambient light fields. These are what the cards' backdrop-blur samples —
+     * without them the frost has nothing to pick up and reads as flat grey.
+     * Alphas are pulled back from the near-black era: over a lifted canvas the
+     * same values silt up into haze instead of reading as light.
+     */
+    background-image:
+      radial-gradient(900px 620px at 12% -6%, rgb(96 116 235 / 0.2), transparent 60%),
+      radial-gradient(760px 560px at 88% 4%, rgb(150 118 240 / 0.15), transparent 62%),
+      radial-gradient(680px 520px at 64% 42%, rgb(56 165 175 / 0.07), transparent 66%),
+      radial-gradient(1200px 800px at 50% 108%, rgb(70 90 165 / 0.12), transparent 60%);
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+    /* Inter's character alternates + optical sizing — cleaner l/1 and a truer g. */
+    font-feature-settings: "cv11" 1, "ss01" 1, "calt" 1;
+    font-optical-sizing: auto;
+    letter-spacing: -0.011em;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Figures should never reflow as they tick. */
+  .tabular-nums,
+  [class*="tabular-nums"] {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Frosted translucent surface — the shared material for every bento card. */
+  .glass {
+    background-color: var(--glass);
+    backdrop-filter: blur(24px) saturate(150%);
+    -webkit-backdrop-filter: blur(24px) saturate(150%);
+  }
+
+  /* Display figures: tight, optically balanced, non-reflowing. */
+  .numeral {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.035em;
+    font-feature-settings: "ss01" 1, "cv11" 1;
+  }
+}
+
+/* Honour the OS reduced-motion preference — no exceptions. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

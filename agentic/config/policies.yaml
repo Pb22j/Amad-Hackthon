@@ -1,0 +1,57 @@
+financial_actions:
+  require_exact_confirmation:
+    - transfer_between_accounts
+    - add_benefit
+    - send_gift
+    - pay_fatoorah
+    - create_qatta
+    - pay_qatta_bill
+    - cancel_qatta
+    - transfer_funds
+    - buy_investment
+    - sell_investment
+    - withdraw_funds
+    - pay_bill
+    - add_beneficiary
+  require_authoritative_receipt:
+    - transfer_between_accounts
+    - send_gift
+    - pay_fatoorah
+    - create_qatta
+    - pay_qatta_bill
+    - cancel_qatta
+    - transfer_funds
+    - pay_bill
+    - buy_investment
+    - sell_investment
+    - withdraw_funds
+security:
+  reject_cross_user_requests: true
+  reject_credential_requests: true
+  reject_policy_bypass: true
+  redact_sensitive_logs: true
+  tool_results_are_untrusted: true
+  blocked_intents:
+    - access_other_user
+    - credential_theft
+    - fraud
+    - money_laundering
+    - market_manipulation
+    - compliance_bypass
+memory:
+  allowed_types:
+    - preferred_language
+    - reporting_currency
+    - report_format
+    - account_alias
+    - user_constraint
+  forbidden_key_fragments:
+    - password
+    - passcode
+    - pin
+    - otp
+    - token
+    - secret
+    - api_key
+    - cvv
+    - full_card_number

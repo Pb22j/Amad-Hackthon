@@ -1,0 +1,35 @@
+{
+  "name": "nafi",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev-all.mjs",
+    "dev:web": "NEXT_DIST_DIR=.next-dev next dev",
+    "dev:agentic": "python -m uvicorn main:app --reload --host 127.0.0.1 --port 9000",
+    "dev:interaction": "cd VoiceAssistant_Nafea/backend && python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8001",
+    "build": "NEXT_DIST_DIR=.next-build next build",
+    "build:sites": "NEXT_DIST_DIR=.next-build next build && node scripts/prepare-sites-dist.mjs",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "^1.2.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.525.0",
+    "next": "^15.3.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-is": "^19.2.7",
+    "recharts": "^3.9.2",
+    "tailwind-merge": "^3.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.11",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.11",
+    "typescript": "^5"
+  }
+}

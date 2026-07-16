@@ -1,0 +1,2 @@
+Application-owned database migrations. Run `alembic upgrade head` during deployment.
+
