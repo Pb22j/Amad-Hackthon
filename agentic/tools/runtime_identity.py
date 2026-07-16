@@ -16,6 +16,9 @@ from contextvars import ContextVar
 _identity: ContextVar[tuple[str, str] | None] = ContextVar(
     "financial_tool_identity", default=None
 )
+_operation: ContextVar[tuple[str, str] | None] = ContextVar(
+    "financial_tool_operation", default=None
+)
 
 
 @contextmanager
@@ -33,3 +36,20 @@ def current_tool_identity() -> tuple[str, str] | None:
     """Return the current guarded identity, if a tool call is active."""
 
     return _identity.get()
+
+
+@contextmanager
+def bind_tool_operation(*, idempotency_key: str, tool_name: str) -> Iterator[None]:
+    """Bind a provider reconciliation key to one external-tool invocation."""
+
+    token = _operation.set((idempotency_key, tool_name))
+    try:
+        yield
+    finally:
+        _operation.reset(token)
+
+
+def current_tool_operation() -> tuple[str, str] | None:
+    """Return the current provider reconciliation key and stable tool name."""
+
+    return _operation.get()

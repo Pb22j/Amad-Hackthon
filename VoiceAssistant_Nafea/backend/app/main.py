@@ -9,8 +9,9 @@ import hmac
 import json
 import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
@@ -56,10 +57,17 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    await recover_task_watchdogs()
+    yield
+
+
 app = FastAPI(
     title="Nafea Voice Interaction Layer",
     description="Authenticated voice proxy and durable agentic interaction boundary",
     version="1.1.0",
+    lifespan=app_lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -127,7 +135,7 @@ async def secure_http_boundary(request: Request, call_next: Any) -> Response:
             "/api/auth/session",
             "/api/auth/logout",
         }
-        and interaction_store.get_session(_session_token(request)) is None
+        and await asyncio.to_thread(interaction_store.get_session, _session_token(request)) is None
     ):
         return Response(
             content=json.dumps({"detail": "Authenticated interaction session required"}),
@@ -161,11 +169,17 @@ def _session_token(request: Request) -> str | None:
     return request.headers.get("X-Session-Token") or request.cookies.get("nafea_session")
 
 
-def require_session(request: Request) -> InteractionSession:
-    session = interaction_store.get_session(_session_token(request))
+async def require_session(request: Request) -> InteractionSession:
+    session = await asyncio.to_thread(interaction_store.get_session, _session_token(request))
     if session is None:
         raise HTTPException(status_code=401, detail="Authenticated interaction session required")
     return session
+
+
+async def _interaction_call(method: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Keep synchronous Psycopg work outside the realtime event loop."""
+
+    return await asyncio.to_thread(method, *args, **kwargs)
 
 
 def _websocket_token(websocket: WebSocket) -> str | None:
@@ -175,6 +189,65 @@ def _websocket_token(websocket: WebSocket) -> str | None:
 def _websocket_origin_allowed(websocket: WebSocket) -> bool:
     origin = websocket.headers.get("origin")
     return origin is None or origin in settings.frontend_origins
+
+
+def _issue_voice_evidence(*, session_id: str, call_id: str, transcript: str) -> str:
+    claims = {"session_id": session_id, "call_id": call_id, "transcript": transcript}
+    body = json.dumps(claims, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    timestamp, signature = sign_message(settings.INTERACTION_SHARED_SECRET, body)
+    encoded = base64.urlsafe_b64encode(body).decode("ascii").rstrip("=")
+    return f"{timestamp}.{encoded}.{signature}"
+
+
+def _verify_voice_evidence(token: str, *, session_id: str, call_id: str) -> str:
+    try:
+        timestamp, encoded, signature = token.split(".", 2)
+        body = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        verify_message(
+            settings.INTERACTION_SHARED_SECRET,
+            body,
+            timestamp=timestamp,
+            signature=signature,
+            max_age_seconds=120,
+        )
+        claims = json.loads(body)
+        transcript = claims["transcript"]
+        if (
+            claims["session_id"] != session_id
+            or claims["call_id"] != call_id
+            or not isinstance(transcript, str)
+            or not transcript.strip()
+            or len(transcript) > 20_000
+        ):
+            raise ValueError
+        return transcript.strip()
+    except (ValueError, KeyError, TypeError, binascii.Error, json.JSONDecodeError) as exc:
+        raise PermissionError("invalid voice transcript evidence") from exc
+
+
+def _bind_voice_tool_calls(
+    message: dict[str, Any], *, session_id: str, transcript: str
+) -> None:
+    """Replace model-reconstructed intent with signed provider transcription."""
+
+    canonical = transcript.strip()
+    if not canonical:
+        return
+    calls = (message.get("toolCall") or {}).get("functionCalls") or []
+    for call in calls:
+        if call.get("name") != "submit_financial_task":
+            continue
+        call_id = call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        call["args"] = {
+            "voice_transcript": canonical,
+            "voice_evidence": _issue_voice_evidence(
+                session_id=session_id,
+                call_id=call_id,
+                transcript=canonical,
+            ),
+        }
 
 
 class ConfigResponse(StrictModel):
@@ -232,6 +305,7 @@ class SubmitTaskRequest(StrictModel):
     natural_language_request: str = Field(min_length=1, max_length=20_000)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
     source: Literal["chat", "voice"] = "chat"
+    voice_evidence: str | None = Field(default=None, min_length=32, max_length=40_000, repr=False)
 
 
 class ResumeTaskRequest(StrictModel):
@@ -447,7 +521,8 @@ async def login(payload: LoginRequest, response: Response) -> SessionResponse:
     )
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    session, token = interaction_store.create_session(
+    session, token = await _interaction_call(
+        interaction_store.create_session,
         user_id=user.user_id,
         tenant_id=user.tenant_id,
         language=payload.language,
@@ -470,7 +545,8 @@ async def register(payload: RegistrationRequest, response: Response) -> SessionR
         )
     except RegistrationConflict as error:
         raise HTTPException(status_code=409, detail="username_taken") from error
-    session, token = interaction_store.create_session(
+    session, token = await _interaction_call(
+        interaction_store.create_session,
         user_id=user.user_id,
         tenant_id=user.tenant_id,
         language=payload.language,
@@ -484,14 +560,14 @@ async def register(payload: RegistrationRequest, response: Response) -> SessionR
 @app.get("/api/auth/session", response_model=SessionResponse)
 async def current_session(request: Request) -> SessionResponse:
     token = _session_token(request)
-    session = require_session(request)
+    session = await require_session(request)
     assert token is not None
     return _session_response(session, token)
 
 
 @app.post("/api/auth/logout", status_code=204)
 async def logout(request: Request, response: Response) -> Response:
-    interaction_store.revoke_session(_session_token(request))
+    await _interaction_call(interaction_store.revoke_session, _session_token(request))
     response.delete_cookie("nafea_session", path="/", samesite="strict")
     response.status_code = 204
     return response
@@ -504,7 +580,8 @@ async def refresh_session(
     response: Response,
 ) -> SessionResponse:
     token = _session_token(request)
-    session = interaction_store.refresh_session(
+    session = await _interaction_call(
+        interaction_store.refresh_session,
         token,
         language=payload.language,
         ttl_seconds=settings.SESSION_TTL_SECONDS,
@@ -520,8 +597,10 @@ async def refresh_session(
 async def get_active_task(request: Request) -> dict[str, Any]:
     """Return only the current session's resumable task for UI recovery."""
 
-    session = require_session(request)
-    task = interaction_store.get_active_task(session_id=session.session_id)
+    session = await require_session(request)
+    task = await _interaction_call(
+        interaction_store.get_active_task, session_id=session.session_id
+    )
     if task is None:
         return {"active_task": None}
     return {
@@ -538,7 +617,7 @@ async def get_active_task(request: Request) -> dict[str, Any]:
 async def get_dashboard(request: Request) -> dict[str, Any]:
     """Return a read-only banking snapshot scoped to the authenticated session."""
 
-    session = require_session(request)
+    session = await require_session(request)
     if "financial:read" not in session.scopes:
         raise HTTPException(status_code=403, detail="Financial read access is required")
     try:
@@ -557,7 +636,7 @@ async def request_wallet_deposit(
 ) -> dict[str, Any]:
     """Validate the selected bank and amount before asking for an OTP."""
 
-    session = require_session(request)
+    session = await require_session(request)
     if "financial:write" not in session.scopes:
         raise HTTPException(status_code=403, detail="Financial write access is required")
     try:
@@ -589,7 +668,7 @@ async def confirm_wallet_deposit(
 ) -> dict[str, Any]:
     """Move the token-bound amount only after the subsequent OTP check."""
 
-    session = require_session(request)
+    session = await require_session(request)
     if "financial:write" not in session.scopes:
         raise HTTPException(status_code=403, detail="Financial write access is required")
     try:
@@ -623,18 +702,24 @@ async def confirm_wallet_deposit(
 async def get_latest_task_event(task_id: str, request: Request) -> dict[str, Any]:
     """Replay a durable task event when a browser WebSocket frame was missed."""
 
-    session = require_session(request)
-    task = interaction_store.get_task(task_id=task_id, session_id=session.session_id)
+    session = await require_session(request)
+    task = await _interaction_call(
+        interaction_store.get_task, task_id=task_id, session_id=session.session_id
+    )
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found in this session")
     return {
-        "event": interaction_store.latest_task_event(task_id=task_id, session_id=session.session_id)
+        "event": await _interaction_call(
+            interaction_store.latest_task_event,
+            task_id=task_id,
+            session_id=session.session_id,
+        )
     }
 
 
 @app.post("/api/realtime-token")
 async def realtime_connection(request: Request, payload: RealtimeRequest) -> dict[str, str]:
-    session = require_session(request)
+    session = await require_session(request)
     if payload.language != session.language:
         raise HTTPException(
             status_code=409, detail="Language does not match the interaction session"
@@ -682,11 +767,21 @@ async def _wait_for_provider_setup(provider: Any) -> None:
         raise RuntimeError("realtime provider did not acknowledge session setup")
 
 
+async def _record_realtime_turn(**kwargs: Any) -> None:
+    try:
+        await _interaction_call(interaction_store.record_voice_turn, **kwargs)
+    except Exception as exc:
+        logger.warning("Could not persist realtime transcription memory: %s", type(exc).__name__)
+
+
 async def _relay_provider_to_browser(provider: Any, browser: WebSocket, *, session_id: str) -> None:
     user_transcript: list[str] = []
     assistant_transcript: list[str] = []
+    last_user_transcript = ""
+    persistence_tasks: set[asyncio.Task[None]] = set()
     async for raw in provider:
         text = raw if isinstance(raw, str) else raw.decode("utf-8")
+        outgoing = text
         try:
             message = json.loads(text)
             resumption = message.get("sessionResumptionUpdate") or {}
@@ -696,36 +791,56 @@ async def _relay_provider_to_browser(provider: Any, browser: WebSocket, *, sessi
             input_text = (content.get("inputTranscription") or {}).get("text")
             output_text = (content.get("outputTranscription") or {}).get("text")
             if input_text:
+                if not user_transcript:
+                    last_user_transcript = ""
                 user_transcript.append(input_text)
             if output_text:
                 assistant_transcript.append(output_text)
+            _bind_voice_tool_calls(
+                message,
+                session_id=session_id,
+                transcript="".join(user_transcript) or last_user_transcript,
+            )
             if content.get("interrupted"):
                 assistant_transcript.clear()
             if content.get("turnComplete"):
                 if user_transcript:
-                    interaction_store.record_voice_turn(
-                        session_id=session_id,
-                        role="user",
-                        text="".join(user_transcript),
-                        provenance="provider_input_audio_transcription",
+                    last_user_transcript = "".join(user_transcript)
+                    persistence_tasks.add(
+                        asyncio.create_task(
+                            _record_realtime_turn(
+                                session_id=session_id,
+                                role="user",
+                                text=last_user_transcript,
+                                provenance="provider_input_audio_transcription",
+                            )
+                        )
                     )
                 if assistant_transcript:
-                    interaction_store.record_voice_turn(
-                        session_id=session_id,
-                        role="assistant",
-                        text="".join(assistant_transcript),
-                        provenance="provider_output_audio_transcription_untrusted",
+                    persistence_tasks.add(
+                        asyncio.create_task(
+                            _record_realtime_turn(
+                                session_id=session_id,
+                                role="assistant",
+                                text="".join(assistant_transcript),
+                                provenance="provider_output_audio_transcription_untrusted",
+                            )
+                        )
                     )
                 user_transcript.clear()
                 assistant_transcript.clear()
+            outgoing = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
         except (json.JSONDecodeError, LookupError, ValueError):
             logger.warning("Ignored invalid realtime transcription memory")
-        await browser.send_text(text)
+        await browser.send_text(outgoing)
+        persistence_tasks = {task for task in persistence_tasks if not task.done()}
+    if persistence_tasks:
+        await asyncio.gather(*persistence_tasks)
 
 
 @app.websocket("/api/realtime")
 async def realtime_websocket(websocket: WebSocket) -> None:
-    session = interaction_store.get_session(_websocket_token(websocket))
+    session = await _interaction_call(interaction_store.get_session, _websocket_token(websocket))
     if session is None or not _websocket_origin_allowed(websocket):
         await websocket.close(code=4401)
         return
@@ -761,7 +876,8 @@ async def realtime_websocket(websocket: WebSocket) -> None:
             )
             await _wait_for_provider_setup(provider)
             if resume_handle is None:
-                memory_context = interaction_store.grounded_voice_context(
+                memory_context = await _interaction_call(
+                    interaction_store.grounded_voice_context,
                     session_id=session.session_id,
                     limit=settings.VOICE_MEMORY_CONTEXT_TURNS,
                 )
@@ -800,7 +916,7 @@ async def voice_chat(
     request: Request,
     file: UploadFile = File(...),
 ) -> VoiceChatResponse:
-    require_session(request)
+    await require_session(request)
     start_time = time.perf_counter()
     audio_bytes = await file.read(settings.MAX_AUDIO_BYTES + 1)
     if not audio_bytes:
@@ -883,13 +999,16 @@ manager = ConnectionManager()
 
 @app.websocket("/api/ws")
 async def event_websocket(websocket: WebSocket) -> None:
-    session = interaction_store.get_session(_websocket_token(websocket))
+    session = await _interaction_call(interaction_store.get_session, _websocket_token(websocket))
     if session is None or not _websocket_origin_allowed(websocket):
         await websocket.close(code=4401)
         return
     await manager.connect(session.session_id, websocket)
     try:
-        for event in interaction_store.recent_events(session_id=session.session_id):
+        events = await _interaction_call(
+            interaction_store.recent_events, session_id=session.session_id
+        )
+        for event in events:
             await websocket.send_json(event)
         while True:
             await websocket.receive_text()
@@ -912,7 +1031,7 @@ async def handle_agentic_webhook(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     try:
         event = AgentEvent.model_validate_json(body)
-        inserted = interaction_store.record_event(event)
+        inserted = await _interaction_call(interaction_store.record_event, event)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -935,7 +1054,8 @@ async def handle_agentic_webhook(request: Request) -> dict[str, str]:
             "rejected",
             "failed",
         }:
-            interaction_store.record_conversation_turn(
+            await _interaction_call(
+                interaction_store.record_conversation_turn,
                 session_id=event.session_id,
                 role="assistant",
                 text=event.user_safe_summary,
@@ -979,17 +1099,22 @@ async def _task_response_watchdog(
     task_id: str,
     request_id: str,
     session: InteractionSession,
+    delay_seconds: float | None = None,
 ) -> None:
     try:
-        await asyncio.sleep(settings.AGENTIC_TIMEOUT_SECONDS)
-        event = interaction_store.record_timeout(
+        await asyncio.sleep(
+            settings.AGENTIC_TIMEOUT_SECONDS if delay_seconds is None else max(0, delay_seconds)
+        )
+        event = await _interaction_call(
+            interaction_store.record_timeout,
             task_id=task_id,
             session_id=session.session_id,
             language=session.language,
         )
         if event is None:
             return
-        interaction_store.record_conversation_turn(
+        await _interaction_call(
+            interaction_store.record_conversation_turn,
             session_id=session.session_id,
             role="assistant",
             text=event.user_safe_summary,
@@ -1024,6 +1149,7 @@ def _schedule_task_watchdog(
     task_id: str,
     request_id: str,
     session: InteractionSession,
+    delay_seconds: float | None = None,
 ) -> None:
     _cancel_task_watchdog(task_id)
     task_watchdogs[task_id] = asyncio.create_task(
@@ -1031,14 +1157,34 @@ def _schedule_task_watchdog(
             task_id=task_id,
             request_id=request_id,
             session=session,
+            delay_seconds=delay_seconds,
         )
     )
 
 
+async def recover_task_watchdogs() -> None:
+    """Restore durable deadlines for tasks that survived an interaction restart."""
+
+    pending = await _interaction_call(
+        interaction_store.pending_task_watchdogs,
+        timeout_seconds=settings.AGENTIC_TIMEOUT_SECONDS,
+    )
+    now = time.time()
+    for item in pending:
+        _schedule_task_watchdog(
+            task_id=item.task_id,
+            request_id=item.request_id,
+            session=item.session,
+            delay_seconds=item.deadline_at - now,
+        )
+
+
 @app.post("/api/cancel-task", status_code=202)
 async def cancel_task(request: Request, payload: CancelTaskRequest) -> dict[str, Any]:
-    session = require_session(request)
-    task = interaction_store.get_task(task_id=payload.task_id, session_id=session.session_id)
+    session = await require_session(request)
+    task = await _interaction_call(
+        interaction_store.get_task, task_id=payload.task_id, session_id=session.session_id
+    )
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found in this session")
     if task.status in {
@@ -1070,7 +1216,8 @@ async def cancel_task(request: Request, payload: CancelTaskRequest) -> dict[str,
             detail="The task could not be cancelled yet. Please try again.",
         ) from exc
     _cancel_task_watchdog(task.task_id)
-    event = interaction_store.record_user_cancellation(
+    event = await _interaction_call(
+        interaction_store.record_user_cancellation,
         task_id=task.task_id,
         session_id=session.session_id,
         language=session.language,
@@ -1083,20 +1230,25 @@ async def cancel_task(request: Request, payload: CancelTaskRequest) -> dict[str,
 @app.post("/api/new-chat", response_model=SessionResponse)
 async def new_chat(request: Request, response: Response) -> SessionResponse:
     token = _session_token(request)
-    previous_session = require_session(request)
-    if interaction_store.get_active_task(session_id=previous_session.session_id) is not None:
+    previous_session = await require_session(request)
+    if await _interaction_call(
+        interaction_store.get_active_task, session_id=previous_session.session_id
+    ) is not None:
         raise HTTPException(status_code=409, detail="Cancel the active request first")
     # A new chat is a new memory and correlation namespace, not merely an empty
     # transcript in the existing session. Preserve only authenticated identity.
-    session, new_token = interaction_store.create_session(
+    session, new_token = await _interaction_call(
+        interaction_store.create_session,
         user_id=previous_session.user_id,
         tenant_id=previous_session.tenant_id,
         language=previous_session.language,
         scopes=previous_session.scopes,
         ttl_seconds=settings.SESSION_TTL_SECONDS,
     )
-    interaction_store.clear_conversation(session_id=previous_session.session_id)
-    interaction_store.revoke_session(token)
+    await _interaction_call(
+        interaction_store.clear_conversation, session_id=previous_session.session_id
+    )
+    await _interaction_call(interaction_store.revoke_session, token)
     realtime_resume_handles.pop(previous_session.session_id, None)
     _set_session_cookie(response, new_token)
     return _session_response(session, new_token)
@@ -1104,21 +1256,41 @@ async def new_chat(request: Request, response: Response) -> SessionResponse:
 
 @app.post("/api/submit-task", status_code=202)
 async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str, Any]:
-    session = require_session(request)
+    session = await require_session(request)
+    natural_language_request = payload.natural_language_request
+    if payload.source == "voice":
+        if payload.voice_evidence is None or payload.idempotency_key is None:
+            raise HTTPException(
+                status_code=422, detail="Signed voice transcript evidence is required"
+            )
+        try:
+            natural_language_request = _verify_voice_evidence(
+                payload.voice_evidence,
+                session_id=session.session_id,
+                call_id=payload.idempotency_key,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+    elif payload.voice_evidence is not None:
+        raise HTTPException(
+            status_code=422, detail="Voice evidence is only valid for voice requests"
+        )
     request_id = str(
         uuid5(NAMESPACE_URL, f"nafea:{session.session_id}:{payload.idempotency_key}")
         if payload.idempotency_key
         else uuid4()
     )
     try:
-        interaction_store.reserve_request(
+        await _interaction_call(
+            interaction_store.reserve_request,
             session_id=session.session_id,
             request_id=request_id,
-            natural_language_request=payload.natural_language_request,
+            natural_language_request=natural_language_request,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    existing = interaction_store.get_task_by_request(
+    existing = await _interaction_call(
+        interaction_store.get_task_by_request,
         request_id=request_id, session_id=session.session_id
     )
     if existing is not None:
@@ -1128,12 +1300,15 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
             "status": "accepted",
             "user_safe_message": "The existing financial task was returned.",
         }
-    if interaction_store.get_active_task(session_id=session.session_id) is not None:
+    if await _interaction_call(
+        interaction_store.get_active_task, session_id=session.session_id
+    ) is not None:
         raise HTTPException(
             status_code=409,
             detail="Finish the active financial task before starting another one",
         )
-    prior_user_statements = interaction_store.recent_user_statements(
+    prior_user_statements = await _interaction_call(
+        interaction_store.recent_user_statements,
         session_id=session.session_id,
         limit=settings.VOICE_MEMORY_CONTEXT_TURNS,
     )
@@ -1141,10 +1316,11 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
     # the tool argument too would store the same spoken turn twice. Chat has no
     # provider transcription, so it is persisted here instead.
     if payload.source == "chat":
-        interaction_store.record_conversation_turn(
+        await _interaction_call(
+            interaction_store.record_conversation_turn,
             session_id=session.session_id,
             role="user",
-            text=payload.natural_language_request,
+            text=natural_language_request,
             provenance="chat_user_message",
         )
     agentic_payload = {
@@ -1153,8 +1329,8 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
         "user_id": session.user_id,
         "tenant_id": session.tenant_id,
         "language": session.language,
-        "natural_language_request": payload.natural_language_request,
-        "original_user_message": payload.natural_language_request,
+        "natural_language_request": natural_language_request,
+        "original_user_message": natural_language_request,
         "authorization": {
             "scopes": list(session.scopes),
             "authenticated_at": session.authenticated_at,
@@ -1179,7 +1355,8 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
         if response.status_code != 202 or accepted.get("request_id") != request_id:
             raise ValueError("invalid agentic acceptance response")
         task_id = str(accepted["task_id"])
-        interaction_store.record_task(
+        await _interaction_call(
+            interaction_store.record_task,
             session_id=session.session_id, request_id=request_id, task_id=task_id
         )
         _schedule_task_watchdog(
@@ -1206,8 +1383,10 @@ async def submit_task(request: Request, payload: SubmitTaskRequest) -> dict[str,
 
 @app.post("/api/resume-task", status_code=202)
 async def resume_task(request: Request, payload: ResumeTaskRequest) -> dict[str, str]:
-    session = require_session(request)
-    task = interaction_store.get_task(task_id=payload.task_id, session_id=session.session_id)
+    session = await require_session(request)
+    task = await _interaction_call(
+        interaction_store.get_task, task_id=payload.task_id, session_id=session.session_id
+    )
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found in this session")
     event = task.pending_event
@@ -1234,7 +1413,8 @@ async def resume_task(request: Request, payload: ResumeTaskRequest) -> dict[str,
         if response.status_code != 202:
             response.raise_for_status()
             raise ValueError("unexpected resume response")
-        interaction_store.clear_pending(
+        await _interaction_call(
+            interaction_store.clear_pending,
             task_id=task.task_id,
             session_id=session.session_id,
             expected_event=event,
@@ -1258,8 +1438,10 @@ async def resume_task(request: Request, payload: ResumeTaskRequest) -> dict[str,
 
 @app.post("/api/confirm-task", status_code=202)
 async def confirm_task(request: Request, payload: ConfirmTaskRequest) -> dict[str, str]:
-    session = require_session(request)
-    task = interaction_store.get_task(task_id=payload.task_id, session_id=session.session_id)
+    session = await require_session(request)
+    task = await _interaction_call(
+        interaction_store.get_task, task_id=payload.task_id, session_id=session.session_id
+    )
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found in this session")
     event = task.pending_event
@@ -1281,7 +1463,8 @@ async def confirm_task(request: Request, payload: ConfirmTaskRequest) -> dict[st
             if response.status_code != 202:
                 response.raise_for_status()
                 raise ValueError("unexpected rejection response")
-            interaction_store.clear_pending(
+            await _interaction_call(
+                interaction_store.clear_pending,
                 task_id=task.task_id,
                 session_id=session.session_id,
                 expected_event=event,
@@ -1321,7 +1504,8 @@ async def confirm_task(request: Request, payload: ConfirmTaskRequest) -> dict[st
         if response.status_code != 202:
             response.raise_for_status()
             raise ValueError("unexpected confirmation response")
-        interaction_store.clear_pending(
+        await _interaction_call(
+            interaction_store.clear_pending,
             task_id=task.task_id,
             session_id=session.session_id,
             expected_event=event,

@@ -29,6 +29,9 @@ section 14. It is hidden from OpenAPI and returns `404` in production.
 - Authenticate the user before every submit or resume request.
 - Derive `user_id`, `tenant_id`, `session_id`, scopes, authentication time, and assurance level from
   trusted session/authentication state—not from user text or model output.
+- For realtime voice, derive the submitted financial request from the provider input transcript.
+  Bind that transcript to the authenticated session and provider tool-call ID with a short-lived
+  server HMAC; never submit a model-reconstructed request argument as the original user message.
 - Sign the exact HTTP request bytes with `INTERACTION_SHARED_SECRET`.
 - Verify signatures on every agent webhook before parsing or displaying it.
 - Preserve the original identity tuple across every resume call.
@@ -223,7 +226,8 @@ Event types:
 | `failed` | Present the safe failure summary and a support correlation using `task_id`. |
 
 Before acting on any event, verify that its `task_id`, `request_id`, and `session_id` match the
-mapping stored from task submission. Never route an event based on a user ID inside `details`.
+mapping stored from task submission. Reject event types outside the enumerated schema above. Never
+route an event based on a user ID inside `details`.
 
 ## 7. Clarification Flow
 
@@ -444,6 +448,9 @@ running → completed | partially_completed | rejected | failed
 any nonterminal state → expired
 ```
 
+Response deadlines must be recoverable from PostgreSQL when the interaction process starts. A
+process-local timer may provide prompt cancellation, but it must not be the only timeout record.
+
 The interaction layer should maintain one visible task card/message and update it from events rather
 than creating a new user-visible request for every event. A task can pause more than once. Never
 assume that a successful clarification or confirmation means the task is terminal.
@@ -454,6 +461,8 @@ assume that a successful clarification or confirmation means the task is termina
 - [ ] Webhooks are verified before JSON parsing and acknowledged only after durable storage.
 - [ ] Duplicate submissions reuse `request_id`; duplicate webhook events are idempotent.
 - [ ] Identity and scopes come exclusively from authenticated backend state.
+- [ ] Voice submissions use the signed provider transcript, not model-reconstructed request text.
+- [ ] Active response deadlines are restored after an interaction-service restart.
 - [ ] English and Arabic requests preserve the requested `language`.
 - [ ] Clarification questions are displayed and answers resume the same task/session.
 - [ ] Credential-like clarification questions are blocked/escalated.

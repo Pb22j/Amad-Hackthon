@@ -480,7 +480,10 @@ class AgentService:
         async with self.database.session() as session:
             repository = TaskRepository(session)
             clarifications = ClarificationRepository(session)
-            row = await repository.get(
+            # Serialize the waiting-state check, clarification/authorization
+            # handoff, and RUNNING transition. A competing resume waits here,
+            # then observes RUNNING and is rejected before invoking LangGraph.
+            row = await repository.get_for_update(
                 task_id_str, tenant_id=request.tenant_id, user_id=request.user_id
             )
             if row is None or row.session_id != str(request.session_id):

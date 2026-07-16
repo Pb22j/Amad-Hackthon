@@ -133,6 +133,22 @@ class TaskRepository:
         )
         return await self.session.scalar(statement)
 
+    async def get_for_update(
+        self, task_id: str, *, tenant_id: str, user_id: str
+    ) -> AgentTaskRow | None:
+        """Lock one task until the surrounding transaction commits or rolls back."""
+
+        statement = (
+            select(AgentTaskRow)
+            .where(
+                AgentTaskRow.id == task_id,
+                AgentTaskRow.tenant_id == tenant_id,
+                AgentTaskRow.user_id == user_id,
+            )
+            .with_for_update()
+        )
+        return await self.session.scalar(statement)
+
     async def get_by_request(self, request_id: str, tenant_id: str) -> AgentTaskRow | None:
         statement = select(AgentTaskRow).where(
             AgentTaskRow.request_id == request_id,

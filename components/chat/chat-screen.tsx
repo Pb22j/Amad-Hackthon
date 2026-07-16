@@ -664,12 +664,14 @@ export function ChatScreen() {
     request: string,
     idempotencyKey: string,
     optimisticMessageId?: string,
-    source: "chat" | "voice" = "chat"
+    source: "chat" | "voice" = "chat",
+    voiceEvidence?: string
   ): Promise<AcceptedTask> {
     const accepted = await nafeaPost<AcceptedTask>("/api/submit-task", {
       natural_language_request: request,
       idempotency_key: idempotencyKey,
       source,
+      ...(voiceEvidence ? { voice_evidence: voiceEvidence } : {}),
     });
     registerAcceptedTask(accepted, optimisticMessageId);
     return accepted;
@@ -689,8 +691,14 @@ export function ChatScreen() {
     realtimeFinancialActionRef.current = true;
     try {
       if (name === "submit_financial_task") {
-        const request = call.args?.request_details;
-        if (typeof request !== "string" || !request.trim()) throw new Error("invalid request");
+        const request = call.args?.voice_transcript;
+        const voiceEvidence = call.args?.voice_evidence;
+        if (
+          typeof request !== "string" ||
+          !request.trim() ||
+          typeof voiceEvidence !== "string" ||
+          !voiceEvidence
+        ) throw new Error("invalid signed voice transcript");
         if (currentTaskIdRef.current) {
           return {
             status: "already_processing",
@@ -701,7 +709,8 @@ export function ChatScreen() {
           request,
           call.id || newRequestKey(),
           undefined,
-          "voice"
+          "voice",
+          voiceEvidence
         );
         return { ...accepted };
       }

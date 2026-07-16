@@ -40,7 +40,7 @@ from agentic.tools.wallet_funding import (
     preflight_fund_nafi_wallet,
     source_account_is_grounded,
 )
-from agentic.tools.runtime_identity import bind_tool_identity
+from agentic.tools.runtime_identity import bind_tool_identity, bind_tool_operation
 from VoiceAssistant_Nafea.backend.app.dashboard import (
     DashboardStore,
     DepositAccountNotFound,
@@ -162,6 +162,48 @@ async def test_balance_and_transaction_search_are_bank_backed():
     assert transactions.status == "completed"
     assert transactions.data["transactions"]
     assert all("راتب" in item["description"] for item in transactions.data["transactions"])
+
+
+async def test_provider_operation_result_reconciles_after_execution_recording_crash():
+    database_url = os.environ["BANK_DATABASE_URL"]
+    with psycopg.connect(database_url) as connection:
+        before = connection.execute(
+            "SELECT nafi_balance FROM users WHERE username = 'evaluation-user'"
+        ).fetchone()[0]
+
+    with bind_tool_identity(user_id="evaluation-user", tenant_id="evaluation-tenant"):
+        with bind_tool_operation(
+            idempotency_key="reconciliation-test-key",
+            tool_name="transfer_between_accounts",
+        ):
+            first = _validated(
+                await transfer_between_accounts(
+                    destination_account="لطيفة", amount=Decimal("10.00")
+                )
+            )
+        # Simulate a new worker retrying after the provider committed but the
+        # application tool_execution row was never completed.
+        with bind_tool_operation(
+            idempotency_key="reconciliation-test-key",
+            tool_name="transfer_between_accounts",
+        ):
+            recovered = _validated(
+                await transfer_between_accounts(
+                    destination_account="لطيفة", amount=Decimal("10.00")
+                )
+            )
+
+    assert recovered == first
+    with psycopg.connect(database_url) as connection:
+        after = connection.execute(
+            "SELECT nafi_balance FROM users WHERE username = 'evaluation-user'"
+        ).fetchone()[0]
+        result_count = connection.execute(
+            "SELECT count(*) FROM financial_operation_results"
+            " WHERE idempotency_key = 'reconciliation-test-key'"
+        ).fetchone()[0]
+    assert after == before - Decimal("10.00")
+    assert result_count == 1
 
 
 async def test_agentic_wallet_funding_preflights_and_moves_only_selected_bank_money():

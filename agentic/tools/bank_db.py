@@ -18,6 +18,7 @@ from typing import Any, TypeVar
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict
 
 from agentic.tools.entity_resolution import (
@@ -26,7 +27,7 @@ from agentic.tools.entity_resolution import (
     normalize_entity_text,
     resolve_entity,
 )
-from agentic.tools.runtime_identity import current_tool_identity
+from agentic.tools.runtime_identity import current_tool_identity, current_tool_operation
 
 T = TypeVar("T")
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -277,7 +278,42 @@ def month_bounds(month: str) -> tuple[str, str]:
 def _transaction(connection: BankConnection, work: Callable[[BankConnection], T]) -> T:
     connection.execute("BEGIN")
     try:
+        operation = current_tool_operation()
+        identity = current_tool_identity()
+        if operation is not None:
+            if identity is None:
+                raise RuntimeError("provider reconciliation requires authenticated identity")
+            idempotency_key, tool_name = operation
+            user_id, tenant_id = identity
+            # The lock spans the financial mutation and result record. Concurrent
+            # retries wait, then replay the committed result; a crashed transaction
+            # releases the lock and rolls back both mutation and result.
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (idempotency_key,),
+            )
+            existing = connection.execute(
+                "SELECT tenant_id, user_id, tool_name, result"
+                " FROM financial_operation_results WHERE idempotency_key = %s",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["tenant_id"] != tenant_id
+                    or existing["user_id"] != user_id
+                    or existing["tool_name"] != tool_name
+                ):
+                    raise PermissionError("provider idempotency key identity mismatch")
+                connection.execute("COMMIT")
+                return existing["result"]
         result = work(connection)
+        if operation is not None:
+            connection.execute(
+                "INSERT INTO financial_operation_results"
+                " (idempotency_key, tenant_id, user_id, tool_name, result)"
+                " VALUES (%s, %s, %s, %s, %s)",
+                (idempotency_key, tenant_id, user_id, tool_name, Jsonb(result)),
+            )
         connection.execute("COMMIT")
         return result
     except Exception:
@@ -294,6 +330,7 @@ def _ensure_ready(url: str) -> None:
             connection.execute("SELECT nafi_balance FROM users LIMIT 1")
             connection.execute("SELECT 1 FROM bank_accounts LIMIT 1")
             connection.execute("SELECT 1 FROM transactions LIMIT 1")
+            connection.execute("SELECT 1 FROM financial_operation_results LIMIT 1")
         finally:
             connection.close()
         _checked_urls.add(url)

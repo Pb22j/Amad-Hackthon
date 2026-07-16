@@ -32,7 +32,7 @@ from agentic.security.confirmation import ConfirmationSigner, arguments_hash
 from agentic.security.identity import AuthContext
 from agentic.security.redaction import redact
 from agentic.tools.metadata import ToolMetadata, ToolResult
-from agentic.tools.runtime_identity import bind_tool_identity
+from agentic.tools.runtime_identity import bind_tool_identity, bind_tool_operation
 from agentic.telemetry.metrics import TOOL_CALLS, TOOL_DURATION
 
 
@@ -661,6 +661,7 @@ class GuardedToolFactory:
                 ).hexdigest()[:24]
             )
             key = _idempotency_key(context.task_id, metadata.name, arguments)
+            recovering_execution_id: str | None = None
 
             # Stage 2: converge retries/replays before any external side effect.
             async with context.session_factory() as session:
@@ -671,16 +672,22 @@ class GuardedToolFactory:
                 if existing is not None:
                     if existing.status == "completed":
                         return json.dumps(existing.result or {}, ensure_ascii=False)
-                    return json.dumps(
-                        {
-                            "status": "unknown",
-                            "summary": "An execution with this idempotency key is already in progress.",
-                            "operation_id": existing.operation_id,
-                        }
-                    )
+                    if existing.status == "started" and metadata.idempotent:
+                        # Authorization was already consumed. Re-enter only a
+                        # provider that contractually supports this key: it will
+                        # replay a committed result or perform a rolled-back call.
+                        recovering_execution_id = existing.id
+                    else:
+                        return json.dumps(
+                            {
+                                "status": "unknown",
+                                "summary": "An execution with this idempotency key cannot be safely reconciled.",
+                                "operation_id": existing.operation_id,
+                            }
+                        )
 
             token = context.initial_authorization_token
-            if metadata.requires_confirmation:
+            if recovering_execution_id is None and metadata.requires_confirmation:
                 # A clarification resume and confirmation interrupt cannot safely
                 # share one LangGraph tool invocation: the prior answer can be
                 # replayed into the next interrupt. Return control to the model
@@ -717,46 +724,52 @@ class GuardedToolFactory:
                     tool_name=metadata.name,
                     arguments=arguments,
                 )
-            else:
+            elif recovering_execution_id is None:
                 claims = None
 
             # Stage 3: consume a single-use authorization and durably record the
             # execution before calling the teammate-owned implementation.
-            async with context.session_factory() as session:
-                if claims:
-                    await AuthorizationRepository(session).consume(claims)
-                await AuditRepository(session).record(
-                    task_id=context.task_id,
-                    tenant_id=context.auth.tenant_id,
-                    user_id=context.auth.user_id,
-                    category="tool_authorization",
-                    decision="allowed",
-                    reason_code="scopes_and_confirmation_valid",
-                    details={
-                        "tool_name": metadata.name,
-                        "arguments_hash": arguments_hash(arguments),
-                    },
-                )
-                execution, created = await ToolExecutionRepository(session).start(
-                    task_id=context.task_id,
-                    tenant_id=context.auth.tenant_id,
-                    tool_call_id=tool_call_id,
-                    tool_name=metadata.name,
-                    arguments=redact(arguments),
-                    idempotency_key=key,
-                )
-                await session.commit()
-                if not created:
-                    if execution.status == "completed":
-                        return json.dumps(execution.result or {}, ensure_ascii=False)
-                    return json.dumps(
-                        {
-                            "status": "unknown",
-                            "summary": "An execution with this idempotency key is already in progress.",
-                            "operation_id": execution.operation_id,
-                        }
+            if recovering_execution_id is None:
+                async with context.session_factory() as session:
+                    if claims:
+                        await AuthorizationRepository(session).consume(claims)
+                    await AuditRepository(session).record(
+                        task_id=context.task_id,
+                        tenant_id=context.auth.tenant_id,
+                        user_id=context.auth.user_id,
+                        category="tool_authorization",
+                        decision="allowed",
+                        reason_code="scopes_and_confirmation_valid",
+                        details={
+                            "tool_name": metadata.name,
+                            "arguments_hash": arguments_hash(arguments),
+                        },
                     )
-                execution_id = execution.id
+                    execution, created = await ToolExecutionRepository(session).start(
+                        task_id=context.task_id,
+                        tenant_id=context.auth.tenant_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=metadata.name,
+                        arguments=redact(arguments),
+                        idempotency_key=key,
+                    )
+                    await session.commit()
+                    if not created:
+                        if execution.status == "completed":
+                            return json.dumps(execution.result or {}, ensure_ascii=False)
+                        if execution.status == "started" and metadata.idempotent:
+                            recovering_execution_id = execution.id
+                        else:
+                            return json.dumps(
+                                {
+                                    "status": "unknown",
+                                    "summary": "An execution with this idempotency key cannot be safely reconciled.",
+                                    "operation_id": execution.operation_id,
+                                }
+                            )
+                    execution_id = execution.id
+            else:
+                execution_id = recovering_execution_id
 
             try:
                 tool_started = time.monotonic()
@@ -774,7 +787,14 @@ class GuardedToolFactory:
                             user_id=context.auth.user_id,
                             tenant_id=context.auth.tenant_id,
                         ):
-                            raw_result = await external_tool.ainvoke(arguments)
+                            if metadata.idempotent:
+                                with bind_tool_operation(
+                                    idempotency_key=key,
+                                    tool_name=metadata.name,
+                                ):
+                                    raw_result = await external_tool.ainvoke(arguments)
+                            else:
+                                raw_result = await external_tool.ainvoke(arguments)
                         break
                     except Exception as exc:
                         last_error = exc
@@ -793,7 +813,7 @@ class GuardedToolFactory:
                 TOOL_CALLS.labels(tool=metadata.name, outcome="failed").inc()
                 async with context.session_factory() as session:
                     row = await session.get(ToolExecutionRow, execution_id)
-                    if row is not None:
+                    if row is not None and recovering_execution_id is None:
                         await ToolExecutionRepository(session).complete(
                             row,
                             status="failed",

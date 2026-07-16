@@ -153,6 +153,19 @@ class ToolExecutionRow(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class FinancialOperationResultRow(Base):
+    """Provider-side result committed atomically with a financial operation."""
+
+    __tablename__ = "financial_operation_results"
+
+    idempotency_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class MemoryItemRow(Base):
     __tablename__ = "memory_items"
     __table_args__ = (

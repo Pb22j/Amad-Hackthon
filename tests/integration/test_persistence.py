@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,6 +24,39 @@ async def test_task_creation_is_idempotent_per_tenant(database, agentic_request)
         first = await repository.create(agentic_request, config_hash="a" * 64)
         second = await repository.create(agentic_request, config_hash="a" * 64)
         assert first.id == second.id
+
+
+@pytest.mark.integration
+async def test_task_for_update_serializes_competing_resume_transactions(
+    database, agentic_request
+):
+    async with database.session() as session:
+        task = await TaskRepository(session).create(agentic_request, config_hash="a" * 64)
+        task.status = TaskStatus.WAITING_FOR_CONFIRMATION.value
+
+    async with database.session_factory() as first_session, database.session_factory() as second_session:
+        first = await TaskRepository(first_session).get_for_update(
+            task.id,
+            tenant_id=agentic_request.tenant_id,
+            user_id=agentic_request.user_id,
+        )
+        assert first is not None
+        competing = asyncio.create_task(
+            TaskRepository(second_session).get_for_update(
+                task.id,
+                tenant_id=agentic_request.tenant_id,
+                user_id=agentic_request.user_id,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not competing.done()
+
+        first.status = TaskStatus.RUNNING.value
+        await first_session.commit()
+        second = await asyncio.wait_for(competing, timeout=1)
+        assert second is not None
+        assert second.status == TaskStatus.RUNNING.value
+        await second_session.rollback()
 
 
 @pytest.mark.integration

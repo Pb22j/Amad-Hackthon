@@ -125,7 +125,10 @@ def gemini_setup(
                             "properties": {
                                 "request_details": {
                                     "type": "STRING",
-                                    "description": "The user's complete financial request without invented details.",
+                                    "description": (
+                                        "A routing hint only. The interaction server replaces this "
+                                        "with the signed provider transcript before submission."
+                                    ),
                                 }
                             },
                             "required": ["request_details"],

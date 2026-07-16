@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -17,6 +18,7 @@ from app.config import settings
 from app.config import Settings
 from app.interaction import AgentEvent, InteractionStore, sign_message
 from app.main import (
+    _issue_voice_evidence,
     _relay_browser_to_provider,
     _relay_provider_to_browser,
     _wait_for_provider_setup,
@@ -104,6 +106,33 @@ def test_session_token_authenticates_cross_origin_http_requests():
     assert response.json() == {"active_task": None}
 
 
+def test_active_task_deadline_can_be_recovered_from_postgres_after_restart():
+    store = InteractionStore(settings.INTERACTION_DATABASE_URL, encryption_key="r" * 32)
+    session, _token = store.create_session(
+        user_id=f"restart-{uuid4()}",
+        tenant_id="evaluation-tenant",
+        language="en",
+        scopes=("financial:read",),
+        ttl_seconds=300,
+    )
+    request_id = str(uuid4())
+    task_id = str(uuid4())
+    store.reserve_request(
+        session_id=session.session_id,
+        request_id=request_id,
+        natural_language_request="Show my balance",
+    )
+    store.record_task(session_id=session.session_id, request_id=request_id, task_id=task_id)
+
+    recovered = {
+        item.task_id: item for item in store.pending_task_watchdogs(timeout_seconds=20)
+    }
+
+    assert recovered[task_id].request_id == request_id
+    assert recovered[task_id].session.session_id == session.session_id
+    assert time.time() < recovered[task_id].deadline_at <= time.time() + 20.5
+
+
 def test_session_is_reused_across_reload_and_language_change():
     with TestClient(app) as isolated:
         first = isolated.post(
@@ -177,6 +206,23 @@ def test_signed_webhook_is_not_blocked_by_browser_rate_limit():
     assert response.status_code != 429
 
 
+def test_signed_webhook_rejects_unknown_agent_event_type():
+    session = create_session()
+    response = webhook(
+        {
+            "task_id": str(uuid4()),
+            "request_id": str(uuid4()),
+            "session_id": session["session_id"],
+            "event_type": "mystery_status",
+            "user_safe_summary": "Unknown",
+            "details": {},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    assert response.status_code == 422
+
+
 @patch("app.main._agentic_post", new_callable=AsyncMock)
 def test_submit_uses_server_owned_session_identity(mock_post):
     session = create_session("en")
@@ -220,18 +266,51 @@ def test_chat_and_voice_feed_the_same_agentic_conversation_context(mock_post):
     ).status_code == 200
     response = client.post(
         "/api/submit-task",
-        json={"natural_language_request": "Transfer 50 to Sara", "source": "voice"},
+        json={
+            "natural_language_request": "MODEL CHANGED THIS TO 5000",
+            "source": "voice",
+            "idempotency_key": "voice-call-1",
+            "voice_evidence": _issue_voice_evidence(
+                session_id=session["session_id"],
+                call_id="voice-call-1",
+                transcript="Transfer 50 to Sara",
+            ),
+        },
     )
 
     assert response.status_code == 202
     sent = mock_post.await_args.args[1]
     assert sent["metadata"]["source_provider"] == "nafea-voice"
+    assert sent["natural_language_request"] == "Transfer 50 to Sara"
     assert sent["metadata"]["conversation_user_statements"] == [
         "Use my savings account",
     ]
     assert interaction_store.recent_user_statements(session_id=session["session_id"]) == [
         "Use my savings account"
     ]
+
+
+@patch("app.main._agentic_post", new_callable=AsyncMock)
+def test_voice_evidence_is_bound_to_session_and_tool_call(mock_post):
+    session = create_session("en")
+    evidence = _issue_voice_evidence(
+        session_id=session["session_id"],
+        call_id="actual-call",
+        transcript="Transfer 50 to Sara",
+    )
+
+    response = client.post(
+        "/api/submit-task",
+        json={
+            "natural_language_request": "Transfer 5000 to someone else",
+            "source": "voice",
+            "idempotency_key": "different-call",
+            "voice_evidence": evidence,
+        },
+    )
+
+    assert response.status_code == 403
+    mock_post.assert_not_awaited()
 
 
 @patch("app.main._agentic_post", new_callable=AsyncMock)
@@ -1007,7 +1086,16 @@ async def test_realtime_transcriptions_are_captured_as_grounded_session_memory()
                                 "inputTranscription": {"text": "Prefer Arabic reports"},
                                 "outputTranscription": {"text": "Your balance might be 5 SAR"},
                                 "turnComplete": True,
-                            }
+                            },
+                            "toolCall": {
+                                "functionCalls": [
+                                    {
+                                        "id": "voice-tool-1",
+                                        "name": "submit_financial_task",
+                                        "args": {"request_details": "MODEL RECONSTRUCTION"},
+                                    }
+                                ]
+                            },
                         }
                     )
                 ]
@@ -1032,3 +1120,8 @@ async def test_realtime_transcriptions_are_captured_as_grounded_session_memory()
     assert context["explicit_user_statements_untrusted"] == ["Prefer Arabic reports"]
     assert "balance might" not in json.dumps(context)
     assert len(browser.sent) == 1
+    forwarded = json.loads(browser.sent[0])
+    args = forwarded["toolCall"]["functionCalls"][0]["args"]
+    assert args["voice_transcript"] == "Prefer Arabic reports"
+    assert "voice_evidence" in args
+    assert "request_details" not in args

@@ -13,6 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -27,11 +28,21 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AgentEventType(StrEnum):
+    ACCEPTED = "accepted"
+    PROGRESS = "progress"
+    INPUT_NEEDED = "input_needed"
+    CONFIRMATION_NEEDED = "confirmation_needed"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    REJECTED = "rejected"
+
+
 class AgentEvent(StrictModel):
     task_id: str
     request_id: str
     session_id: str
-    event_type: str
+    event_type: AgentEventType
     user_safe_summary: str = Field(max_length=1000)
     details: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
@@ -55,6 +66,14 @@ class TaskBinding:
     session_id: str
     status: str
     pending_event: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingTaskWatchdog:
+    task_id: str
+    request_id: str
+    session: InteractionSession
+    deadline_at: float
 
 
 class _PostgresRow:
@@ -519,6 +538,46 @@ class InteractionStore:
         if row is None:
             return None
         return self.get_task(task_id=row["task_id"], session_id=session_id)
+
+    def pending_task_watchdogs(self, *, timeout_seconds: float) -> list[PendingTaskWatchdog]:
+        """Rebuild response deadlines for active work after a service restart."""
+
+        with self._lock:
+            connection = self._connect()
+            try:
+                rows = connection.execute(
+                    """
+                    SELECT t.task_id, t.request_id, t.updated_at,
+                           s.session_id, s.user_id, s.tenant_id, s.language,
+                           s.scopes_json, s.authenticated_at, s.expires_at
+                    FROM interaction_tasks AS t
+                    JOIN interaction_sessions AS s ON s.session_id = t.session_id
+                    WHERE t.status NOT IN (
+                        'input_needed', 'confirmation_needed', 'completed',
+                        'partially_completed', 'rejected', 'failed', 'timed_out'
+                    )
+                    ORDER BY t.updated_at
+                    """
+                ).fetchall()
+            finally:
+                self._close(connection)
+        return [
+            PendingTaskWatchdog(
+                task_id=row["task_id"],
+                request_id=row["request_id"],
+                session=InteractionSession(
+                    session_id=row["session_id"],
+                    user_id=row["user_id"],
+                    tenant_id=row["tenant_id"],
+                    language=row["language"],
+                    scopes=tuple(json.loads(row["scopes_json"])),
+                    authenticated_at=row["authenticated_at"],
+                    expires_at=row["expires_at"],
+                ),
+                deadline_at=row["updated_at"] + timeout_seconds,
+            )
+            for row in rows
+        ]
 
     def record_event(self, event: AgentEvent) -> bool:
         payload = event.model_dump_json()
