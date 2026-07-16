@@ -20,8 +20,8 @@ tools:
     # ownership, beneficiary membership, balance, and daily spend limit.
     risk: write
     intents: [saved_beneficiary_transfer, money_transfer]
-    # Hackathon UX: the model may resolve a user-stated beneficiary name to an
-    # account number from list_beneficiaries. Database preflight still limits
+    # Hackathon UX: the model may resolve a user-stated beneficiary name to a
+    # Nafi IBAN from list_beneficiaries. Database preflight still limits
     # the destination to this user's saved Nafi beneficiary list.
     explicit_user_fields: [destination_account, amount]
     required_scopes: [financial:write]
@@ -30,6 +30,17 @@ tools:
     requires_owner_metadata: true
     idempotent: true
     max_calls_per_task: 8
+  fund_nafi_wallet:
+    # The guard preflights ownership and bank balance before asking for OTP.
+    risk: financial_action
+    intents: [wallet_funding]
+    explicit_user_fields: [source_account, amount]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 3
   analyze_finances:
     risk: sensitive_read
     intents: [financial_calculation, account_information, transaction_search]
@@ -110,7 +121,7 @@ tools:
     max_calls_per_task: 3
   get_balance:
     risk: sensitive_read
-    intents: [account_information]
+    intents: [account_information, wallet_funding]
     required_scopes: [financial:read]
     requires_owner_metadata: true
     max_calls_per_task: 3
@@ -192,6 +203,9 @@ tools:
 # Agentic layer search authoritative user data before it can conclude that an
 # approximate entity name is absent or proceed to a confirmed action.
 workflows:
+  wallet_funding:
+    - get_balance
+    - fund_nafi_wallet
   saved_beneficiary_transfer:
     - list_beneficiaries
     - transfer_between_accounts

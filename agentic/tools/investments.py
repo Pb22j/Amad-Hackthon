@@ -21,7 +21,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
-    update_account_balance,
+    update_nafi_balance,
 )
 
 
@@ -166,14 +166,14 @@ async def _trade(*, symbol: str, quantity: float | Decimal, side: str) -> dict[s
             "SELECT * FROM investment_holdings WHERE user_uuid = %s AND symbol = %s",
             (user["uuid"], normalized_symbol),
         ).fetchone()
-        balance = money(user["Balance_SAR"])
+        balance = money(user["nafi_balance"])
         now = timestamp()
         reference = next_reference(connection, f"investment-{side}")
         if side == "buy":
             if total > balance:
                 return tool_result(
                     status="failed",
-                    summary="The available balance is insufficient for this purchase.",
+                    summary="The available Nafi wallet balance is insufficient for this purchase.",
                     data={"required_sar": str(total), "available_balance_sar": str(balance)},
                     error_code="insufficient_funds",
                 )
@@ -233,14 +233,14 @@ async def _trade(*, symbol: str, quantity: float | Decimal, side: str) -> dict[s
                 (float(new_quantity), now, holding["uuid"]),
             )
             direction, transaction_type = "credit", "investment_sell"
-        update_account_balance(connection, user, balance_after)
+        update_nafi_balance(connection, user, balance_after)
         connection.execute(
             "INSERT INTO transactions (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR, Counterparty_Name, Counterparty_Account, Description, Category, Balance_After_SAR, Reference, createdAt)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s, 'استثمار', %s, %s, %s)",
             (
                 str(uuid4()),
                 user["uuid"],
-                user["Account_Number"],
+                user["nafi_iban"],
                 direction,
                 transaction_type,
                 float(total),
@@ -263,6 +263,7 @@ async def _trade(*, symbol: str, quantity: float | Decimal, side: str) -> dict[s
                 "unit_price_sar": str(price),
                 "total_sar": str(total),
                 "remaining_quantity": _quantity_text(new_quantity),
+                "new_nafi_balance_sar": str(balance_after),
                 "new_balance_sar": str(balance_after),
                 "executed_at": now,
             },
@@ -283,7 +284,8 @@ BUY_INVESTMENT_TOOL: BaseTool = StructuredTool.from_function(
     coroutine=buy_investment,
     name="buy_investment",
     description=(
-        "Buy a quantity of a supported demo investment after exact confirmation and OTP. "
+        "Buy a quantity of a supported demo investment using only the Nafi wallet balance "
+        "after exact confirmation and OTP. "
         "Supported assets are ARAMCO (2222/أرامكو), ALRAJHI (1120/الراجحي), "
         "and SABIC (2010/سابك)."
     ),
@@ -293,7 +295,8 @@ SELL_INVESTMENT_TOOL: BaseTool = StructuredTool.from_function(
     coroutine=sell_investment,
     name="sell_investment",
     description=(
-        "Sell a held quantity of a demo investment after exact confirmation and OTP. "
+        "Sell a held quantity of a demo investment and credit proceeds only to the Nafi wallet "
+        "after exact confirmation and OTP. "
         "Supported assets are ARAMCO (2222/أرامكو), ALRAJHI (1120/الراجحي), "
         "and SABIC (2010/سابك)."
     ),

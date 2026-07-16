@@ -1,6 +1,7 @@
 financial_actions:
   require_exact_confirmation:
     - transfer_between_accounts
+    - fund_nafi_wallet
     - add_benefit
     - send_gift
     - pay_fatoorah
@@ -15,6 +16,7 @@ financial_actions:
     - add_beneficiary
   require_authoritative_receipt:
     - transfer_between_accounts
+    - fund_nafi_wallet
     - send_gift
     - pay_fatoorah
     - create_qatta

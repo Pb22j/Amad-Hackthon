@@ -11,6 +11,7 @@ from agentic.policy.models import Intent, IntentClassification, RiskAssessment, 
 
 HIGH_RISK_INTENTS = {
     Intent.MONEY_TRANSFER,
+    Intent.WALLET_FUNDING,
     Intent.SAVED_BENEFICIARY_TRANSFER,
     Intent.GIFT_TRANSFER,
     Intent.BILL_PAYMENT,

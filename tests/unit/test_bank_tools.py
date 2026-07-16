@@ -34,7 +34,19 @@ from agentic.tools.transfer_between_accounts import (
     preflight_transfer_between_accounts,
     transfer_between_accounts,
 )
+from agentic.tools.wallet_funding import (
+    FundNafiWalletArgs,
+    fund_nafi_wallet,
+    preflight_fund_nafi_wallet,
+    source_account_is_grounded,
+)
 from agentic.tools.runtime_identity import bind_tool_identity
+from VoiceAssistant_Nafea.backend.app.dashboard import (
+    DashboardStore,
+    DepositAccountNotFound,
+    DepositInsufficientFunds,
+    DepositRequestConflict,
+)
 
 # Seeded Nafi identities (see scripts/seed_postgres.py).
 EVALUATION_NAFI_IBAN = "SA9900000000000000000001"
@@ -124,10 +136,24 @@ def test_transfer_provider_schema_uses_plain_number_with_server_side_limits():
         TransferBetweenAccountsArgs(destination_account="Ahmed", amount=float("inf"))
 
 
+def test_wallet_funding_provider_schema_uses_plain_number_with_server_side_limits():
+    amount_schema = FundNafiWalletArgs.model_json_schema()["properties"]["amount"]
+    assert amount_schema["type"] == "number"
+    assert "exclusiveMinimum" not in amount_schema
+    assert "maximum" not in amount_schema
+
+    with pytest.raises(ValueError):
+        FundNafiWalletArgs(source_account="Savings", amount=0)
+    with pytest.raises(ValueError):
+        FundNafiWalletArgs(source_account="Savings", amount=float("inf"))
+
+
 async def test_balance_and_transaction_search_are_bank_backed():
     balance = _validated(await get_balance())
     assert balance.status == "completed"
     assert balance.data["balance_sar"] == "25431.50"
+    assert balance.data["nafi_balance_sar"] == "25431.50"
+    assert balance.data["spendable_balance_sar"] == "25431.50"
     assert balance.data["total_balance_sar"] == "29631.50"
     assert len(balance.data["accounts"]) == 2
     assert "*" in balance.data["masked_account_number"]
@@ -136,6 +162,185 @@ async def test_balance_and_transaction_search_are_bank_backed():
     assert transactions.status == "completed"
     assert transactions.data["transactions"]
     assert all("راتب" in item["description"] for item in transactions.data["transactions"])
+
+
+async def test_agentic_wallet_funding_preflights_and_moves_only_selected_bank_money():
+    database_url = os.environ["BANK_DATABASE_URL"]
+    with psycopg.connect(database_url) as connection:
+        before_rows = connection.execute(
+            """
+            SELECT a.uuid::text, a.account_type, a.balance_sar, u.nafi_balance
+              FROM users u JOIN bank_accounts a ON a.user_uuid = u.uuid
+             WHERE u.username = 'evaluation-user'
+             ORDER BY a.is_primary DESC
+            """
+        ).fetchall()
+    primary_id, _, primary_before, wallet_before = before_rows[0]
+    savings_id, _, savings_before, _ = before_rows[1]
+
+    preview = _validated(await preflight_fund_nafi_wallet("Savings", Decimal("75.25")))
+    result = _validated(await fund_nafi_wallet("Savings", Decimal("75.25")))
+
+    assert preview.status == "completed"
+    assert preview.data["resolved_source"]["account_type"] == "Savings"
+    assert result.status == "completed"
+    assert result.receipt_id
+    assert result.data["source_bank_balance_sar"] == "4124.75"
+    assert result.data["new_nafi_balance_sar"] == "25506.75"
+    with psycopg.connect(database_url) as connection:
+        balances = dict(
+            connection.execute(
+                "SELECT uuid::text, balance_sar FROM bank_accounts WHERE uuid IN (%s, %s)",
+                (primary_id, savings_id),
+            ).fetchall()
+        )
+        wallet_after = connection.execute(
+            "SELECT nafi_balance FROM users WHERE username = 'evaluation-user'"
+        ).fetchone()[0]
+        ledger = connection.execute(
+            "SELECT transaction_type FROM transactions WHERE reference = %s",
+            (result.data["reference"],),
+        ).fetchall()
+    assert balances[primary_id] == primary_before
+    assert balances[savings_id] == savings_before - Decimal("75.25")
+    assert wallet_after == wallet_before + Decimal("75.25")
+    assert {row[0] for row in ledger} == {"nafi_top_up_source", "nafi_top_up"}
+
+
+async def test_agentic_wallet_funding_rejects_ambiguous_or_insufficient_sources():
+    ambiguous = _validated(await preflight_fund_nafi_wallet("مصرف", Decimal("1.00")))
+    insufficient = _validated(await preflight_fund_nafi_wallet("Savings", Decimal("999999")))
+
+    assert ambiguous.status == "failed"
+    assert ambiguous.error_code == "source_account_ambiguous"
+    assert len(ambiguous.data["candidates"]) == 2
+    assert insufficient.status == "failed"
+    assert insufficient.error_code == "insufficient_bank_funds"
+
+
+@pytest.mark.parametrize(
+    "spoken_alias",
+    ("bank alahli", "Al Ahli", "الاهلي", "الأهلي", "البنك الاهلي"),
+)
+async def test_wallet_funding_resolves_spoken_alahli_alias_from_owned_accounts(
+    spoken_alias: str,
+):
+    with bind_tool_identity(user_id="admin", tenant_id="evaluation-tenant"):
+        balance = _validated(await get_balance(account=spoken_alias))
+        preview = _validated(
+            await preflight_fund_nafi_wallet(spoken_alias, Decimal("1.00"))
+        )
+
+    assert balance.status == "completed"
+    assert balance.data["bank_name"] == "البنك الأهلي السعودي"
+    assert preview.status == "completed"
+    assert preview.data["resolved_source"]["bank_name"] == "Saudi National Bank"
+
+
+async def test_wallet_funding_asks_when_spoken_generic_bank_reference_matches_multiple_accounts():
+    preview = _validated(
+        await preflight_fund_nafi_wallet("bank", Decimal("1.00"))
+    )
+
+    assert preview.status == "failed"
+    assert preview.error_code == "source_account_ambiguous"
+    assert len(preview.data["candidates"]) == 2
+
+
+async def test_wallet_funding_binds_canonical_primary_to_spoken_owned_bank_alias():
+    with bind_tool_identity(user_id="admin", tenant_id="evaluation-tenant"):
+        grounded = await source_account_is_grounded(
+            "primary",
+            ("هلا نافع بالله ضف 700 ريال لمحفظتي من حسابي في الاهلي",),
+        )
+        unrelated = await source_account_is_grounded(
+            "primary",
+            ("أودع 700 ريال من مصرف الراجحي",),
+        )
+
+    assert grounded is True
+    assert unrelated is False
+
+
+def test_dashboard_deposit_moves_only_selected_bank_funds_into_nafi_wallet():
+    database_url = os.environ["BANK_DATABASE_URL"]
+    store = DashboardStore(database_url)
+    with psycopg.connect(database_url) as connection:
+        rows = connection.execute(
+            """SELECT a.uuid::text, a.account_type, a.balance_sar, u.nafi_balance
+                 FROM users u JOIN bank_accounts a ON a.user_uuid=u.uuid
+                WHERE u.username='evaluation-user' ORDER BY a.is_primary DESC"""
+        ).fetchall()
+    primary_id, _, primary_before, wallet_before = rows[0]
+    savings_id, _, savings_before, _ = rows[1]
+    request_id = str(uuid4())
+
+    result = store.deposit_to_wallet(
+        user_id="evaluation-user",
+        tenant_id="evaluation-tenant",
+        source_account_id=savings_id,
+        amount=Decimal("75.25"),
+        request_id=request_id,
+    )
+    replay = store.deposit_to_wallet(
+        user_id="evaluation-user",
+        tenant_id="evaluation-tenant",
+        source_account_id=savings_id,
+        amount=Decimal("75.25"),
+        request_id=request_id,
+    )
+
+    assert result["source_bank_balance_sar"] == "4124.75"
+    assert result["nafi_balance_sar"] == "25506.75"
+    assert replay["idempotent_replay"] is True
+    with psycopg.connect(database_url) as connection:
+        balances = dict(
+            connection.execute(
+                "SELECT uuid::text, balance_sar FROM bank_accounts WHERE uuid IN (%s, %s)",
+                (primary_id, savings_id),
+            ).fetchall()
+        )
+        wallet_after = connection.execute(
+            "SELECT nafi_balance FROM users WHERE username='evaluation-user'"
+        ).fetchone()[0]
+        ledger = connection.execute(
+            "SELECT transaction_type FROM transactions WHERE reference=%s",
+            (result["reference"],),
+        ).fetchall()
+    assert balances[primary_id] == primary_before
+    assert balances[savings_id] == savings_before - Decimal("75.25")
+    assert wallet_after == wallet_before + Decimal("75.25")
+    assert {row[0] for row in ledger} == {"nafi_top_up_source", "nafi_top_up"}
+
+    with pytest.raises(DepositRequestConflict):
+        store.deposit_to_wallet(
+            user_id="evaluation-user",
+            tenant_id="evaluation-tenant",
+            source_account_id=savings_id,
+            amount=Decimal("80.00"),
+            request_id=request_id,
+        )
+    with pytest.raises(DepositInsufficientFunds):
+        store.deposit_to_wallet(
+            user_id="evaluation-user",
+            tenant_id="evaluation-tenant",
+            source_account_id=savings_id,
+            amount=Decimal("999999.00"),
+            request_id=str(uuid4()),
+        )
+    with psycopg.connect(database_url) as connection:
+        admin_account_id = connection.execute(
+            """SELECT a.uuid::text FROM users u JOIN bank_accounts a ON a.user_uuid=u.uuid
+                WHERE u.username='admin' AND a.is_primary"""
+        ).fetchone()[0]
+    with pytest.raises(DepositAccountNotFound):
+        store.deposit_to_wallet(
+            user_id="evaluation-user",
+            tenant_id="evaluation-tenant",
+            source_account_id=admin_account_id,
+            amount=Decimal("1.00"),
+            request_id=str(uuid4()),
+        )
 
 
 async def test_balance_resolves_approximate_account_names_and_reports_ambiguity():
@@ -275,6 +480,17 @@ async def test_add_benefit_rejects_own_and_accepts_another_nafi_user():
 
 
 async def test_transfer_completes_with_receipt_and_updates_balance():
+    database_url = os.environ["BANK_DATABASE_URL"]
+    with psycopg.connect(database_url) as connection:
+        balances_before = {
+            username: (bank_balance, wallet_balance)
+            for username, bank_balance, wallet_balance in connection.execute(
+                """SELECT u.username::text, a.balance_sar, u.nafi_balance
+                 FROM users u JOIN bank_accounts a ON a.user_uuid=u.uuid AND a.is_primary
+                WHERE u.username IN ('evaluation-user', 'latifa')"""
+            ).fetchall()
+        }
+
     result = _validated(
         await transfer_between_accounts(
             destination_account=LATIFA_NAFI_IBAN, amount=Decimal("250.00")
@@ -283,6 +499,25 @@ async def test_transfer_completes_with_receipt_and_updates_balance():
     assert result.status == "completed"
     assert result.receipt_id and result.receipt_id.startswith("receipt-")
     assert result.data["new_balance_sar"] == "25181.50"
+    assert result.data["new_nafi_balance_sar"] == "25181.50"
+
+    with psycopg.connect(database_url) as connection:
+        balances_after = {
+            username: (bank_balance, wallet_balance)
+            for username, bank_balance, wallet_balance in connection.execute(
+                """SELECT u.username::text, a.balance_sar, u.nafi_balance
+                 FROM users u JOIN bank_accounts a ON a.user_uuid=u.uuid AND a.is_primary
+                WHERE u.username IN ('evaluation-user', 'latifa')"""
+            ).fetchall()
+        }
+    assert balances_after["evaluation-user"][0] == balances_before["evaluation-user"][0]
+    assert balances_after["latifa"][0] == balances_before["latifa"][0]
+    assert balances_after["evaluation-user"][1] == (
+        balances_before["evaluation-user"][1] - Decimal("250.00")
+    )
+    assert balances_after["latifa"][1] == (
+        balances_before["latifa"][1] + Decimal("250.00")
+    )
 
     report = _validated(await monthly_report())
     references = [item["reference"] for item in report.data["transactions"]]

@@ -221,7 +221,7 @@ async def analyze_finances(
         spent_so_far = monthly[current_key]["spent"]
         daily_average = money(spent_so_far / now.day)
         projected_spend = money(daily_average * days_in_month)
-        balance = money(user["Balance_SAR"])
+        balance = money(user["nafi_balance"])
         remaining_projected = projected_spend - spent_so_far
         projection = {
             "spent_so_far_sar": str(spent_so_far),
@@ -278,6 +278,7 @@ async def analyze_finances(
         data: dict[str, Any] = {
             "period_months": months,
             "currency": "SAR",
+            "current_nafi_balance_sar": str(balance),
             "current_balance_sar": str(balance),
             "totals": {
                 "income_sar": str(total_income),

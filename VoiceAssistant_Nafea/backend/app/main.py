@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import hmac
 import json
 import time
 from collections import defaultdict
+from decimal import Decimal
 from typing import Any, Literal
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
 import websockets
@@ -28,7 +30,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, AuthenticationStore, RegistrationConflict
 from app.config import settings
-from app.dashboard import DashboardStore
+from app.dashboard import (
+    DashboardStore,
+    DepositAccountNotFound,
+    DepositInsufficientFunds,
+    DepositRequestConflict,
+)
 from app.interaction import (
     AgentEvent,
     InteractionSession,
@@ -309,6 +316,75 @@ class ConfirmTaskRequest(StrictModel):
         return self
 
 
+class WalletDepositPreviewRequest(StrictModel):
+    request_id: UUID
+    source_account_id: UUID
+    amount: Decimal = Field(gt=0, max_digits=18, decimal_places=2)
+
+
+class WalletDepositConfirmationRequest(StrictModel):
+    request_id: UUID
+    confirmation_token: str = Field(min_length=32, max_length=4096, repr=False)
+    otp_code: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$", repr=False)
+
+
+def _issue_wallet_deposit_token(
+    *,
+    session: InteractionSession,
+    request_id: UUID,
+    source_account_id: UUID,
+    amount: Decimal,
+) -> str:
+    claims = {
+        "request_id": str(request_id),
+        "source_account_id": str(source_account_id),
+        "amount": format(amount.quantize(Decimal("0.01")), "f"),
+        "user_id": session.user_id,
+        "tenant_id": session.tenant_id,
+        "purpose": "wallet_deposit",
+    }
+    body = json.dumps(claims, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(body).decode("ascii").rstrip("=")
+    timestamp, signature = sign_message(settings.CONFIRMATION_SIGNING_KEY, body)
+    return f"{timestamp}.{encoded}.{signature}"
+
+
+def _verify_wallet_deposit_token(
+    token: str,
+    *,
+    session: InteractionSession,
+    request_id: UUID,
+) -> tuple[str, Decimal]:
+    try:
+        timestamp, encoded, signature = token.split(".", 2)
+        body = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        verify_message(
+            settings.CONFIRMATION_SIGNING_KEY,
+            body,
+            timestamp=timestamp,
+            signature=signature,
+            max_age_seconds=300,
+        )
+        claims = json.loads(body)
+        if (
+            claims.get("purpose") != "wallet_deposit"
+            or claims.get("request_id") != str(request_id)
+            or claims.get("user_id") != session.user_id
+            or claims.get("tenant_id") != session.tenant_id
+        ):
+            raise PermissionError("deposit confirmation does not match this session")
+        return str(UUID(claims["source_account_id"])), Decimal(claims["amount"])
+    except (
+        binascii.Error,
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ) as exc:
+        raise PermissionError("invalid or expired deposit confirmation") from exc
+
+
 class VoiceChatResponse(StrictModel):
     user_transcript: str
     agent_text: str
@@ -471,6 +547,74 @@ async def get_dashboard(request: Request) -> dict[str, Any]:
             user_id=session.user_id,
             tenant_id=session.tenant_id,
         )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/wallet/deposit/request")
+async def request_wallet_deposit(
+    payload: WalletDepositPreviewRequest, request: Request
+) -> dict[str, Any]:
+    """Validate the selected bank and amount before asking for an OTP."""
+
+    session = require_session(request)
+    if "financial:write" not in session.scopes:
+        raise HTTPException(status_code=403, detail="Financial write access is required")
+    try:
+        preview = await asyncio.to_thread(
+            dashboard_store.preview_wallet_deposit,
+            user_id=session.user_id,
+            tenant_id=session.tenant_id,
+            source_account_id=str(payload.source_account_id),
+            amount=payload.amount,
+        )
+        preview["confirmation_token"] = _issue_wallet_deposit_token(
+            session=session,
+            request_id=payload.request_id,
+            source_account_id=payload.source_account_id,
+            amount=payload.amount,
+        )
+        return preview
+    except DepositAccountNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DepositInsufficientFunds as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/wallet/deposit/confirm")
+async def confirm_wallet_deposit(
+    payload: WalletDepositConfirmationRequest, request: Request
+) -> dict[str, Any]:
+    """Move the token-bound amount only after the subsequent OTP check."""
+
+    session = require_session(request)
+    if "financial:write" not in session.scopes:
+        raise HTTPException(status_code=403, detail="Financial write access is required")
+    try:
+        source_account_id, amount = _verify_wallet_deposit_token(
+            payload.confirmation_token,
+            session=session,
+            request_id=payload.request_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if not hmac.compare_digest(payload.otp_code, settings.DEMO_CONFIRMATION_OTP):
+        raise HTTPException(status_code=403, detail="Invalid demo OTP")
+    try:
+        return await asyncio.to_thread(
+            dashboard_store.deposit_to_wallet,
+            user_id=session.user_id,
+            tenant_id=session.tenant_id,
+            source_account_id=source_account_id,
+            amount=amount,
+            request_id=str(payload.request_id),
+        )
+    except DepositAccountNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (DepositInsufficientFunds, DepositRequestConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

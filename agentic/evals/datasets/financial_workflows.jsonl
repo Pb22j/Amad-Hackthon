@@ -1,6 +1,6 @@
 {"id":"balance","intent":"account_information","tools":["get_balance"],"confirmation":false,"receipt":false}
+{"id":"wallet-funding","intent":"wallet_funding","tools":["fund_nafi_wallet"],"confirmation":true,"receipt":true}
 {"id":"transfer","intent":"money_transfer","tools":["transfer_funds"],"confirmation":true,"receipt":true}
 {"id":"bill-payment","intent":"bill_payment","tools":["pay_bill"],"confirmation":true,"receipt":true}
 {"id":"investment-buy","intent":"investment_buy","tools":["buy_investment"],"confirmation":true,"receipt":true}
 {"id":"investment-sell","intent":"investment_sell","tools":["sell_investment"],"confirmation":true,"receipt":true}
-

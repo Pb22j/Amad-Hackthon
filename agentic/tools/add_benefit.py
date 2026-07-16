@@ -61,10 +61,9 @@ async def list_beneficiaries() -> dict[str, Any]:
             )
         statement = (
             "SELECT target.full_name_ar, target.full_name_en, target.nafi_iban,"
-            " b.short_name, account.bank_name_ar"
+            " b.short_name"
             " FROM beneficiaries b"
             " JOIN users target ON target.uuid = b.beneficiary_uuid"
-            " JOIN bank_accounts account ON account.user_uuid = target.uuid AND account.is_primary"
             " WHERE b.owner_uuid = %s"
         )
         parameters: list[Any] = [owner["uuid"]]
@@ -76,7 +75,7 @@ async def list_beneficiaries() -> dict[str, Any]:
                 "full_name_en": row["full_name_en"],
                 "short_name": row["Short_Name"],
                 "nafi_iban": row["nafi_iban"],
-                "bank_name": row["Bank_Name_Ar"],
+                "wallet": "Nafi",
             }
             for row in rows
         ]
@@ -167,7 +166,7 @@ async def add_benefit(
                     "full_name_en": target["full_name_en"],
                     "short_name": short_name.strip(),
                     "nafi_iban": normalized,
-                    "bank_name": target["Bank_Name_Ar"],
+                    "wallet": "Nafi",
                 }
             },
             operation_id=beneficiary_id,

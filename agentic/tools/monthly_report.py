@@ -93,7 +93,8 @@ async def monthly_report(month: str | None = None) -> dict[str, Any]:
         listed = transactions[:_MAX_LISTED_TRANSACTIONS]
         data = {
             "month": report_month,
-            "account_number": owner["Account_Number"],
+            "account_number": owner["nafi_iban"],
+            "nafi_iban": owner["nafi_iban"],
             "currency": "SAR",
             "total_paid_sar": str(total_paid),
             "total_received_sar": str(total_received),
@@ -105,7 +106,8 @@ async def monthly_report(month: str | None = None) -> dict[str, Any]:
             },
             "transactions": listed,
             "truncated": len(transactions) > len(listed),
-            "current_balance_sar": str(money(owner["Balance_SAR"])),
+            "current_nafi_balance_sar": str(money(owner["nafi_balance"])),
+            "current_balance_sar": str(money(owner["nafi_balance"])),
         }
         return tool_result(
             status="completed",

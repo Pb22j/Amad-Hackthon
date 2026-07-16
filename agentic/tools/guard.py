@@ -160,6 +160,7 @@ _ARABIC_FIELD_LABELS = {
     "qatta_name": "اسم القطة",
     "quantity": "عدد الأسهم",
     "recipient": "المستلم",
+    "source_account": "الحساب البنكي المصدر",
     "short_name": "الاسم المختصر",
     "symbol": "رمز الاستثمار أو اسم الشركة",
     "total_amount": "المبلغ الإجمالي",
@@ -170,9 +171,13 @@ def _clarification_copy(field_name: str, request: str) -> tuple[str, str]:
     """Return a user-facing clarification question and label in request language."""
 
     if not re.search(r"[\u0600-\u06ff]", request):
+        if field_name == "source_account":
+            return "Which linked bank account should fund the Nafi wallet?", "Source account"
         label = field_name.replace("_", " ").title()
         return f"What value should be used for {field_name}?", label
     label = _ARABIC_FIELD_LABELS.get(field_name, field_name.replace("_", " "))
+    if field_name == "source_account":
+        return "ما الحساب البنكي المرتبط الذي تريد شحن محفظة نافع منه؟", label
     questions = {
         "amount": "ما المبلغ المطلوب؟",
         "destination": "إلى من تريد التحويل؟",
@@ -440,13 +445,32 @@ class GuardedToolFactory:
                     raise ToolGuardError(
                         f"tool argument schema lacks explicit field {field_name!r}"
                     )
-                if not _argument_is_explicit(
+                is_explicit = _argument_is_explicit(
                     arguments[field_name],
                     context.original_request,
                     context.explicit_user_field_values.get(field_name, ()),
                     field_name=field_name,
                     prior_user_statements=context.prior_user_statements,
+                )
+                if (
+                    not is_explicit
+                    and metadata.name == "fund_nafi_wallet"
+                    and field_name == "source_account"
                 ):
+                    from agentic.tools.wallet_funding import source_account_is_grounded
+
+                    with bind_tool_identity(
+                        user_id=context.auth.user_id,
+                        tenant_id=context.auth.tenant_id,
+                    ):
+                        is_explicit = await source_account_is_grounded(
+                            str(arguments[field_name]),
+                            (
+                                context.original_request,
+                                *context.explicit_user_field_values.get(field_name, ()),
+                            ),
+                        )
+                if not is_explicit:
                     question, label = _clarification_copy(field_name, context.original_request)
                     arguments[field_name] = interrupt(
                         {
@@ -564,6 +588,71 @@ class GuardedToolFactory:
                     # Bind confirmation and idempotency to the authoritative,
                     # human-readable beneficiary selected by database search.
                     arguments["destination_account"] = str(resolved["full_name"])
+
+            if metadata.name == "fund_nafi_wallet":
+                from agentic.tools.wallet_funding import preflight_fund_nafi_wallet
+
+                async def run_wallet_funding_preflight() -> ToolResult:
+                    with bind_tool_identity(
+                        user_id=context.auth.user_id,
+                        tenant_id=context.auth.tenant_id,
+                    ):
+                        return ToolResult.model_validate(
+                            await preflight_fund_nafi_wallet(**arguments)
+                        )
+
+                preflight = await run_wallet_funding_preflight()
+                if preflight.error_code == "source_account_ambiguous":
+                    candidates = preflight.data.get("candidates", [])
+                    option_targets: dict[str, str] = {}
+                    for candidate in candidates:
+                        bank_name = str(candidate.get("bank_name") or "").strip()
+                        account_type = str(candidate.get("account_type") or "").strip()
+                        masked = str(candidate.get("masked_account_number") or "").strip()
+                        if not masked:
+                            continue
+                        option = " · ".join(
+                            value for value in (bank_name, account_type, masked) if value
+                        )
+                        option_targets[option] = masked
+                    if 2 <= len(option_targets) <= 20:
+                        arabic = bool(re.search(r"[\u0600-\u06ff]", context.original_request))
+                        selected = interrupt(
+                            {
+                                "kind": "clarification",
+                                "clarification_id": str(
+                                    uuid5(
+                                        NAMESPACE_URL,
+                                        (
+                                            f"{context.task_id}:{metadata.name}:source_account:"
+                                            f"{runtime.tool_call_id or 'unknown'}"
+                                        ),
+                                    )
+                                ),
+                                "question": (
+                                    "وجدت أكثر من حساب بنكي مطابق. أي حساب تريد استخدامه؟"
+                                    if arabic
+                                    else "I found multiple matching bank accounts. Which one should fund the Nafi wallet?"
+                                ),
+                                "reason_code": "ambiguous_source_account",
+                                "expected_answer": {
+                                    "type": "string",
+                                    "field": "source_account",
+                                    "label": "الحساب المصدر" if arabic else "Source account",
+                                    "enum": list(option_targets),
+                                    "minLength": 1,
+                                    "maxLength": 500,
+                                },
+                                "expires_in_seconds": 900,
+                            }
+                        )
+                        arguments["source_account"] = option_targets.get(
+                            str(selected), str(selected)
+                        )
+                        arguments = args_schema.model_validate(arguments).model_dump()
+                        preflight = await run_wallet_funding_preflight()
+                if preflight.status != "completed":
+                    return preflight.model_dump_json()
 
             tool_call_id = (
                 runtime.tool_call_id

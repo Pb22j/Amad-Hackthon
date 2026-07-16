@@ -11,7 +11,7 @@ import asyncio
 import os
 import threading
 from calendar import monthrange
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, TypeVar
@@ -116,6 +116,125 @@ def normalize_account_number(value: str) -> str:
     return "".join(value.split()).replace("-", "").upper()
 
 
+def masked_account_number(account_number: str) -> str:
+    normalized = normalize_account_number(account_number)
+    return f"{normalized[:4]}{'*' * max(len(normalized) - 8, 0)}{normalized[-4:]}"
+
+
+_ACCOUNT_GENERIC_TOKENS = frozenset(
+    {
+        "account",
+        "bank",
+        "linked",
+        "my",
+        "saudi",
+        "البنك",
+        "بنك",
+        "حساب",
+        "حسابي",
+        "حسابنا",
+        "المرتبط",
+        "السعودي",
+        "السعوديه",
+    }
+)
+
+
+def _account_search_phrase(value: str) -> str:
+    """Remove generic banking words while preserving the identifying alias."""
+
+    normalized = normalize_entity_text(value)
+    return " ".join(
+        token for token in normalized.split() if token not in _ACCOUNT_GENERIC_TOKENS
+    )
+
+
+def _account_search_labels(account: BankRow) -> tuple[str, ...]:
+    labels: list[str] = []
+    for value in (
+        account["account_type"],
+        account["bank_name_ar"],
+        account["bank_name_en"],
+    ):
+        rendered = str(value or "").strip()
+        if not rendered:
+            continue
+        labels.append(rendered)
+        identifying = _account_search_phrase(rendered)
+        if identifying:
+            labels.append(identifying)
+            compact = identifying.replace(" ", "")
+            if compact != identifying:
+                labels.append(compact)
+            labels.extend(identifying.split())
+    account_number = str(account["account_number"])
+    labels.extend((masked_account_number(account_number), account_number[-4:]))
+    return tuple(dict.fromkeys(labels))
+
+
+def user_accounts(connection: BankConnection, username: str) -> list[BankRow]:
+    return connection.execute(
+        """
+        SELECT a.uuid, a.account_number, a.account_type, a.bank_name_ar,
+               a.bank_name_en, a.balance_sar, a.is_primary
+          FROM bank_accounts a
+          JOIN users u ON u.uuid = a.user_uuid
+         WHERE u.username = %s
+         ORDER BY a.is_primary DESC, a.uuid
+        """,
+        (username,),
+    ).fetchall()
+
+
+def resolve_account_candidates(
+    accounts: Iterable[BankRow], account: str
+) -> EntityResolution[BankRow]:
+    """Resolve a spoken alias against an already owner-scoped account catalog."""
+
+    materialized = tuple(accounts)
+    requested = normalize_account_number(account)
+    primary_aliases = {"PRIMARY", "MAIN", "الرئيسي", "الرئيسية", "الأساسي", "الاساسي"}
+    for candidate in materialized:
+        account_number = normalize_account_number(candidate["account_number"])
+        if (
+            requested == str(candidate["uuid"]).upper()
+            or requested == account_number
+            or requested == masked_account_number(account_number)
+            or (len(requested) == 4 and requested == account_number[-4:])
+            or (requested in primary_aliases and candidate["is_primary"])
+        ):
+            return EntityResolution(match=candidate, match_type="account_identifier")
+
+    identifying_query = _account_search_phrase(account)
+    if not identifying_query:
+        if len(materialized) == 1:
+            return EntityResolution(match=materialized[0], match_type="sole_owned_account")
+        return EntityResolution(
+            match=None,
+            candidates=materialized,
+            match_type="ambiguous",
+        )
+    query_tokens = identifying_query.split()
+    search_query = (
+        identifying_query.replace(" ", "")
+        if len(query_tokens) > 1 and len(query_tokens[0]) <= 2
+        else identifying_query
+    )
+    return resolve_entity(
+        search_query,
+        materialized,
+        labels=_account_search_labels,
+    )
+
+
+def resolve_user_account(
+    connection: BankConnection, *, username: str, account: str
+) -> EntityResolution[BankRow]:
+    """Resolve an owner-scoped linked account from spoken bank/account aliases."""
+
+    return resolve_account_candidates(user_accounts(connection, username), account)
+
+
 def normalize_beneficiary_name(value: str) -> str:
     """Normalize harmless spelling differences used when resolving saved names."""
 
@@ -172,7 +291,7 @@ def _ensure_ready(url: str) -> None:
             return
         connection = BankConnection(url)
         try:
-            connection.execute("SELECT 1 FROM users LIMIT 1")
+            connection.execute("SELECT nafi_balance FROM users LIMIT 1")
             connection.execute("SELECT 1 FROM bank_accounts LIMIT 1")
             connection.execute("SELECT 1 FROM transactions LIMIT 1")
         finally:
@@ -198,7 +317,7 @@ async def run_in_bank_db(work: Callable[[BankConnection], T]) -> T:
 
 _USER_ACCOUNT_PROJECTION = """
     SELECT u.uuid, u.username, u.full_name_ar, u.full_name_en, u.nafi_iban,
-           u.daily_spend_limit_sar,
+           u.nafi_balance, u.daily_spend_limit_sar,
            a.uuid AS account_uuid, a.account_number, a.account_type AS account_type_ar,
            a.bank_name_ar, a.bank_name_en, a.balance_sar,
            (SELECT COALESCE(SUM(total.balance_sar), 0)
@@ -241,14 +360,14 @@ def find_user_by_nafi_iban(connection: BankConnection, nafi_iban: str) -> BankRo
     ).fetchone()
 
 
-def update_account_balance(
+def update_nafi_balance(
     connection: BankConnection, user: BankRow, balance: Decimal
 ) -> None:
-    """Update the exact account selected in the projected user row."""
+    """Update only the user's Nafi e-wallet; linked banks are read-only."""
 
     connection.execute(
-        "UPDATE bank_accounts SET balance_sar = %s WHERE uuid = %s",
-        (balance, user["account_uuid"]),
+        "UPDATE users SET nafi_balance = %s WHERE uuid = %s",
+        (balance, user["uuid"]),
     )
 
 
@@ -259,15 +378,14 @@ def resolve_beneficiary(
     projection = """
         SELECT b.uuid, b.owner_uuid, b.beneficiary_uuid, b.short_name,
                target.full_name_ar AS full_name, target.full_name_en,
-               target.nafi_iban, account.account_number, account.bank_name_ar
+               target.nafi_iban
           FROM beneficiaries b
           JOIN users target ON target.uuid = b.beneficiary_uuid
-          JOIN bank_accounts account ON account.user_uuid = target.uuid AND account.is_primary
     """
     row = connection.execute(
         projection
-        + " WHERE b.owner_uuid = %s AND (target.nafi_iban = %s OR account.account_number = %s)",
-        (owner_uuid, normalized, normalized),
+        + " WHERE b.owner_uuid = %s AND target.nafi_iban = %s",
+        (owner_uuid, normalized),
     ).fetchone()
     if row is not None:
         return EntityResolution(match=row, match_type="account_identifier")
@@ -296,8 +414,9 @@ def spent_today(connection: BankConnection, user_uuid: str) -> Decimal:
     total = connection.execute(
         "SELECT COALESCE(SUM(Amount_SAR), 0) FROM transactions"
         " WHERE user_uuid = %s AND direction = 'debit'"
+        " AND Account_Number = (SELECT nafi_iban FROM users WHERE uuid = %s)"
         " AND createdAt >= %s AND createdAt <= %s",
-        (user_uuid, day_start, now),
+        (user_uuid, user_uuid, day_start, now),
     ).fetchone()[0]
     return money(total)
 

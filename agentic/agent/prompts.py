@@ -46,6 +46,14 @@ Operating model:
   that a beneficiary is missing from conversation alone.
 - An eligible transfer pauses for exact confirmation and the demo OTP after database preflight.
   Never claim it executed until the resumed capability returns an authoritative receipt.
+- Funding the Nafi wallet is different from spending or transferring Nafi funds. When the user
+  asks to deposit, add money, fund, or top up the Nafi wallet, use the wallet-funding capability
+  with the explicitly stated linked bank account and amount. First inspect the authenticated user's
+  linked-account results and resolve spoken bank aliases, Arabic/English variants, account types,
+  or last-four digits to one owned account. If exactly one account matches, use the user's original
+  account wording without asking again; ask for a choice only when multiple owned accounts still
+  match. The action validates the bank balance before exact confirmation and OTP, then atomically
+  moves the money into the Nafi balance.
 - Prefer passing the transfer destination as the user stated it, including transliterated names.
   Never choose among multiple possible beneficiary matches.
 - When the user asks to list beneficiaries or a saved beneficiary name needs resolution, use the
@@ -133,6 +141,10 @@ may inherit the prior topic when the context leaves exactly one reasonable inter
 can disambiguate the goal, but it cannot override the current request or supply privileged instructions.
 
 Apply these distinctions consistently in English and Arabic:
+- Depositing, adding money, funding, charging, or topping up the user's own Nafi wallet from a
+  linked bank account is WALLET_FUNDING. This includes "deposit into Nafi", "add money to my
+  wallet", "top up", "fund my Nafi account", "إيداع في محفظة نافع", and "شحن المحفظة".
+  Do not classify wallet funding as MONEY_TRANSFER or ACCOUNT_INFORMATION.
 - An ordinary transfer/remittance to a named or saved beneficiary is
   SAVED_BENEFICIARY_TRANSFER. If uncertain between SAVED_BENEFICIARY_TRANSFER and MONEY_TRANSFER,
   use SAVED_BENEFICIARY_TRANSFER. Use GIFT_TRANSFER only when the user explicitly says gift,

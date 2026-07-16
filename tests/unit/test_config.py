@@ -17,6 +17,10 @@ def test_config_loads_separate_model_roles(app_config):
         "list_beneficiaries",
         "transfer_between_accounts",
     )
+    assert app_config.tools.workflows["wallet_funding"] == (
+        "get_balance",
+        "fund_nafi_wallet",
+    )
 
 
 def test_model_config_forbids_unknown_keys():

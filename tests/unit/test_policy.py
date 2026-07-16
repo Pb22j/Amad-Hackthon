@@ -42,6 +42,7 @@ def test_credential_and_cross_user_requests_are_blocked(policy, text):
     "intent",
     [
         Intent.MONEY_TRANSFER,
+        Intent.WALLET_FUNDING,
         Intent.SAVED_BENEFICIARY_TRANSFER,
         Intent.GIFT_TRANSFER,
         Intent.INVESTMENT_BUY,

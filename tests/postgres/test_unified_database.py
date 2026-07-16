@@ -25,7 +25,7 @@ def test_unified_columns_use_native_postgresql_types(unified_postgres_url: str) 
             """SELECT table_name, column_name, data_type
                FROM information_schema.columns
                WHERE table_schema='public' AND (
-                   (table_name='users' AND column_name IN ('uuid','daily_spend_limit_sar')) OR
+                   (table_name='users' AND column_name IN ('uuid','daily_spend_limit_sar','nafi_balance')) OR
                    (table_name='bank_accounts' AND column_name='balance_sar') OR
                    (table_name='transactions' AND column_name IN ('amount_sar','metadata','createdat')) OR
                    (table_name='interaction_events' AND column_name='payload_json') OR
@@ -35,6 +35,7 @@ def test_unified_columns_use_native_postgresql_types(unified_postgres_url: str) 
     types = {(table, column): data_type for table, column, data_type in rows}
     assert types[("users", "uuid")] == "uuid"
     assert types[("users", "daily_spend_limit_sar")] == "numeric"
+    assert types[("users", "nafi_balance")] == "numeric"
     assert types[("bank_accounts", "balance_sar")] == "numeric"
     assert types[("transactions", "amount_sar")] == "numeric"
     assert types[("transactions", "metadata")] == "jsonb"
@@ -47,6 +48,19 @@ def test_unified_columns_use_native_postgresql_types(unified_postgres_url: str) 
 def test_financial_checks_and_transaction_rollback(unified_postgres_url: str) -> None:
     connection = psycopg.connect(unified_postgres_url)
     try:
+        user_id, wallet_balance = connection.execute(
+            "SELECT uuid, nafi_balance FROM users WHERE username='evaluation-user'"
+        ).fetchone()
+        with pytest.raises(psycopg.errors.CheckViolation):
+            with connection.transaction():
+                connection.execute(
+                    "UPDATE users SET nafi_balance=-1 WHERE uuid=%s", (user_id,)
+                )
+        connection.rollback()
+        assert connection.execute(
+            "SELECT nafi_balance FROM users WHERE uuid=%s", (user_id,)
+        ).fetchone()[0] == wallet_balance
+
         account_id, original = connection.execute(
             """SELECT a.uuid, a.balance_sar FROM bank_accounts a
                JOIN users u ON u.uuid=a.user_uuid

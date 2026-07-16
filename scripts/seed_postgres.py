@@ -31,16 +31,16 @@ def _password_hash(password: str) -> str:
 
 
 USERS = (
-    ("evaluation-user", "أحمد فهد العتيبي", "Ahmed Fahad Alotaibi", "SA9900000000000000000001", "5000"),
-    ("admin", "ماجد عبدالله السبيعي", "Majid Abdullah Alsubaie", "SA9900000000000000000002", "20000"),
-    ("waleed", "الوليد خالد الشمري", "Waleed Khalid Alshammari", "SA9900000000000000000003", "10000"),
-    ("mohammed", "محمد ناصر القحطاني", "Mohammed Nasser Alqahtani", "SA9900000000000000000004", "20000"),
-    ("noura", "نورة سلطان الحربي", "Noura Sultan Alharbi", "SA9900000000000000000005", "15000"),
-    ("latifa", "لطيفة محمد العنزي", "Latifa Mohammed Alanazi", "SA9900000000000000000006", "12000"),
-    ("saud", "سعود عبدالله العنزي", "Saud Abdullah Alanazi", "SA9900000000000000000007", "8000"),
-    ("faisal", "فيصل صالح الدوسري", "Faisal Saleh Aldosari", "SA9900000000000000000008", "9000"),
-    ("sara", "سارة أحمد الغامدي", "Sara Ahmed Alghamdi", "SA9900000000000000000009", "7000"),
-    ("khalid", "خالد عمر الزهراني", "Khalid Omar Alzahrani", "SA9900000000000000000010", "11000"),
+    ("evaluation-user", "أحمد فهد العتيبي", "Ahmed Fahad Alotaibi", "SA9900000000000000000001", "5000", "25431.50"),
+    ("admin", "ماجد عبدالله السبيعي", "Majid Abdullah Alsubaie", "SA9900000000000000000002", "20000", "75000.00"),
+    ("waleed", "الوليد خالد الشمري", "Waleed Khalid Alshammari", "SA9900000000000000000003", "10000", "15000.00"),
+    ("mohammed", "محمد ناصر القحطاني", "Mohammed Nasser Alqahtani", "SA9900000000000000000004", "20000", "8400.00"),
+    ("noura", "نورة سلطان الحربي", "Noura Sultan Alharbi", "SA9900000000000000000005", "15000", "19750.00"),
+    ("latifa", "لطيفة محمد العنزي", "Latifa Mohammed Alanazi", "SA9900000000000000000006", "12000", "12500.00"),
+    ("saud", "سعود عبدالله العنزي", "Saud Abdullah Alanazi", "SA9900000000000000000007", "8000", "9100.00"),
+    ("faisal", "فيصل صالح الدوسري", "Faisal Saleh Aldosari", "SA9900000000000000000008", "9000", "18300.00"),
+    ("sara", "سارة أحمد الغامدي", "Sara Ahmed Alghamdi", "SA9900000000000000000009", "7000", "22100.00"),
+    ("khalid", "خالد عمر الزهراني", "Khalid Omar Alzahrani", "SA9900000000000000000010", "11000", "30750.00"),
 )
 
 ACCOUNTS = (
@@ -81,13 +81,16 @@ def seed(target: psycopg.Connection[object]) -> dict[str, int]:
     password_hash = _password_hash("password123")
 
     with target.cursor() as cur:
-        for username, name_ar, name_en, nafi_iban, daily_limit in USERS:
+        for username, name_ar, name_en, nafi_iban, daily_limit, nafi_balance in USERS:
             cur.execute(
                 """INSERT INTO users
                    (uuid, username, full_name_ar, full_name_en, password_hash,
-                    nafi_iban, daily_spend_limit_sar)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-                (users[username], username, name_ar, name_en, password_hash, nafi_iban, Decimal(daily_limit)),
+                    nafi_iban, daily_spend_limit_sar, nafi_balance)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    users[username], username, name_ar, name_en, password_hash,
+                    nafi_iban, Decimal(daily_limit), Decimal(nafi_balance),
+                ),
             )
 
         for username, bank_ar, bank_en, account_number, account_type, balance, primary in ACCOUNTS:

@@ -29,6 +29,7 @@ from agentic.tools.qatta import (
     PAY_QATTA_BILL_TOOL,
 )
 from agentic.tools.transfer_between_accounts import TOOL as TRANSFER_BETWEEN_ACCOUNTS_TOOL
+from agentic.tools.wallet_funding import TOOL as FUND_NAFI_WALLET_TOOL
 
 BANK_TOOLS = (
     GET_BALANCE_TOOL,
@@ -36,6 +37,7 @@ BANK_TOOLS = (
     ADD_BENEFIT_TOOL,
     LIST_BENEFICIARIES_TOOL,
     TRANSFER_BETWEEN_ACCOUNTS_TOOL,
+    FUND_NAFI_WALLET_TOOL,
     MONTHLY_REPORT_TOOL,
     CREATE_QATTA_TOOL,
     PAY_QATTA_BILL_TOOL,

@@ -23,6 +23,21 @@ permission, confirmation, and OTP values must not be accepted as model-controlle
 guard binds authoritative request identity through an async-safe runtime context immediately around
 each invocation.
 
+## Nafi wallet money boundary
+
+Every default financial action uses `users.nafi_balance` as its only money source and destination.
+Transfers, gifts, Fatoorah payments, Qatta payments/refunds/payouts, and investment buys/sells must
+never debit, credit, or check `bank_accounts.balance_sar`. Linked bank accounts are read-only context.
+Wallet ledger entries use the user's Nafi IBAN as `transactions.account_number`, which also keeps
+daily wallet-spend limits separate from imported or linked-bank activity.
+
+Wallet funding is the sole intentional exception to linked-bank immutability. It is available both
+through the app's two-step deposit flow and the guarded `fund_nafi_wallet` agent capability. The
+user explicitly supplies the linked source account and amount. Ownership and available bank funds
+are preflighted before exact confirmation and OTP; execution atomically debits only that account and
+credits `users.nafi_balance`. The OTP and signed authorization remain interaction-layer secrets and
+are never tool arguments, ledger fields, model context, or persisted memory.
+
 ## Result envelope
 
 Every tool returns an object accepted by `ToolResult`:

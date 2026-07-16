@@ -4,7 +4,7 @@ Every fatoorah (bill) in the database has a purely numeric SADAD-style bill
 number and is assigned to exactly one bank customer, so a user can only see
 and pay their own bills. To pay, the user must state the **last four digits**
 of the bill number — that is how the bill is selected. Payment deducts the
-bill amount from the user's balance (rejected if the balance cannot cover it)
+bill amount from the user's Nafi wallet (rejected if its balance cannot cover it)
 and records a ledger entry under the "فواتير" category, so it appears in the
 monthly report. Bill-payment debits count toward the customer's daily limit.
 """
@@ -29,7 +29,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
-    update_account_balance,
+    update_nafi_balance,
 )
 
 
@@ -127,11 +127,11 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
         fatoorah = unpaid[0]
         amount = money(fatoorah["Amount_SAR"])
 
-        balance = money(payer["Balance_SAR"])
+        balance = money(payer["nafi_balance"])
         if amount > balance:
             return tool_result(
                 status="failed",
-                summary="The available balance is not enough to pay this fatoorah.",
+                summary="The available Nafi wallet balance is not enough to pay this fatoorah.",
                 data={
                     "bill_amount_sar": str(amount),
                     "available_balance_sar": str(balance),
@@ -155,7 +155,7 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
         reference = next_reference(connection, "fatoorah")
         now = timestamp()
         balance_after = balance - amount
-        update_account_balance(connection, payer, balance_after)
+        update_nafi_balance(connection, payer, balance_after)
         connection.execute(
             "UPDATE fatoorahs SET status = 'paid', paidAt = %s WHERE uuid = %s",
             (now, fatoorah["uuid"]),
@@ -169,7 +169,7 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
             (
                 str(uuid4()),
                 payer["uuid"],
-                payer["Account_Number"],
+                payer["nafi_iban"],
                 float(amount),
                 fatoorah["Biller_Name_Ar"],
                 f"سداد فاتورة {fatoorah['Biller_Name_Ar']} رقم {fatoorah['Bill_Number']}",
@@ -190,6 +190,7 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
                 "biller": fatoorah["Biller_Name_Ar"],
                 "amount_sar": str(amount),
                 "bill_status": "مدفوعة",
+                "new_nafi_balance_sar": str(balance_after),
                 "new_balance_sar": str(balance_after),
                 "reference": reference,
                 "executed_at": now,
@@ -244,8 +245,8 @@ PAY_FATOORAH_TOOL: BaseTool = StructuredTool.from_function(
     description=(
         "Pay one of the authenticated user's assigned bills (فاتورة) after "
         "confirmation. The user must state the last four digits of the numeric bill "
-        "number to select which bill to pay. The amount is deducted from the balance "
-        "and appears in the monthly report."
+        "number to select which bill to pay. The amount is deducted only from the "
+        "Nafi wallet balance and appears in the monthly report; linked banks are read-only."
     ),
     args_schema=PayFatoorahArgs,
 )

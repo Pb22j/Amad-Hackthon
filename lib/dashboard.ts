@@ -9,8 +9,14 @@ export type DashboardUser = {
 export type DashboardAccount = DashboardBankSource & {
   id: string;
   account_type: string;
+  balance_sar: string;
   masked_account_number: string;
   status: string;
+};
+
+export type DashboardWallet = {
+  nafi_iban: string;
+  balance_sar: string;
 };
 
 export type DashboardHolding = {
@@ -68,6 +74,7 @@ export type DashboardSnapshot = {
     amount_sar: string;
     delta_percent: number;
   };
+  wallet: DashboardWallet;
   accounts: DashboardAccount[];
   portfolio: DashboardPortfolio;
   activity: DashboardActivity;

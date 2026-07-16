@@ -9,12 +9,12 @@ Money flows through the qatta pot (وعاء القطة):
 
 1. Creation splits the total equally over the participants plus the creator.
    The creator's own share is deducted immediately into the pot — a qatta
-   cannot be created if the creator's balance cannot cover their share.
+   cannot be created if the creator's Nafi wallet cannot cover their share.
    Qatta payments count toward the payer's daily spend limit.
 2. Each participant pays their bill into the pot; their bill becomes
    "تم الدفع". Every deduction is a real ledger entry.
 3. When the last bill is paid, the whole pot is transferred to the creator's
-   account in one payout and the qatta completes.
+   Nafi wallet in one payout and the qatta completes.
 4. Only the creator can cancel an open qatta: everyone who paid (including
    the creator) is refunded from the pot, and the qatta is removed. The
    ledger keeps the full payment/refund trail.
@@ -41,7 +41,6 @@ from agentic.tools.bank_db import (
     BankConnection,
     BankRow,
     find_beneficiary,
-    find_user_by_account_number,
     find_user_by_uuid,
     find_user_by_username,
     money,
@@ -51,7 +50,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
-    update_account_balance,
+    update_nafi_balance,
 )
 
 
@@ -132,7 +131,7 @@ def _insert_transaction(
         (
             str(uuid4()),
             user["uuid"],
-            user["Account_Number"],
+            user["nafi_iban"],
             direction,
             transaction_type,
             float(amount),
@@ -178,15 +177,13 @@ async def create_qatta(
                     data={"participant": reference},
                     error_code="participant_not_beneficiary",
                 )
-            participant = find_user_by_account_number(
-                connection, beneficiary["Account_Number"]
-            )
+            participant = find_user_by_uuid(connection, beneficiary["beneficiary_uuid"])
             if participant is None:
                 return tool_result(
                     status="failed",
-                    summary="A participant's bank account is no longer available.",
+                    summary="A participant's Nafi wallet is no longer available.",
                     data={"participant": beneficiary["Short_Name"]},
-                    error_code="participant_account_missing",
+                    error_code="participant_wallet_missing",
                 )
             resolved.setdefault(participant["uuid"], participant)
 
@@ -214,12 +211,12 @@ async def create_qatta(
         creator_share = shares[creator["uuid"]]
 
         # The creator's own share is paid into the pot right now.
-        balance = money(creator["Balance_SAR"])
+        balance = money(creator["nafi_balance"])
         if creator_share > balance:
             return tool_result(
                 status="failed",
                 summary=(
-                    "The creator's balance cannot cover their own share, so the "
+                    "The creator's Nafi wallet balance cannot cover their own share, so the "
                     "qatta was not created."
                 ),
                 data={
@@ -246,7 +243,7 @@ async def create_qatta(
         qatta_id = str(uuid4())
         reference = next_reference(connection, "qatta")
         balance_after = balance - creator_share
-        update_account_balance(connection, creator, balance_after)
+        update_nafi_balance(connection, creator, balance_after)
         _insert_transaction(
             connection,
             user=creator,
@@ -298,6 +295,7 @@ async def create_qatta(
                     "share_per_person_sar": str(share),
                     "creator_share_sar": str(creator_share),
                     "pot_collected_sar": str(creator_share),
+                    "creator_new_nafi_balance_sar": str(balance_after),
                     "creator_new_balance_sar": str(balance_after),
                     "participants": [
                         {
@@ -361,11 +359,11 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
         bill = unpaid[0]
         amount = money(bill["Amount_SAR"])
 
-        balance = money(payer["Balance_SAR"])
+        balance = money(payer["nafi_balance"])
         if amount > balance:
             return tool_result(
                 status="failed",
-                summary="The available balance is not enough to pay this qatta bill.",
+                summary="The available Nafi wallet balance is not enough to pay this qatta bill.",
                 data={
                     "requested_amount_sar": str(amount),
                     "available_balance_sar": str(balance),
@@ -389,15 +387,15 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
         if creator is None:
             return tool_result(
                 status="failed",
-                summary="The qatta creator's account is no longer available.",
+                summary="The qatta creator's Nafi wallet is no longer available.",
                 data={"qatta_name": cleaned},
-                error_code="destination_account_unavailable",
+                error_code="destination_wallet_unavailable",
             )
 
         reference = next_reference(connection, "qatta")
         now = timestamp()
         payer_balance_after = balance - amount
-        update_account_balance(connection, payer, payer_balance_after)
+        update_nafi_balance(connection, payer, payer_balance_after)
         _insert_transaction(
             connection,
             user=payer,
@@ -431,8 +429,8 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
                 ).fetchone()[0]
             )
             payout_reference = next_reference(connection, "qatta-payout")
-            creator_balance_after = money(creator["Balance_SAR"]) + pot_total
-            update_account_balance(connection, creator, creator_balance_after)
+            creator_balance_after = money(creator["nafi_balance"]) + pot_total
+            update_nafi_balance(connection, creator, creator_balance_after)
             _insert_transaction(
                 connection,
                 user=creator,
@@ -463,6 +461,7 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
             "bill_status": "تم الدفع",
             "qatta_status": "completed" if remaining == 0 else "open",
             "remaining_unpaid_bills": remaining,
+            "new_nafi_balance_sar": str(payer_balance_after),
             "new_balance_sar": str(payer_balance_after),
             "reference": reference,
             "executed_at": now,
@@ -555,8 +554,8 @@ async def cancel_qatta(qatta_name: str) -> dict[str, Any]:
         for bill in paid_bills:
             payer = find_user_by_uuid(connection, bill["payer_uuid"])
             amount = money(bill["Amount_SAR"])
-            balance_after = money(payer["Balance_SAR"]) + amount
-            update_account_balance(connection, payer, balance_after)
+            balance_after = money(payer["nafi_balance"]) + amount
+            update_nafi_balance(connection, payer, balance_after)
             _insert_transaction(
                 connection,
                 user=payer,
@@ -643,7 +642,7 @@ async def list_qatta_bills() -> dict[str, Any]:
                 (qatta["uuid"],),
             ).fetchall()
             # The pot holds every paid share (including the creator's) until
-            # the payout empties it into the creator's account.
+            # the payout empties it into the creator's Nafi wallet.
             pot = sum(
                 (money(row["Amount_SAR"]) for row in participant_rows
                  if row["status"] == "paid"),
@@ -686,7 +685,8 @@ CREATE_QATTA_TOOL: BaseTool = StructuredTool.from_function(
         "participants chosen by their saved beneficiary short names, after "
         "confirmation. Participants must be saved Nafi beneficiaries in the creator's "
         "benefit list. The creator's own share is deducted immediately into the qatta "
-        "pot, so the creator's balance must cover their share."
+        "pot, so the creator's Nafi wallet balance must cover their share. Linked bank "
+        "balances are never used or changed."
     ),
     args_schema=CreateQattaArgs,
 )
@@ -697,7 +697,7 @@ PAY_QATTA_BILL_TOOL: BaseTool = StructuredTool.from_function(
     description=(
         "Pay the authenticated user's unpaid qatta bill by name after confirmation. "
         "The share is paid into the qatta pot and the bill becomes paid (تم الدفع); "
-        "when the last bill is paid, the whole pot transfers to the qatta creator."
+        "when the last bill is paid, the whole pot transfers to the creator's Nafi wallet."
     ),
     args_schema=PayQattaBillArgs,
 )
@@ -708,7 +708,7 @@ CANCEL_QATTA_TOOL: BaseTool = StructuredTool.from_function(
     description=(
         "Cancel an open qatta by name after confirmation — only its creator can do "
         "this. Every paid share (including the creator's) is refunded from the qatta "
-        "pot back to its payer, and the qatta with its bills is removed."
+        "pot back to each payer's Nafi wallet, and the qatta with its bills is removed."
     ),
     args_schema=CancelQattaArgs,
 )

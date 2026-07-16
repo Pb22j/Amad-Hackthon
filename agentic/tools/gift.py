@@ -7,7 +7,7 @@ full name — so the gift shows up in their transactions and monthly report as
 "هدية من <الاسم الكامل>: <الرسالة>".
 
 Rules: the recipient must be a saved beneficiary, the amount must be above
-zero and covered by the sender's balance, and the action requires
+zero and covered by the sender's Nafi wallet balance, and the action requires
 confirmation and returns a receipt. Gift debits count toward the same daily
 spend limit as every other outgoing financial action.
 """
@@ -25,7 +25,7 @@ from agentic.tools.bank_db import (
     BankToolArgs,
     BankConnection,
     find_beneficiary,
-    find_user_by_account_number,
+    find_user_by_uuid,
     find_user_by_username,
     money,
     next_reference,
@@ -34,7 +34,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
-    update_account_balance,
+    update_nafi_balance,
 )
 
 
@@ -99,11 +99,11 @@ async def send_gift(
                 data={"recipient": recipient},
                 error_code="beneficiary_not_found",
             )
-        balance = money(sender["Balance_SAR"])
+        balance = money(sender["nafi_balance"])
         if amount > balance:
             return tool_result(
                 status="failed",
-                summary="The available balance is not enough to send this gift.",
+                summary="The available Nafi wallet balance is not enough to send this gift.",
                 data={
                     "requested_amount_sar": str(amount),
                     "available_balance_sar": str(balance),
@@ -124,22 +124,22 @@ async def send_gift(
                 error_code="daily_limit_exceeded",
             )
 
-        receiver = find_user_by_account_number(connection, beneficiary["Account_Number"])
+        receiver = find_user_by_uuid(connection, beneficiary["beneficiary_uuid"])
         if receiver is None:
             return tool_result(
                 status="failed",
-                summary="The recipient's bank account is no longer available.",
+                summary="The recipient's Nafi wallet is no longer available.",
                 data={"recipient": beneficiary["Short_Name"]},
-                error_code="destination_account_unavailable",
+                error_code="destination_wallet_unavailable",
             )
 
         reference = next_reference(connection, "gift")
         now = timestamp()
         sender_name = sender["Full_Name_Ar"]
         sender_balance_after = balance - amount
-        receiver_balance_after = money(receiver["Balance_SAR"]) + amount
-        update_account_balance(connection, sender, sender_balance_after)
-        update_account_balance(connection, receiver, receiver_balance_after)
+        receiver_balance_after = money(receiver["nafi_balance"]) + amount
+        update_nafi_balance(connection, sender, sender_balance_after)
+        update_nafi_balance(connection, receiver, receiver_balance_after)
         connection.execute(
             "INSERT INTO transactions"
             " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
@@ -149,10 +149,10 @@ async def send_gift(
             (
                 str(uuid4()),
                 sender["uuid"],
-                sender["Account_Number"],
+                sender["nafi_iban"],
                 float(amount),
                 beneficiary["Full_Name"],
-                beneficiary["Account_Number"],
+                beneficiary["nafi_iban"],
                 f"هدية إلى {beneficiary['Short_Name']}: {message}",
                 float(sender_balance_after),
                 reference,
@@ -170,10 +170,10 @@ async def send_gift(
             (
                 str(uuid4()),
                 receiver["uuid"],
-                receiver["Account_Number"],
+                receiver["nafi_iban"],
                 float(amount),
                 sender_name,
-                sender["Account_Number"],
+                sender["nafi_iban"],
                 f"هدية من {sender_name}: {message}",
                 float(receiver_balance_after),
                 reference,
@@ -197,6 +197,7 @@ async def send_gift(
                     "full_name": beneficiary["Full_Name"],
                     "nafi_iban": beneficiary["nafi_iban"],
                 },
+                "new_nafi_balance_sar": str(sender_balance_after),
                 "new_balance_sar": str(sender_balance_after),
                 "executed_at": now,
             },
@@ -213,8 +214,8 @@ TOOL: BaseTool = StructuredTool.from_function(
     description=(
         "Send a money gift (هدية) to a saved Nafi beneficiary after confirmation. "
         "Takes the recipient, the amount (must be above 0.0 SAR), and a dedication "
-        "message; the amount is deducted from the sender and delivered to the "
-        "recipient together with the message and the sender's full name."
+        "message; the amount moves only between the sender's and recipient's Nafi "
+        "wallet balances. Linked bank-account balances are never used or changed."
     ),
     args_schema=SendGiftArgs,
 )

@@ -1,9 +1,9 @@
 """``transfer_between_accounts`` — move money to a saved Nafi beneficiary.
 
 The transfer only completes when every database rule passes: the destination
-must be saved in the owner's beneficiary list, the beneficiary must still map
-to a bank account, the balance must cover the amount, and the owner's daily
-spend limit must not be exceeded. Both ledger entries and both balances are
+must be saved in the owner's beneficiary list, both Nafi wallets must exist,
+the Nafi balance must cover the amount, and the owner's daily spend limit must
+not be exceeded. Both ledger entries and both wallet balances are
 written in one atomic database transaction, and a completed transfer returns
 an authoritative receipt.
 """
@@ -23,7 +23,7 @@ from agentic.tools.bank_db import (
     BankConnection,
     BankRow,
     find_beneficiary,
-    find_user_by_account_number,
+    find_user_by_uuid,
     find_user_by_username,
     money,
     next_reference,
@@ -33,7 +33,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
-    update_account_balance,
+    update_nafi_balance,
 )
 
 
@@ -109,11 +109,11 @@ def _validate_transfer(
             data={"destination_account": destination_account},
             error_code="beneficiary_not_found",
         )
-    balance = money(owner["Balance_SAR"])
+    balance = money(owner["nafi_balance"])
     if amount > balance:
         return tool_result(
             status="failed",
-            summary="The available balance is not enough for this transfer.",
+            summary="The available Nafi wallet balance is not enough for this transfer.",
             data={
                 "requested_amount_sar": str(amount),
                 "available_balance_sar": str(balance),
@@ -135,13 +135,13 @@ def _validate_transfer(
             error_code="daily_limit_exceeded",
         )
 
-    receiver = find_user_by_account_number(connection, beneficiary["Account_Number"])
+    receiver = find_user_by_uuid(connection, beneficiary["beneficiary_uuid"])
     if receiver is None:
         return tool_result(
             status="failed",
-            summary="The destination bank account is no longer available.",
-            data={"destination_account": beneficiary["Account_Number"]},
-            error_code="destination_account_unavailable",
+            summary="The destination Nafi wallet is no longer available.",
+            data={"destination_nafi_iban": beneficiary["nafi_iban"]},
+            error_code="destination_wallet_unavailable",
         )
     return owner, beneficiary, receiver, balance
 
@@ -182,7 +182,7 @@ async def preflight_transfer_between_accounts(
 async def transfer_between_accounts(
     destination_account: str, amount: float | Decimal
 ) -> dict[str, Any]:
-    """Execute an atomic transfer from the owner's account to a beneficiary."""
+    """Execute an atomic transfer between two Nafi wallets."""
 
     username, _ = owner_identity()
     amount = money(amount)
@@ -207,11 +207,11 @@ async def transfer_between_accounts(
                 data={"destination_account": destination_account},
                 error_code="beneficiary_not_found",
             )
-        balance = money(owner["Balance_SAR"])
+        balance = money(owner["nafi_balance"])
         if amount > balance:
             return tool_result(
                 status="failed",
-                summary="The available balance is not enough for this transfer.",
+                summary="The available Nafi wallet balance is not enough for this transfer.",
                 data={
                     "requested_amount_sar": str(amount),
                     "available_balance_sar": str(balance),
@@ -233,22 +233,22 @@ async def transfer_between_accounts(
                 error_code="daily_limit_exceeded",
             )
 
-        receiver = find_user_by_account_number(connection, beneficiary["Account_Number"])
+        receiver = find_user_by_uuid(connection, beneficiary["beneficiary_uuid"])
         if receiver is None:
             return tool_result(
                 status="failed",
-                summary="The destination bank account is no longer available.",
-                data={"destination_account": beneficiary["Account_Number"]},
-                error_code="destination_account_unavailable",
+                summary="The destination Nafi wallet is no longer available.",
+                data={"destination_nafi_iban": beneficiary["nafi_iban"]},
+                error_code="destination_wallet_unavailable",
             )
 
         reference = next_reference(connection, "transfer")
         now = timestamp()
         sender_balance_after = balance - amount
-        receiver_balance_after = money(receiver["Balance_SAR"]) + amount
+        receiver_balance_after = money(receiver["nafi_balance"]) + amount
 
-        update_account_balance(connection, owner, sender_balance_after)
-        update_account_balance(connection, receiver, receiver_balance_after)
+        update_nafi_balance(connection, owner, sender_balance_after)
+        update_nafi_balance(connection, receiver, receiver_balance_after)
         connection.execute(
             "INSERT INTO transactions"
             " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
@@ -258,10 +258,10 @@ async def transfer_between_accounts(
             (
                 str(uuid4()),
                 owner["uuid"],
-                owner["Account_Number"],
+                owner["nafi_iban"],
                 float(amount),
                 beneficiary["Full_Name"],
-                beneficiary["Account_Number"],
+                beneficiary["nafi_iban"],
                 f"حوالة إلى {beneficiary['Short_Name']}",
                 float(sender_balance_after),
                 reference,
@@ -277,10 +277,10 @@ async def transfer_between_accounts(
             (
                 str(uuid4()),
                 receiver["uuid"],
-                receiver["Account_Number"],
+                receiver["nafi_iban"],
                 float(amount),
                 owner["Full_Name_Ar"],
-                owner["Account_Number"],
+                owner["nafi_iban"],
                 f"حوالة واردة من {owner['Full_Name_Ar']}",
                 float(receiver_balance_after),
                 reference,
@@ -301,6 +301,7 @@ async def transfer_between_accounts(
                     "short_name": beneficiary["Short_Name"],
                     "nafi_iban": beneficiary["nafi_iban"],
                 },
+                "new_nafi_balance_sar": str(sender_balance_after),
                 "new_balance_sar": str(sender_balance_after),
                 "executed_at": now,
             },
@@ -315,14 +316,14 @@ TOOL: BaseTool = StructuredTool.from_function(
     coroutine=transfer_between_accounts,
     name="transfer_between_accounts",
     description=(
-        "Transfer money from the authenticated user's account to a saved Nafi beneficiary "
+        "Transfer money strictly from the authenticated user's Nafi wallet to a saved Nafi beneficiary "
         "immediately in hackathon demo mode. The destination must already be in the benefit list, and "
-        "the amount must be covered by the balance and the daily spend limit. When the user "
+        "the amount must be covered by the Nafi wallet balance and the daily spend limit. When the user "
         "provides both a destination and amount, call this capability directly: its preflight "
         "is the authority on whether the beneficiary exists. Never ask the user to confirm "
         "whether a named beneficiary is saved before calling it. Preserve the destination text "
         "as the user stated it when possible. The database resolves the saved Nafi beneficiary "
-        "to their current primary bank account only when executing the transfer."
+        "to their Nafi wallet; linked bank-account balances are never used or changed."
     ),
     args_schema=TransferBetweenAccountsArgs,
 )

@@ -35,6 +35,11 @@ class NafiTransferArgs(BaseModel):
     amount: float
 
 
+class WalletFundingArgs(BaseModel):
+    source_account: str
+    amount: float
+
+
 async def add_task(database, *, task_id: str = "task-1") -> None:
     async with database.session() as session:
         session.add(
@@ -851,6 +856,169 @@ async def test_transfer_preflight_uses_authenticated_runtime_identity(
 
     assert observed == [("user-1", "tenant-1"), ("user-1", "tenant-1")]
     assert result["status"] == "completed"
+
+
+@pytest.mark.integration
+@pytest.mark.security
+async def test_wallet_funding_preflights_then_requires_exact_confirmation(
+    database, app_config, monkeypatch
+):
+    await add_task(database)
+    observed: list[tuple[str, tuple[str, str] | None]] = []
+
+    async def get_balance(account: str) -> dict[str, Any]:
+        del account
+        observed.append(("account_search", current_tool_identity()))
+        return {
+            "status": "completed",
+            "summary": "Found the matching linked account",
+            "data": {
+                "accounts": [
+                    {
+                        "bank_name": "Saudi National Bank",
+                        "masked_account_number": "SA12****************9001",
+                    }
+                ]
+            },
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    async def preflight_fund_nafi_wallet(**_: Any) -> dict[str, Any]:
+        observed.append(("preflight", current_tool_identity()))
+        return {
+            "status": "completed",
+            "summary": "Source account and balance validated",
+            "data": {},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    async def source_account_is_grounded(*_: Any, **__: Any) -> bool:
+        observed.append(("account_grounding", current_tool_identity()))
+        return True
+
+    async def fund_nafi_wallet(source_account: str, amount: float) -> dict[str, Any]:
+        del source_account, amount
+        observed.append(("execute", current_tool_identity()))
+        return {
+            "status": "completed",
+            "summary": "Wallet funded",
+            "data": {"new_nafi_balance_sar": "101.00"},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+            "receipt_id": "receipt-wallet-funding",
+        }
+
+    monkeypatch.setattr(
+        "agentic.tools.wallet_funding.preflight_fund_nafi_wallet",
+        preflight_fund_nafi_wallet,
+    )
+    monkeypatch.setattr(
+        "agentic.tools.wallet_funding.source_account_is_grounded",
+        source_account_is_grounded,
+    )
+    tool = StructuredTool.from_function(
+        coroutine=fund_nafi_wallet,
+        name="fund_nafi_wallet",
+        description="Fund the Nafi wallet from a linked bank.",
+        args_schema=WalletFundingArgs,
+    )
+    account_search_tool = StructuredTool.from_function(
+        coroutine=get_balance,
+        name="get_balance",
+        description="Search the authenticated user's linked accounts.",
+        args_schema=BalanceArgs,
+    )
+    arguments = {"source_account": "primary", "amount": 100.0}
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_balance",
+                        "args": {"account": "bank alahli"},
+                        "id": "wallet-account-search",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "fund_nafi_wallet",
+                        "args": arguments,
+                        "id": "wallet-funding-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            report_message(
+                summary="Wallet funded", receipt_ids=["receipt-wallet-funding"]
+            ),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(Intent.WALLET_FUNDING),
+        external_tools=[account_search_tool, tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="get_balance",
+                risk=ToolRisk.SENSITIVE_READ,
+                intents=frozenset({Intent.WALLET_FUNDING.value}),
+                required_scopes=frozenset({"financial:read"}),
+            ),
+            ToolMetadata(
+                name="fund_nafi_wallet",
+                risk=ToolRisk.FINANCIAL_ACTION,
+                intents=frozenset({Intent.WALLET_FUNDING.value}),
+                explicit_user_fields=frozenset({"source_account", "amount"}),
+                required_scopes=frozenset({"financial:write"}),
+                requires_confirmation=True,
+                requires_receipt=True,
+                idempotent=True,
+            )
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+    graph_config = {"configurable": {"thread_id": "wallet-funding"}}
+    context = runtime_context(database, app_config)
+    context.original_request = "Deposit 100 SAR into Nafi from my bank alahli account"
+
+    interrupted = await graph.ainvoke(
+        state(context.original_request), config=graph_config, context=context
+    )
+    confirmation = interrupted["__interrupt__"][0].value
+    assert confirmation["kind"] == "confirmation"
+    assert confirmation["arguments"] == arguments
+    assert observed == [
+        ("account_search", ("user-1", "tenant-1")),
+        ("account_grounding", ("user-1", "tenant-1")),
+        ("preflight", ("user-1", "tenant-1")),
+    ]
+
+    token = context.confirmation_signer.issue(
+        auth=context.auth,
+        task_id="task-1",
+        tool_name="fund_nafi_wallet",
+        arguments=arguments,
+    )
+    context.otp_verified = True
+    result = await graph.ainvoke(Command(resume=token), config=graph_config, context=context)
+
+    assert observed == [
+        ("account_search", ("user-1", "tenant-1")),
+        ("account_grounding", ("user-1", "tenant-1")),
+        ("preflight", ("user-1", "tenant-1")),
+        ("account_grounding", ("user-1", "tenant-1")),
+        ("preflight", ("user-1", "tenant-1")),
+        ("execute", ("user-1", "tenant-1")),
+    ]
+    assert result["final_report"]["receipt_ids"] == ["receipt-wallet-funding"]
 
 
 @pytest.mark.integration
