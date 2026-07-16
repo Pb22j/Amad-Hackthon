@@ -529,7 +529,9 @@ async def _relay_browser_to_provider(browser: WebSocket, provider: Any) -> None:
 async def _wait_for_provider_setup(provider: Any) -> None:
     """Honor Gemini's setup barrier before sending history or microphone data."""
 
-    raw = await asyncio.wait_for(provider.recv(), timeout=10)
+    raw = await asyncio.wait_for(
+        provider.recv(), timeout=settings.REALTIME_SETUP_TIMEOUT_SECONDS
+    )
     text = raw if isinstance(raw, str) else raw.decode("utf-8")
     message = json.loads(text)
     if "setupComplete" not in message:
@@ -642,7 +644,7 @@ async def realtime_websocket(websocket: WebSocket) -> None:
     except (WebSocketDisconnect, websockets.ConnectionClosed):
         pass
     except Exception as exc:
-        logger.error("Realtime proxy failed: %s", type(exc).__name__)
+        logger.error("Realtime proxy failed: %s: %s", type(exc).__name__, str(exc))
         await websocket.close(code=1011)
     finally:
         if active_realtime_connections.get(identity_key) is websocket:

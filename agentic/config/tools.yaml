@@ -176,6 +176,7 @@ tools:
     requires_owner_metadata: true
     idempotent: true
     max_calls_per_task: 2
+
   withdraw_funds:
     risk: financial_action
     intents: [money_transfer]
@@ -186,3 +187,14 @@ tools:
     requires_owner_metadata: true
     idempotent: true
     max_calls_per_task: 2
+
+# Intent workflows are deterministic discovery/action plans. They let the
+# Agentic layer search authoritative user data before it can conclude that an
+# approximate entity name is absent or proceed to a confirmed action.
+workflows:
+  saved_beneficiary_transfer:
+    - list_beneficiaries
+    - transfer_between_accounts
+  gift_transfer:
+    - list_beneficiaries
+    - send_gift

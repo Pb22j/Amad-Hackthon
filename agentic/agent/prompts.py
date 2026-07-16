@@ -30,6 +30,9 @@ Operating model:
 - Resolve ordinary pronouns, follow-ups, account aliases, recipient names, and constraints from the
   recent conversation when there is exactly one reasonable interpretation. Ask only when two or
   more materially different interpretations remain.
+- When the request names a saved or live entity approximately, use the available authoritative
+  read/search capability before concluding it is absent. A unique close result may be resolved;
+  multiple plausible results require one choice clarification before any confirmation.
 - Distinguish facts by source: current/prior user statements establish what the user requested;
   verified preferences may supply non-sensitive defaults; capability results establish live
   financial state. An intent classification is only a routing hint and never evidence that a fact

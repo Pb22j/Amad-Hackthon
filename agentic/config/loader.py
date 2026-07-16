@@ -165,6 +165,19 @@ class PoliciesConfig(StrictModel):
 
 class ToolFileConfig(StrictModel):
     tools: dict[str, dict[str, Any]] = {}
+    workflows: dict[str, tuple[str, ...]] = {}
+
+    @model_validator(mode="after")
+    def workflows_reference_registered_tools(self) -> "ToolFileConfig":
+        for intent, sequence in self.workflows.items():
+            if not sequence:
+                raise ValueError(f"workflow {intent!r} must contain at least one tool")
+            unknown = set(sequence) - self.tools.keys()
+            if unknown:
+                raise ValueError(
+                    f"workflow {intent!r} references unknown tools: {sorted(unknown)}"
+                )
+        return self
 
 
 class SecretsConfig(StrictModel):

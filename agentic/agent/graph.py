@@ -107,11 +107,7 @@ def build_financial_agent(
         AgentContextMiddleware(),
         IntentToolScopeMiddleware(
             {item.name for item in tool_metadata},
-            required_tool_sequences={
-                Intent.SAVED_BENEFICIARY_TRANSFER.value: (
-                    "transfer_between_accounts",
-                ),
-            },
+            required_tool_sequences=config.tools.workflows,
             require_tool_selection_first=True,
         ),
         ModelCallLimitMiddleware(

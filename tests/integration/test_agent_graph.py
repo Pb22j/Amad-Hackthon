@@ -855,6 +855,169 @@ async def test_transfer_preflight_uses_authenticated_runtime_identity(
 
 @pytest.mark.integration
 @pytest.mark.security
+async def test_ambiguous_beneficiary_is_clarified_before_exact_confirmation(
+    database, app_config, monkeypatch
+):
+    await add_task(database)
+    observed: list[dict[str, Any]] = []
+    saud_full_name = "سعود عبدالله العنزي"
+    saud_iban = "SA9900000000000000000007"
+
+    async def preflight_transfer_between_accounts(
+        destination_account: str, amount: float
+    ) -> dict[str, Any]:
+        del amount
+        if destination_account == "سعود":
+            return {
+                "status": "failed",
+                "summary": "Multiple beneficiaries match.",
+                "data": {
+                    "destination_account": destination_account,
+                    "candidates": [
+                        {
+                            "full_name": saud_full_name,
+                            "full_name_en": "Saud Abdullah Alanazi",
+                            "short_name": "سعود عبدالله",
+                            "nafi_iban": saud_iban,
+                        },
+                        {
+                            "full_name": "سعود محمد القحطاني",
+                            "full_name_en": "Saud Mohammed Alqahtani",
+                            "short_name": "سعود محمد",
+                            "nafi_iban": "SA9900000000000000000004",
+                        },
+                    ],
+                },
+                "user_id": "user-1",
+                "tenant_id": "tenant-1",
+                "error_code": "beneficiary_ambiguous",
+            }
+        return {
+            "status": "completed",
+            "summary": "Beneficiary resolved.",
+            "data": {
+                "resolved_destination": {
+                    "full_name": saud_full_name,
+                    "full_name_en": "Saud Abdullah Alanazi",
+                    "short_name": "سعود عبدالله",
+                    "nafi_iban": saud_iban,
+                }
+            },
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    async def transfer_between_accounts(destination_account: str, amount: float) -> dict[str, Any]:
+        observed.append({"destination_account": destination_account, "amount": amount})
+        return {
+            "status": "completed",
+            "summary": "Transfer completed.",
+            "data": {},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+            "receipt_id": "receipt-beneficiary-resolution",
+        }
+
+    monkeypatch.setattr(
+        "agentic.tools.transfer_between_accounts.preflight_transfer_between_accounts",
+        preflight_transfer_between_accounts,
+    )
+    tool = StructuredTool.from_function(
+        coroutine=transfer_between_accounts,
+        name="transfer_between_accounts",
+        description="Transfer to a saved Nafi beneficiary.",
+        args_schema=NafiTransferArgs,
+    )
+    canonical_arguments = {"destination_account": saud_full_name, "amount": 100.0}
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_between_accounts",
+                        "args": {"destination_account": "سعود", "amount": 100},
+                        "id": "ambiguous-beneficiary",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_between_accounts",
+                        "args": canonical_arguments,
+                        "id": "resolved-beneficiary",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            report_message(
+                summary="Transfer completed",
+                receipt_ids=["receipt-beneficiary-resolution"],
+            ),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(Intent.SAVED_BENEFICIARY_TRANSFER),
+        external_tools=[tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="transfer_between_accounts",
+                risk=ToolRisk.FINANCIAL_ACTION,
+                intents=frozenset({Intent.SAVED_BENEFICIARY_TRANSFER.value}),
+                explicit_user_fields=frozenset({"destination_account", "amount"}),
+                required_scopes=frozenset({"financial:write"}),
+                requires_confirmation=True,
+                requires_receipt=True,
+                idempotent=True,
+            )
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+    graph_config = {"configurable": {"thread_id": "task-1"}}
+    context = runtime_context(database, app_config)
+    context.original_request = "حول 100 ريال لسعود"
+
+    clarification = await graph.ainvoke(
+        state(context.original_request), config=graph_config, context=context
+    )
+    clarification_payload = clarification["__interrupt__"][0].value
+    assert clarification_payload["kind"] == "clarification"
+    assert clarification_payload["reason_code"] == "ambiguous_beneficiary"
+    assert clarification_payload["expected_answer"]["enum"] == [
+        saud_full_name,
+        "سعود محمد القحطاني",
+    ]
+
+    context.explicit_user_field_values = {"destination_account": (saud_full_name,)}
+    context.resuming_from_clarification = True
+    confirmation = await graph.ainvoke(
+        Command(resume=saud_full_name), config=graph_config, context=context
+    )
+    confirmation_payload = confirmation["__interrupt__"][0].value
+    assert confirmation_payload["kind"] == "confirmation"
+    assert confirmation_payload["arguments"] == canonical_arguments
+    assert observed == []
+
+    token = context.confirmation_signer.issue(
+        auth=context.auth,
+        task_id="task-1",
+        tool_name="transfer_between_accounts",
+        arguments=canonical_arguments,
+    )
+    context.otp_verified = True
+    result = await graph.ainvoke(Command(resume=token), config=graph_config, context=context)
+
+    assert observed == [canonical_arguments]
+    assert result["final_report"]["receipt_ids"] == ["receipt-beneficiary-resolution"]
+
+
+@pytest.mark.integration
+@pytest.mark.security
 async def test_financial_action_interrupts_for_exact_confirmation(database, app_config):
     await add_task(database)
     calls = 0

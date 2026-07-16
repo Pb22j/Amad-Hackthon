@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import threading
-import unicodedata
 from calendar import monthrange
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
@@ -22,6 +20,12 @@ import psycopg
 from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict
 
+from agentic.tools.entity_resolution import (
+    EntityResolution,
+    multilingual_name_key,
+    normalize_entity_text,
+    resolve_entity,
+)
 from agentic.tools.runtime_identity import current_tool_identity
 
 T = TypeVar("T")
@@ -115,47 +119,25 @@ def normalize_account_number(value: str) -> str:
 def normalize_beneficiary_name(value: str) -> str:
     """Normalize harmless spelling differences used when resolving saved names."""
 
-    folded = unicodedata.normalize("NFKC", value).casefold().strip()
-    folded = "".join(
-        character
-        for character in folded
-        if not unicodedata.combining(character) and character != "ـ"
-    )
-    folded = folded.translate(
-        str.maketrans(
-            {"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ة": "ه", "ى": "ي"}
-        )
-    )
-    return " ".join(folded.split())
-
-
-_ARABIC_TRANSLITERATION = str.maketrans(
-    {
-        "ا": "a", "أ": "a", "إ": "a", "آ": "a", "ٱ": "a",
-        "ب": "b", "ت": "t", "ث": "th", "ج": "j", "ح": "h",
-        "خ": "kh", "د": "d", "ذ": "dh", "ر": "r", "ز": "z",
-        "س": "s", "ش": "sh", "ص": "s", "ض": "d", "ط": "t",
-        "ظ": "z", "ع": "", "غ": "gh", "ف": "f", "ق": "q",
-        "ك": "k", "ل": "l", "م": "m", "ن": "n", "ه": "h",
-        "ة": "a", "و": "u", "ؤ": "u", "ي": "i", "ى": "i",
-        "ئ": "i", "ء": "",
-    }
-)
+    return normalize_entity_text(value)
 
 
 def beneficiary_name_key(value: str) -> str:
     """Return a conservative consonant key for Arabic/Latin name matching."""
 
-    normalized = unicodedata.normalize("NFKC", value).casefold().strip()
-    normalized = "".join(
-        character
-        for character in normalized
-        if not unicodedata.combining(character) and character != "ـ"
+    return multilingual_name_key(value)
+
+
+def _beneficiary_name_variants(beneficiary: BankRow) -> tuple[str, ...]:
+    return tuple(
+        str(value)
+        for value in (
+            beneficiary["Short_Name"],
+            beneficiary["Full_Name"],
+            beneficiary["full_name_en"],
+        )
+        if value
     )
-    transliterated = normalized.translate(_ARABIC_TRANSLITERATION)
-    latin = unicodedata.normalize("NFKD", transliterated)
-    letters = "".join(character for character in latin if character.isascii() and character.isalpha())
-    return "".join(character for character in letters if character not in "aeiouy")
 
 
 def riyadh_now() -> datetime:
@@ -270,9 +252,9 @@ def update_account_balance(
     )
 
 
-def find_beneficiary(
+def resolve_beneficiary(
     connection: BankConnection, owner_uuid: str, destination: str
-) -> BankRow | None:
+) -> EntityResolution[BankRow]:
     normalized = normalize_account_number(destination)
     projection = """
         SELECT b.uuid, b.owner_uuid, b.beneficiary_uuid, b.short_name,
@@ -288,37 +270,24 @@ def find_beneficiary(
         (owner_uuid, normalized, normalized),
     ).fetchone()
     if row is not None:
-        return row
-    requested_name = normalize_beneficiary_name(destination)
-    requested_key = beneficiary_name_key(destination)
-    requested_token_keys = {
-        beneficiary_name_key(token)
-        for token in re.findall(r"[^\W\d_]+", destination, flags=re.UNICODE)
-    }
-    transliterated_matches: list[BankRow] = []
-    short_name_matches: list[BankRow] = []
-    for beneficiary in connection.execute(
+        return EntityResolution(match=row, match_type="account_identifier")
+
+    beneficiaries = connection.execute(
         projection + " WHERE b.owner_uuid = %s", (owner_uuid,)
-    ).fetchall():
-        short_name = str(beneficiary["Short_Name"])
-        full_name = str(beneficiary["Full_Name"])
-        raw_names = {short_name, full_name}
-        if requested_name in {normalize_beneficiary_name(name) for name in raw_names}:
-            return beneficiary
-        normalized_short_name = normalize_beneficiary_name(short_name)
-        short_key = beneficiary_name_key(short_name)
-        if (
-            normalized_short_name
-            and re.search(rf"(?<!\w){re.escape(normalized_short_name)}(?!\w)", requested_name)
-        ) or (len(short_key) >= 2 and short_key in requested_token_keys):
-            short_name_matches.append(beneficiary)
-        if len(requested_key) >= 2 and requested_key in {
-            beneficiary_name_key(name) for name in raw_names
-        }:
-            transliterated_matches.append(beneficiary)
-    if len(short_name_matches) == 1:
-        return short_name_matches[0]
-    return transliterated_matches[0] if len(transliterated_matches) == 1 else None
+    ).fetchall()
+    return resolve_entity(
+        destination,
+        beneficiaries,
+        labels=_beneficiary_name_variants,
+    )
+
+
+def find_beneficiary(
+    connection: BankConnection, owner_uuid: str, destination: str
+) -> BankRow | None:
+    """Return only a unique beneficiary match; never guess through ambiguity."""
+
+    return resolve_beneficiary(connection, owner_uuid, destination).match
 
 
 def spent_today(connection: BankConnection, user_uuid: str) -> Decimal:

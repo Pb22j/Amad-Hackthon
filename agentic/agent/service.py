@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
+from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from sqlalchemy import select
 
@@ -62,6 +63,7 @@ from agentic.security.rate_limit import InMemoryRateLimiter
 from agentic.telemetry.events import EventPublisher
 from agentic.telemetry.metrics import TASK_DURATION, TASKS
 from agentic.tools.guard import AgentRuntimeContext
+from agentic.tools.metadata import ToolResult
 
 
 logger = logging.getLogger(__name__)
@@ -88,10 +90,11 @@ def _validate_report_number_grounding(
     *,
     original_request: str,
     executions: list[ToolExecutionRow],
+    authoritative_tool_results: list[dict[str, Any]] | None = None,
 ) -> None:
     """Reject model-created financial figures not present in trusted evidence."""
 
-    if not executions:
+    if not executions and not authoritative_tool_results:
         return
     claims = _numbers_in(
         {
@@ -105,8 +108,97 @@ def _validate_report_number_grounding(
     for execution in executions:
         evidence.update(_numbers_in(execution.arguments or {}))
         evidence.update(_numbers_in(execution.result or {}))
+    for tool_result in authoritative_tool_results or []:
+        evidence.update(_numbers_in(tool_result))
     if not claims.issubset(evidence):
         raise ValueError("report contains a numeric claim not grounded in authoritative evidence")
+
+
+def _authoritative_tool_results(messages: list[Any]) -> list[dict[str, Any]]:
+    """Recover guard-validated tool results, including failed preflight reads."""
+
+    results: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
+            continue
+        try:
+            payload = json.loads(message.content)
+            validated = ToolResult.model_validate(payload)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        results.append(validated.model_dump(mode="json"))
+    return results
+
+
+def _drop_ungrounded_values(value: Any, ungrounded: set[Decimal]) -> Any:
+    """Remove presentation fragments containing model-created numeric claims."""
+
+    if isinstance(value, dict):
+        return {
+            key: cleaned
+            for key, item in value.items()
+            if (cleaned := _drop_ungrounded_values(item, ungrounded)) is not None
+        }
+    if isinstance(value, list):
+        return [
+            cleaned
+            for item in value
+            if (cleaned := _drop_ungrounded_values(item, ungrounded)) is not None
+        ]
+    return None if _numbers_in(value) & ungrounded else value
+
+
+def _sanitize_report_number_grounding(
+    report: AgentReport,
+    *,
+    original_request: str,
+    executions: list[ToolExecutionRow],
+    authoritative_tool_results: list[dict[str, Any]] | None = None,
+    language: str = "en",
+) -> AgentReport:
+    """Keep financial truth strict without dropping a task over reply wording."""
+
+    evidence = _numbers_in(original_request)
+    for execution in executions:
+        evidence.update(_numbers_in(execution.arguments or {}))
+        evidence.update(_numbers_in(execution.result or {}))
+    for tool_result in authoritative_tool_results or []:
+        evidence.update(_numbers_in(tool_result))
+
+    claims = _numbers_in(
+        {
+            "summary": report.summary,
+            "actions": report.actions,
+            "result": report.result,
+            "interaction_context": report.interaction_context.model_dump(mode="json"),
+        }
+    )
+    ungrounded = claims - evidence
+    if not ungrounded:
+        return report
+
+    cleaned = _drop_ungrounded_values(report.model_dump(mode="json"), ungrounded)
+    if cleaned.get("summary") is None:
+        cleaned["summary"] = _localized(
+            language,
+            "The request could not be completed under the current financial constraints.",
+            "تعذر إكمال الطلب وفق القيود المالية الحالية.",
+        )
+    context = cleaned.get("interaction_context") or {}
+    if context.get("user_goal") is None:
+        context["user_goal"] = original_request
+    if not context.get("key_facts"):
+        context["key_facts"] = [cleaned["summary"]]
+    context.setdefault("suggested_next_steps", [])
+    cleaned["interaction_context"] = context
+    sanitized = AgentReport.model_validate(cleaned)
+    _validate_report_number_grounding(
+        sanitized,
+        original_request=original_request,
+        executions=executions,
+        authoritative_tool_results=authoritative_tool_results,
+    )
+    return sanitized
 
 
 def _localized(language: str, english: str, arabic: str) -> str:
@@ -763,10 +855,19 @@ class AgentService:
         authoritative_receipts = {
             row.receipt_id for row in executions if row.receipt_id and row.status == "completed"
         }
+        authoritative_results = _authoritative_tool_results(result.get("messages", []))
+        report = _sanitize_report_number_grounding(
+            report,
+            original_request=request.original_user_message,
+            executions=executions,
+            authoritative_tool_results=authoritative_results,
+            language=request.language,
+        )
         _validate_report_number_grounding(
             report,
             original_request=request.original_user_message,
             executions=executions,
+            authoritative_tool_results=authoritative_results,
         )
         if not set(report.receipt_ids).issubset(authoritative_receipts):
             raise ValueError("report contains a receipt not returned by an authoritative tool")

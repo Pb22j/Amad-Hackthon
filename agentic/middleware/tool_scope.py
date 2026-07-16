@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -24,6 +25,14 @@ def _completed_tool_names(messages: list[Any]) -> set[str]:
     completed: set[str] = set()
     for message in messages:
         if not isinstance(message, ToolMessage):
+            continue
+        try:
+            payload = json.loads(str(message.content))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("status") == "input_received":
+            # The guard intentionally asks the model to repeat the exact
+            # clarified call in a fresh invocation before confirmation.
             continue
         name = message.name or call_names.get(str(message.tool_call_id))
         if name:

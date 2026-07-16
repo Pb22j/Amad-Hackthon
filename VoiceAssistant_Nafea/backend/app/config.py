@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     LLM_SYSTEM_PROMPT: str = "You are a helpful and conversational AI assistant."
     REALTIME_MODEL: str = "gemini-3.1-flash-live-preview"
     REALTIME_VOICE: str = "Charon"
+    REALTIME_SETUP_TIMEOUT_SECONDS: float = Field(default=30.0, ge=5.0, le=120.0)
 
     AGENTIC_BASE_URL: str = "http://localhost:9000"
     INTERACTION_SHARED_SECRET: str = "dummy_secret_key_123_dummy_secret_key"

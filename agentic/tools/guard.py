@@ -121,6 +121,13 @@ def _argument_is_explicit(
     exact = re.compile(rf"(?<!\w){re.escape(rendered)}(?!\w)", re.IGNORECASE)
     if any(exact.search(item) is not None for item in evidence):
         return True
+    if field_name in {"destination", "destination_account", "recipient", "participants"}:
+        # Arabic commonly attaches the preposition "to" directly to a name,
+        # such as "لسعود". This preserves exact provenance while accepting
+        # the grammatical prefix instead of forcing a redundant clarification.
+        prefixed = re.compile(rf"(?<!\w)ل{re.escape(rendered)}(?!\w)", re.IGNORECASE)
+        if any(prefixed.search(item) is not None for item in evidence):
+            return True
     if field_name == "symbol":
         # Investment tools intentionally accept a small, server-owned alias
         # table. The model may choose the canonical symbol while the user says
@@ -482,15 +489,81 @@ class GuardedToolFactory:
                 # execution. Bind authenticated identity here as well; without
                 # it owner_identity() falls back to the demo user and can
                 # incorrectly report that a real user's beneficiary is absent.
-                with bind_tool_identity(
-                    user_id=context.auth.user_id,
-                    tenant_id=context.auth.tenant_id,
-                ):
-                    preflight = ToolResult.model_validate(
-                        await preflight_transfer_between_accounts(**arguments)
-                    )
+                async def run_transfer_preflight() -> ToolResult:
+                    with bind_tool_identity(
+                        user_id=context.auth.user_id,
+                        tenant_id=context.auth.tenant_id,
+                    ):
+                        return ToolResult.model_validate(
+                            await preflight_transfer_between_accounts(**arguments)
+                        )
+
+                preflight = await run_transfer_preflight()
+                if preflight.error_code == "beneficiary_ambiguous":
+                    candidates = preflight.data.get("candidates", [])
+                    option_targets: dict[str, str] = {}
+                    full_name_counts: dict[str, int] = {}
+                    for candidate in candidates:
+                        full_name = str(candidate.get("full_name") or "").strip()
+                        if full_name:
+                            full_name_counts[full_name] = full_name_counts.get(full_name, 0) + 1
+                    for candidate in candidates:
+                        full_name = str(candidate.get("full_name") or "").strip()
+                        short_name = str(candidate.get("short_name") or "").strip()
+                        nafi_iban = str(candidate.get("nafi_iban") or "").strip()
+                        if not full_name or not nafi_iban:
+                            continue
+                        option = (
+                            full_name
+                            if full_name_counts.get(full_name) == 1
+                            else f"{full_name} ({short_name})"
+                        )
+                        option_targets[option] = nafi_iban
+                    if 2 <= len(option_targets) <= 20:
+                        destination = str(arguments["destination_account"])
+                        arabic = bool(re.search(r"[\u0600-\u06ff]", context.original_request))
+                        question = (
+                            f"وجدت أكثر من مستفيد قريب من «{destination}». من تقصد؟"
+                            if arabic
+                            else f"I found multiple beneficiaries close to '{destination}'. Which one do you mean?"
+                        )
+                        selected = interrupt(
+                            {
+                                "kind": "clarification",
+                                "clarification_id": str(
+                                    uuid5(
+                                        NAMESPACE_URL,
+                                        (
+                                            f"{context.task_id}:{metadata.name}:beneficiary:"
+                                            f"{runtime.tool_call_id or 'unknown'}"
+                                        ),
+                                    )
+                                ),
+                                "question": question,
+                                "reason_code": "ambiguous_beneficiary",
+                                "expected_answer": {
+                                    "type": "string",
+                                    "field": "destination_account",
+                                    "label": "المستفيد" if arabic else "Beneficiary",
+                                    "enum": list(option_targets),
+                                    "minLength": 1,
+                                    "maxLength": 500,
+                                },
+                                "expires_in_seconds": 900,
+                            }
+                        )
+                        arguments["destination_account"] = option_targets.get(
+                            str(selected), str(selected)
+                        )
+                        arguments = args_schema.model_validate(arguments).model_dump()
+                        preflight = await run_transfer_preflight()
                 if preflight.status != "completed":
                     return preflight.model_dump_json()
+                resolved = preflight.data.get("resolved_destination", {})
+                if resolved.get("full_name"):
+                    # Bind confirmation and idempotency to the authoritative,
+                    # human-readable beneficiary selected by database search.
+                    arguments["destination_account"] = str(resolved["full_name"])
 
             tool_call_id = (
                 runtime.tool_call_id

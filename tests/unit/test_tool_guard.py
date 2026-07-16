@@ -42,6 +42,21 @@ def test_string_provenance_requires_token_boundaries():
     assert not _argument_is_explicit("Ann", "Transfer to Hannah", ())
 
 
+def test_arabic_destination_accepts_attached_to_preposition():
+    assert _argument_is_explicit(
+        "سعود",
+        "حول 100 ريال لسعود",
+        (),
+        field_name="destination_account",
+    )
+    assert not _argument_is_explicit(
+        "سعد",
+        "حول 100 ريال لسعود",
+        (),
+        field_name="destination_account",
+    )
+
+
 def test_investment_symbol_provenance_accepts_only_configured_alias_equivalence():
     assert _argument_is_explicit("ARAMCO", "اشتر لي عشر أسهم من أرامكو", (), field_name="symbol")
     assert not _argument_is_explicit("SABIC", "اشتر لي عشر أسهم من أرامكو", (), field_name="symbol")

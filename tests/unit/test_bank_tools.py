@@ -138,6 +138,18 @@ async def test_balance_and_transaction_search_are_bank_backed():
     assert all("راتب" in item["description"] for item in transactions.data["transactions"])
 
 
+async def test_balance_resolves_approximate_account_names_and_reports_ambiguity():
+    savings = _validated(await get_balance(account="savin"))
+    assert savings.status == "completed"
+    assert savings.data["account_type"] == "Savings"
+    assert savings.data["balance_sar"] == "4200.00"
+
+    ambiguous = _validated(await get_balance(account="مصرف"))
+    assert ambiguous.status == "failed"
+    assert ambiguous.error_code == "account_ambiguous"
+    assert len(ambiguous.data["candidates"]) == 2
+
+
 async def test_request_scoped_bank_identity_is_concurrency_safe():
     async def read_as(user_id: str) -> ToolResult:
         with bind_tool_identity(user_id=user_id, tenant_id="evaluation-tenant"):
@@ -283,6 +295,58 @@ async def test_transfer_accepts_saved_short_name():
     )
     assert result.status == "completed"
     assert result.data["destination"]["nafi_iban"] == LATIFA_NAFI_IBAN
+
+
+@pytest.mark.parametrize("destination", ["سعود", "لسعود", "سعوود", "Saud", "Soud"])
+async def test_transfer_searches_partial_and_misspelled_beneficiary_names(destination):
+    added = _validated(
+        await add_benefit(
+            nafi_iban=SAUD_NAFI_IBAN,
+            short_name="سعود عبدالله العنزي",
+        )
+    )
+    assert added.status == "completed"
+
+    result = _validated(
+        await preflight_transfer_between_accounts(
+            destination_account=destination,
+            amount=Decimal("10.00"),
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.data["resolved_destination"]["full_name"] == "سعود عبدالله العنزي"
+    assert result.data["resolved_destination"]["nafi_iban"] == SAUD_NAFI_IBAN
+
+
+async def test_transfer_returns_candidates_instead_of_guessing_ambiguous_partial_name():
+    saud = _validated(
+        await add_benefit(
+            nafi_iban=SAUD_NAFI_IBAN,
+            short_name="سعود عبدالله",
+        )
+    )
+    mohammed = _validated(
+        await add_benefit(
+            nafi_iban=MOHAMMED_NAFI_IBAN,
+            short_name="سعود محمد",
+        )
+    )
+    assert saud.status == mohammed.status == "completed"
+
+    result = _validated(
+        await preflight_transfer_between_accounts(
+            destination_account="سعود",
+            amount=Decimal("10.00"),
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "beneficiary_ambiguous"
+    assert {candidate["short_name"] for candidate in result.data["candidates"]} == {
+        "سعود عبدالله",
+        "سعود محمد",
+    }
 
 
 @pytest.mark.parametrize(

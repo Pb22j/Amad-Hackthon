@@ -28,6 +28,7 @@ from agentic.tools.bank_db import (
     money,
     next_reference,
     owner_identity,
+    resolve_beneficiary,
     run_in_bank_db,
     spent_today,
     timestamp,
@@ -77,8 +78,28 @@ def _validate_transfer(
             data={},
             error_code="customer_not_found",
         )
-    beneficiary = find_beneficiary(connection, owner["uuid"], destination_account)
+    resolution = resolve_beneficiary(connection, owner["uuid"], destination_account)
+    beneficiary = resolution.match
     if beneficiary is None:
+        if resolution.candidates:
+            candidates = [
+                {
+                    "full_name": candidate["Full_Name"],
+                    "full_name_en": candidate["full_name_en"],
+                    "short_name": candidate["Short_Name"],
+                    "nafi_iban": candidate["nafi_iban"],
+                }
+                for candidate in resolution.candidates
+            ]
+            return tool_result(
+                status="failed",
+                summary="More than one saved beneficiary closely matches the destination.",
+                data={
+                    "destination_account": destination_account,
+                    "candidates": candidates,
+                },
+                error_code="beneficiary_ambiguous",
+            )
         return tool_result(
             status="failed",
             summary=(
@@ -145,7 +166,14 @@ async def preflight_transfer_between_accounts(
         return tool_result(
             status="completed",
             summary="Transfer prerequisites validated.",
-            data={},
+            data={
+                "resolved_destination": {
+                    "full_name": validation[1]["Full_Name"],
+                    "full_name_en": validation[1]["full_name_en"],
+                    "short_name": validation[1]["Short_Name"],
+                    "nafi_iban": validation[1]["nafi_iban"],
+                }
+            },
         )
 
     return await run_in_bank_db(work)

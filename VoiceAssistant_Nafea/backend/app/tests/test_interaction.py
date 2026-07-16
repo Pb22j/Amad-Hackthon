@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -823,12 +824,22 @@ def test_realtime_initial_history_always_closes_the_protocol_phase():
 
 
 @pytest.mark.asyncio
-async def test_realtime_waits_for_setup_acknowledgement():
+async def test_realtime_waits_for_setup_acknowledgement(monkeypatch):
+    observed_timeouts = []
+
     class Provider:
         async def recv(self):
             return json.dumps({"setupComplete": {}})
 
+    original_wait_for = asyncio.wait_for
+
+    async def observed_wait_for(awaitable, *, timeout):
+        observed_timeouts.append(timeout)
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", observed_wait_for)
     await _wait_for_provider_setup(Provider())
+    assert observed_timeouts == [settings.REALTIME_SETUP_TIMEOUT_SECONDS]
 
 
 @pytest.mark.asyncio

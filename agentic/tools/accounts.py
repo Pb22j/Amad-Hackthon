@@ -18,6 +18,7 @@ from agentic.tools.bank_db import (
     run_in_bank_db,
     tool_result,
 )
+from agentic.tools.entity_resolution import resolve_entity
 
 
 class GetBalanceArgs(BankToolArgs):
@@ -67,6 +68,34 @@ async def get_balance(account: str = "primary") -> dict[str, Any]:
             ),
             None,
         )
+        if selected is None:
+            resolution = resolve_entity(
+                account,
+                accounts,
+                labels=lambda row: (
+                    str(row["account_type"]),
+                    str(row["bank_name_ar"]),
+                    str(row["bank_name_en"]),
+                ),
+            )
+            selected = resolution.match
+            if selected is None and resolution.candidates:
+                return tool_result(
+                    status="failed",
+                    summary="More than one account closely matches the requested account.",
+                    data={
+                        "account": account,
+                        "candidates": [
+                            {
+                                "bank_name": row["bank_name_ar"],
+                                "account_type": row["account_type"],
+                                "masked_account_number": _masked_account(row["account_number"]),
+                            }
+                            for row in resolution.candidates
+                        ],
+                    },
+                    error_code="account_ambiguous",
+                )
         if selected is None:
             return tool_result(
                 status="failed",
