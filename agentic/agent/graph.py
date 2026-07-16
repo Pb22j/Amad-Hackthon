@@ -111,12 +111,8 @@ def build_financial_agent(
                 Intent.SAVED_BENEFICIARY_TRANSFER.value: (
                     "transfer_between_accounts",
                 ),
-                # Backward-compatible fallback: a classifier that emits the
-                # broader transfer intent still cannot expose gift execution.
-                Intent.MONEY_TRANSFER.value: (
-                    "transfer_between_accounts",
-                ),
             },
+            require_tool_selection_first=True,
         ),
         ModelCallLimitMiddleware(
             run_limit=config.limits.task.max_model_calls,

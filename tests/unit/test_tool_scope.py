@@ -62,6 +62,65 @@ async def test_tool_scope_removes_unrelated_external_tools():
     assert observed == ["allowed_tool", "internal_response_tool"]
 
 
+async def test_first_step_must_select_tool_before_clarification_or_report():
+    middleware = IntentToolScopeMiddleware(
+        {"allowed_tool", "unrelated_tool"},
+        require_tool_selection_first=True,
+    )
+    request = ModelRequest(
+        model=ScriptedChatModel(responses=[]),
+        messages=[],
+        tools=[allowed_tool, unrelated_tool, internal_response_tool],
+        response_format="agent-report",
+        state={"messages": [], "available_tools": ["allowed_tool"]},
+    )
+    observed = []
+    options = {}
+
+    async def handler(scoped_request):
+        observed.extend(tool.name for tool in scoped_request.tools)
+        options.update(
+            response_format=scoped_request.response_format,
+            tool_choice=scoped_request.tool_choice,
+        )
+        return ModelResponse(result=[])
+
+    await middleware.awrap_model_call(request, handler)
+
+    assert observed == ["allowed_tool"]
+    assert options == {"response_format": None, "tool_choice": "required"}
+
+
+async def test_internal_exits_return_after_model_selects_a_financial_tool():
+    middleware = IntentToolScopeMiddleware(
+        {"allowed_tool", "unrelated_tool"},
+        require_tool_selection_first=True,
+    )
+    selected = AIMessage(
+        content="",
+        tool_calls=[{"id": "allowed-1", "name": "allowed_tool", "args": {}}],
+    )
+    completed = ToolMessage(content="allowed", tool_call_id="allowed-1", name="allowed_tool")
+    request = ModelRequest(
+        model=ScriptedChatModel(responses=[]),
+        messages=[selected, completed],
+        tools=[allowed_tool, unrelated_tool, internal_response_tool],
+        response_format="agent-report",
+        state={"messages": [], "available_tools": ["allowed_tool"]},
+    )
+    observed = []
+
+    async def handler(scoped_request):
+        observed.extend(tool.name for tool in scoped_request.tools)
+        assert scoped_request.response_format == "agent-report"
+        assert scoped_request.tool_choice is None
+        return ModelResponse(result=[])
+
+    await middleware.awrap_model_call(request, handler)
+
+    assert observed == ["allowed_tool", "internal_response_tool"]
+
+
 async def test_required_sequence_forces_authoritative_transfer_directly():
     middleware = IntentToolScopeMiddleware(
         {"list_beneficiaries", "transfer_between_accounts"},

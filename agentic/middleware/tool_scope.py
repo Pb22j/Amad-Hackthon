@@ -31,22 +31,37 @@ def _completed_tool_names(messages: list[Any]) -> set[str]:
     return completed
 
 
+def _called_tool_names(messages: list[Any]) -> set[str]:
+    """Return tool names the model has selected, whether or not they completed."""
+
+    return {
+        str(name)
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls
+        if (name := call.get("name")) is not None
+    }
+
+
 class IntentToolScopeMiddleware(AgentMiddleware):
     """Hide external tools not authorized for the classified intent.
 
-    Internal clarification and response-format tools are not managed names and
-    remain visible. The model therefore cannot access unrelated financial data
-    merely because the caller has broad scopes.
+    The model cannot access unrelated financial data merely because the caller
+    has broad scopes. Optionally, the first model step must select an authorized
+    financial tool before clarification or structured-response exits are shown.
     """
 
     def __init__(
         self,
         managed_tool_names: set[str],
         required_tool_sequences: dict[str, tuple[str, ...]] | None = None,
+        *,
+        require_tool_selection_first: bool = False,
     ) -> None:
         super().__init__()
         self.managed_tool_names = frozenset(managed_tool_names)
         self.required_tool_sequences = required_tool_sequences or {}
+        self.require_tool_selection_first = require_tool_selection_first
 
     async def awrap_model_call(self, request: ModelRequest, handler: Any) -> ModelResponse:
         state = request.state or {}
@@ -90,6 +105,29 @@ class IntentToolScopeMiddleware(AgentMiddleware):
                         if getattr(tool, "name", None) not in self.managed_tool_names
                         and getattr(tool, "name", None) != "request_user_input"
                     ]
+                )
+            )
+        called_tools = _called_tool_names(request.messages)
+        selectable_tools = [
+            tool
+            for tool in request.tools
+            if getattr(tool, "name", None) in self.managed_tool_names
+            and getattr(tool, "name", None) in allowed
+        ]
+        if (
+            self.require_tool_selection_first
+            and selectable_tools
+            and not (called_tools & self.managed_tool_names)
+        ):
+            # The model first chooses a capability while reading its schema.
+            # Internal clarification and AgentReport exits remain unavailable;
+            # the chosen tool guard derives the precise missing protected field
+            # from its arguments and authenticated conversation evidence.
+            return await handler(
+                request.override(
+                    tools=selectable_tools,
+                    response_format=None,
+                    tool_choice="required",
                 )
             )
         scoped_tools = [

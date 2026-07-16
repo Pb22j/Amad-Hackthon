@@ -220,7 +220,28 @@ async def test_compound_request_receives_tools_for_each_explicit_intent(database
         description="Read the authenticated customer's recent transactions.",
         args_schema=BalanceArgs,
     )
-    model = ScriptedChatModel(responses=[report_message(summary="Both parts handled")])
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "read_balance",
+                        "args": {"account": "all"},
+                        "id": "compound-balance",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "read_transactions",
+                        "args": {"account": "all"},
+                        "id": "compound-transactions",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+            report_message(summary="Both parts handled"),
+        ]
+    )
     graph = build_financial_agent(
         primary_model=model,
         classifier_model=StaticClassifier(

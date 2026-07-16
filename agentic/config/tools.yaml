@@ -23,7 +23,7 @@ tools:
     # Hackathon UX: the model may resolve a user-stated beneficiary name to an
     # account number from list_beneficiaries. Database preflight still limits
     # the destination to this user's saved Nafi beneficiary list.
-    explicit_user_fields: [amount]
+    explicit_user_fields: [destination_account, amount]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: true
