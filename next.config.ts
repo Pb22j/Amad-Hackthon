@@ -7,7 +7,12 @@ const nextConfig: NextConfig = {
   // those compilers isolated so a build cannot replace the live dev-server cache.
   distDir: process.env.NEXT_DIST_DIR || ".next",
   // The demo is intentionally tested through both loopback hostnames.
-  allowedDevOrigins: ["127.0.0.1", "*.replit.dev", "*.repl.co"],
+  allowedDevOrigins: [
+    "127.0.0.1",
+    "*.replit.dev",
+    "*.repl.co",
+    ...(process.env.REPLIT_DEV_DOMAIN ? [process.env.REPLIT_DEV_DOMAIN] : []),
+  ],
 };
 
 export default nextConfig;

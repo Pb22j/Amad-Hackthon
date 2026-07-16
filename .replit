@@ -27,13 +27,13 @@ args = "Start application"
 name = "Agentic API"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "bash -c 'export DATABASE_URL=\"postgresql+psycopg://$PGUSER:$PGPASSWORD@$PGHOST:${PGPORT:-5432}/$PGDATABASE?sslmode=disable\"; exec uvicorn main:app --host 127.0.0.1 --port 9000'"
-waitForPort = 9000
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash -c 'export DATABASE_URL=\"postgresql+psycopg://$PGUSER:$PGPASSWORD@$PGHOST:${PGPORT:-5432}/$PGDATABASE?sslmode=disable\"; exec uvicorn main:app --host 0.0.0.0 --port 9000'"
+waitForPort = 9000
 
 [[workflows.workflow]]
 name = "Interaction API"
@@ -66,3 +66,7 @@ externalPort = 80
 [[ports]]
 localPort = 8000
 externalPort = 8000
+
+[[ports]]
+localPort = 9000
+externalPort = 9000

@@ -1,0 +1,1 @@
+- [Nafi stack on Replit](nafi-replit-setup.md) — DATABASE_URL must be re-exported as +psycopg in workflow; interaction API on 8000 (not 8001); static-export Next needs cross-origin API URL in .env.local.
