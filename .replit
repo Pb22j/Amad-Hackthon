@@ -1,0 +1,68 @@
+modules = ["postgresql-16", "python-3.12", "nodejs-20"]
+[nix]
+channel = "stable-25_05"
+packages = ["cargo", "gmp", "libiconv", "libxcrypt", "openssl", "pkg-config", "postgresql", "rustc"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Agentic API"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Interaction API"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Agentic API"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash -c 'export DATABASE_URL=\"postgresql+psycopg://$PGUSER:$PGPASSWORD@$PGHOST:${PGPORT:-5432}/$PGDATABASE?sslmode=disable\"; exec uvicorn main:app --host 127.0.0.1 --port 9000'"
+waitForPort = 9000
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Interaction API"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash -c 'cd VoiceAssistant_Nafea/backend && PYTHONPATH=. exec uvicorn app.main:app --host 0.0.0.0 --port 8000'"
+waitForPort = 8000
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npx next dev -p 5000 -H 0.0.0.0"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
