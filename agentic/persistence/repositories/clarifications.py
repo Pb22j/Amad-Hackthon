@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -10,6 +11,49 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentic.persistence.models import ClarificationRow
+
+
+_TRUE_WORDS = {"true", "yes", "1", "نعم", "ايوه", "اي", "أجل"}
+_FALSE_WORDS = {"false", "no", "0", "لا", "كلا"}
+
+
+def _fold_digits(text: str) -> str:
+    """Fold Arabic-Indic (and other Unicode) digits to ASCII."""
+
+    return "".join(
+        str(unicodedata.decimal(ch)) if ch.isdecimal() else ch for ch in text
+    )
+
+
+def coerce_clarification_answer(answer: Any, schema: dict[str, Any]) -> Any:
+    """Coerce a string answer to the schema's scalar type before validation.
+
+    Interaction clients send free-text answers, so a number-typed clarification
+    receives "50" (a string) and jsonschema rejected it, which surfaced to the
+    user as the same question being asked again forever. Convert obvious numeric
+    and boolean strings (including Arabic-Indic digits) so a well-formed answer
+    is accepted; anything ambiguous is left untouched for the validator to judge.
+    """
+
+    if not isinstance(answer, str):
+        return answer
+    expected = schema.get("type") if isinstance(schema, dict) else None
+    text = _fold_digits(answer.strip())
+    if expected in {"number", "integer"}:
+        try:
+            number = float(text)
+        except ValueError:
+            return answer
+        if expected == "integer":
+            return int(number) if number.is_integer() else answer
+        return int(number) if number.is_integer() else number
+    if expected == "boolean":
+        lowered = text.casefold()
+        if lowered in _TRUE_WORDS:
+            return True
+        if lowered in _FALSE_WORDS:
+            return False
+    return answer
 
 
 class ClarificationRepository:
@@ -58,6 +102,7 @@ class ClarificationRepository:
         if expires_at <= now:
             row.status = "expired"
             raise ValueError("clarification has expired")
+        answer = coerce_clarification_answer(answer, row.expected_answer)
         try:
             validate(instance=answer, schema=row.expected_answer)
         except ValidationError as exc:

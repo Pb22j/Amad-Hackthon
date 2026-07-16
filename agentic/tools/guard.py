@@ -57,6 +57,7 @@ class AgentRuntimeContext:
     prior_user_statements: tuple[str, ...] = ()
     explicit_user_field_values: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     resuming_from_clarification: bool = False
+    language: str = "en"
 
 
 def _idempotency_key(task_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -68,6 +69,46 @@ def _idempotency_key(task_id: str, tool_name: str, arguments: dict[str, Any]) ->
 
 def _serialized_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+_ACCOUNT_SEPARATORS = re.compile(r"[\s \-‐-―]")
+
+
+# Same harmless Arabic spelling equivalences the bank database applies when it
+# resolves saved names (see bank_db.normalize_beneficiary_name). Kept local so
+# the guard has no import dependency on the tool implementations it protects.
+_ARABIC_LETTER_FOLD = str.maketrans(
+    {"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ة": "ه", "ى": "ي"}
+)
+
+
+def _fold_provenance(text: str) -> str:
+    """Fold a string to the form used for provenance comparison.
+
+    The rest of the system already treats these differences as cosmetic: the
+    interaction layer and database fold Arabic-Indic digits to ASCII and unify
+    Arabic letter variants. The guard must compare in the same space, otherwise
+    it rejects a value the user really stated (``٥٥٤٤`` vs ``5544``, ``أحمد`` vs
+    ``احمد``) and loops asking for it. Spaces are preserved so word boundaries
+    still block partial matches (``Ann`` inside ``Hannah``).
+    """
+
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    characters: list[str] = []
+    for character in normalized:
+        if unicodedata.combining(character) or character == "ـ":  # tatweel/diacritics
+            continue
+        if character.isdecimal():
+            characters.append(str(unicodedata.decimal(character)))
+        else:
+            characters.append(character)
+    return "".join(characters).translate(_ARABIC_LETTER_FOLD)
+
+
+def _strip_account_separators(text: str) -> str:
+    """Remove the whitespace and dash characters used to group account numbers."""
+
+    return _ACCOUNT_SEPARATORS.sub("", text)
 
 
 def _argument_is_explicit(
@@ -115,12 +156,40 @@ def _argument_is_explicit(
                 if word_value == expected:
                     return True
         return False
-    rendered = str(value).strip().casefold()
+    rendered = str(value).strip()
     if not rendered:
         return False
-    exact = re.compile(rf"(?<!\w){re.escape(rendered)}(?!\w)", re.IGNORECASE)
-    if any(exact.search(item) is not None for item in evidence):
+    # Compare in the shared normalized space (Arabic-Indic digits folded to
+    # ASCII, Arabic letter variants unified, diacritics/tatweel dropped) so a
+    # cosmetically different but genuinely user-stated value is not rejected and
+    # re-requested. Word boundaries still apply, blocking substring collisions.
+    folded_value = _fold_provenance(rendered)
+    if not folded_value:
+        return False
+    folded_evidence = [_fold_provenance(item) for item in evidence]
+    exact = re.compile(rf"(?<!\w){re.escape(folded_value)}(?!\w)")
+    if any(exact.search(item) is not None for item in folded_evidence):
         return True
+    # Arabic attaches short function words directly to the following noun, so a
+    # user who wrote "حوّل لمحمد" ("transfer to Mohammed") states the destination
+    # "محمد" glued to the preposition "لـ". Accept the value when it appears right
+    # after one or two of these proclitics (و/ف/ب/ك/ل) at a word start; the name
+    # itself must still be present, and confirmation still gates any action.
+    if re.search(r"[؀-ۿ]", folded_value):
+        proclitic = re.compile(rf"(?<!\w)[وفبكل]{{1,2}}{re.escape(folded_value)}(?!\w)")
+        if any(proclitic.search(item) is not None for item in folded_evidence):
+            return True
+    # Account numbers and IBANs carry the same value under cosmetic formatting:
+    # banks display them grouped ("SA44 2000 0001 …") while the model usually
+    # passes them compacted. Comparing the separator-stripped forms keeps the
+    # provenance requirement (the number must still appear in authenticated user
+    # text) without asking for the IBAN again on every whitespace/dash mismatch.
+    compact_value = _strip_account_separators(folded_value)
+    if len(compact_value) >= 8 and sum(ch.isdigit() for ch in compact_value) >= 6:
+        if any(
+            compact_value in _strip_account_separators(item) for item in folded_evidence
+        ):
+            return True
     if field_name == "symbol":
         # Investment tools intentionally accept a small, server-owned alias
         # table. The model may choose the canonical symbol while the user says
@@ -160,10 +229,22 @@ _ARABIC_FIELD_LABELS = {
 }
 
 
-def _clarification_copy(field_name: str, request: str) -> tuple[str, str]:
-    """Return a user-facing clarification question and label in request language."""
+def _clarification_copy(
+    field_name: str, request: str, language: str = ""
+) -> tuple[str, str]:
+    """Return a user-facing clarification question and label in the session language."""
 
-    if not re.search(r"[\u0600-\u06ff]", request):
+    # Trust the authenticated session language first. Sniffing the request text
+    # is only a fallback: a resumed turn's request can be a bare number or IBAN
+    # with no Arabic letters, which would otherwise flip the question to English
+    # in the middle of an Arabic conversation.
+    if language == "ar":
+        arabic = True
+    elif language:
+        arabic = False
+    else:
+        arabic = bool(re.search(r"[\u0600-\u06ff]", request))
+    if not arabic:
         label = field_name.replace("_", " ").title()
         return f"What value should be used for {field_name}?", label
     label = _ARABIC_FIELD_LABELS.get(field_name, field_name.replace("_", " "))
@@ -428,6 +509,19 @@ class GuardedToolFactory:
             # Resource identifiers and counterparties must come from the user,
             # not a model default. Missing evidence becomes an interaction-layer
             # clarification before idempotency or confirmation is calculated.
+            # Every value the user supplied through an authenticated clarification
+            # is valid provenance evidence, regardless of which field label the
+            # model attached to it. Binding answers only to their exact field name
+            # is fragile: the model may ask for the amount under "transfer_amount"
+            # while the guarded tool checks "amount", so the answer never matched
+            # and the same question was asked forever. Confirmation still gates
+            # execution, so a genuinely user-supplied value cannot move money on
+            # its own.
+            all_clarification_answers = tuple(
+                value
+                for values in context.explicit_user_field_values.values()
+                for value in values
+            )
             for field_name in sorted(metadata.explicit_user_fields):
                 if field_name not in arguments:
                     raise ToolGuardError(
@@ -436,11 +530,14 @@ class GuardedToolFactory:
                 if not _argument_is_explicit(
                     arguments[field_name],
                     context.original_request,
-                    context.explicit_user_field_values.get(field_name, ()),
+                    context.explicit_user_field_values.get(field_name, ())
+                    + all_clarification_answers,
                     field_name=field_name,
                     prior_user_statements=context.prior_user_statements,
                 ):
-                    question, label = _clarification_copy(field_name, context.original_request)
+                    question, label = _clarification_copy(
+                        field_name, context.original_request, context.language
+                    )
                     arguments[field_name] = interrupt(
                         {
                             "kind": "clarification",

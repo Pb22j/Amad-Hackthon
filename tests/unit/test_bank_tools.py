@@ -276,6 +276,37 @@ async def test_transfer_completes_with_receipt_and_updates_balance():
     assert result.operation_id in references
 
 
+def _db_balance_by_account(account_number: str) -> Decimal:
+    """Read a live balance straight from the bank database for verification."""
+
+    with psycopg.connect(os.environ["BANK_DATABASE_URL"]) as connection:
+        row = connection.execute(
+            "SELECT Balance_SAR FROM users WHERE Account_Number = %s", (account_number,)
+        ).fetchone()
+    assert row is not None
+    return Decimal(str(row[0]))
+
+
+async def test_transfer_credits_receiver_balance_in_database():
+    # The returned sender balance is not enough: confirm the counterparty is
+    # actually credited in the database and the sender is debited persistently.
+    amount = Decimal("250.00")
+    sender_before = _db_balance_by_account(OWN_ACCOUNT)
+    receiver_before = _db_balance_by_account(LATIFA_ACCOUNT)
+
+    result = _validated(
+        await transfer_between_accounts(destination_account=LATIFA_ACCOUNT, amount=amount)
+    )
+    assert result.status == "completed"
+
+    sender_after = _db_balance_by_account(OWN_ACCOUNT)
+    receiver_after = _db_balance_by_account(LATIFA_ACCOUNT)
+    assert sender_before - sender_after == amount
+    assert receiver_after - receiver_before == amount
+    # The persisted sender balance must match the receipt the user was shown.
+    assert Decimal(result.data["new_balance_sar"]) == sender_after
+
+
 async def test_transfer_accepts_saved_short_name():
     result = _validated(
         await transfer_between_accounts(destination_account="لطيفة", amount=Decimal("10.00"))

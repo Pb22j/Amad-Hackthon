@@ -337,6 +337,7 @@ class AgentService:
             ),
             original_request=request.natural_language_request,
             prior_user_statements=tuple(request.metadata.conversation_user_statements),
+            language=request.language,
         )
         async with self.database.session() as session:
             memories = await MemoryService(
@@ -476,6 +477,7 @@ class AgentService:
             ),
             explicit_user_field_values=explicit_user_field_values,
             resuming_from_clarification=request.clarification_id is not None,
+            language=original.language,
         )
         await self._invoke(
             task_id_str,

@@ -17,5 +17,58 @@ services:
     volumes:
       - amad-postgres:/var/lib/postgresql/data
 
+  agentic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000"]
+    env_file:
+      - .env.backend
+    environment:
+      # Process env wins over .env.backend (load_dotenv override=False), so these
+      # repoint every URL from the host's localhost:55432 to the compose network.
+      DATABASE_URL: postgresql+psycopg://amad:development-only-password@postgres:5432/amad
+      LANGGRAPH_DATABASE_URL: postgresql://amad:development-only-password@postgres:5432/amad
+      BANK_DATABASE_URL: postgresql://amad:development-only-password@postgres:5432/amad
+      INTERACTION_DATABASE_URL: postgresql://amad:development-only-password@postgres:5432/amad
+      INTERACTION_EVENT_WEBHOOK_URL: http://interaction:8001/api/webhook
+    ports:
+      - "127.0.0.1:9000:9000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  interaction:
+    build:
+      context: ./VoiceAssistant_Nafea/backend
+    env_file:
+      - .env.backend
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8001
+      AGENTIC_BASE_URL: http://agentic:9000
+      INTERACTION_DATABASE_URL: postgresql://amad:development-only-password@postgres:5432/amad
+      FRONTEND_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      agentic:
+        condition: service_started
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    environment:
+      # Read by the browser, so it must target the host-published interaction port.
+      NEXT_PUBLIC_NAFEA_API_URL: http://localhost:8001
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      interaction:
+        condition: service_started
+
 volumes:
   amad-postgres:

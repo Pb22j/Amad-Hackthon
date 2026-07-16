@@ -1,0 +1,14 @@
+FROM node:20-slim AS web
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+
+EXPOSE 3000
+
+# Dev server: compiles routes on demand and reads NEXT_PUBLIC_* at runtime, so
+# the interaction API URL can be supplied by compose instead of baked in.
+CMD ["npx", "next", "dev", "-H", "0.0.0.0", "-p", "3000"]

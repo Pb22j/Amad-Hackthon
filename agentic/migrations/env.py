@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from logging.config import fileConfig
 
 from alembic import context
@@ -97,6 +98,10 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
+    # psycopg's async driver cannot run on Windows' default ProactorEventLoop;
+    # select the Selector policy there so `alembic upgrade` works on every OS.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(run_async_migrations())
 
 
