@@ -25,7 +25,8 @@ def test_unified_columns_use_native_postgresql_types(unified_postgres_url: str) 
             """SELECT table_name, column_name, data_type
                FROM information_schema.columns
                WHERE table_schema='public' AND (
-                   (table_name='users' AND column_name IN ('uuid','balance_sar','dateofbirth')) OR
+                   (table_name='users' AND column_name IN ('uuid','daily_spend_limit_sar')) OR
+                   (table_name='bank_accounts' AND column_name='balance_sar') OR
                    (table_name='transactions' AND column_name IN ('amount_sar','metadata','createdat')) OR
                    (table_name='interaction_events' AND column_name='payload_json') OR
                    (table_name='voice_turns' AND column_name='encrypted_text')
@@ -33,8 +34,8 @@ def test_unified_columns_use_native_postgresql_types(unified_postgres_url: str) 
         ).fetchall()
     types = {(table, column): data_type for table, column, data_type in rows}
     assert types[("users", "uuid")] == "uuid"
-    assert types[("users", "balance_sar")] == "numeric"
-    assert types[("users", "dateofbirth")] == "date"
+    assert types[("users", "daily_spend_limit_sar")] == "numeric"
+    assert types[("bank_accounts", "balance_sar")] == "numeric"
     assert types[("transactions", "amount_sar")] == "numeric"
     assert types[("transactions", "metadata")] == "jsonb"
     assert types[("transactions", "createdat")] == "timestamp with time zone"
@@ -46,28 +47,30 @@ def test_unified_columns_use_native_postgresql_types(unified_postgres_url: str) 
 def test_financial_checks_and_transaction_rollback(unified_postgres_url: str) -> None:
     connection = psycopg.connect(unified_postgres_url)
     try:
-        user_id, original = connection.execute(
-            "SELECT uuid, balance_sar FROM users WHERE username='evaluation-user'"
+        account_id, original = connection.execute(
+            """SELECT a.uuid, a.balance_sar FROM bank_accounts a
+               JOIN users u ON u.uuid=a.user_uuid
+               WHERE u.username='evaluation-user' AND a.is_primary"""
         ).fetchone()
         with pytest.raises(psycopg.errors.CheckViolation):
             with connection.transaction():
                 connection.execute(
-                    "UPDATE users SET balance_sar=-1 WHERE uuid=%s", (user_id,)
+                    "UPDATE bank_accounts SET balance_sar=-1 WHERE uuid=%s", (account_id,)
                 )
         connection.rollback()
         assert connection.execute(
-            "SELECT balance_sar FROM users WHERE uuid=%s", (user_id,)
+            "SELECT balance_sar FROM bank_accounts WHERE uuid=%s", (account_id,)
         ).fetchone()[0] == original
 
         with connection.transaction(force_rollback=True):
             connection.execute(
-                "UPDATE users SET balance_sar=balance_sar-10 WHERE uuid=%s", (user_id,)
+                "UPDATE bank_accounts SET balance_sar=balance_sar-10 WHERE uuid=%s", (account_id,)
             )
             assert connection.execute(
-                "SELECT balance_sar FROM users WHERE uuid=%s", (user_id,)
+                "SELECT balance_sar FROM bank_accounts WHERE uuid=%s", (account_id,)
             ).fetchone()[0] == original - Decimal("10.00")
         assert connection.execute(
-            "SELECT balance_sar FROM users WHERE uuid=%s", (user_id,)
+            "SELECT balance_sar FROM bank_accounts WHERE uuid=%s", (account_id,)
         ).fetchone()[0] == original
     finally:
         connection.close()
@@ -89,7 +92,8 @@ def test_foreign_keys_and_paired_ledger_reference(unified_postgres_url: str) -> 
         connection.rollback()
 
         users = connection.execute(
-            "SELECT uuid,account_number,balance_sar FROM users WHERE status='active' LIMIT 2"
+            """SELECT u.uuid,a.account_number,a.balance_sar FROM users u
+               JOIN bank_accounts a ON a.user_uuid=u.uuid WHERE a.is_primary LIMIT 2"""
         ).fetchall()
         reference = f"paired-test-{uuid4()}"
         with connection.transaction(force_rollback=True):

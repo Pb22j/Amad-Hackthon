@@ -1,59 +1,51 @@
-# Unified PostgreSQL data model
+# Minimal Nafi PostgreSQL data model
 
-PostgreSQL 16 is the system of record for customer identity, banking tools, the voice interaction
-boundary, agent workflow state, LangGraph checkpoints, audit, memory, and evaluation results.
-All services, development harnesses, and tests require PostgreSQL.
+PostgreSQL 16 is the single system of record for the demo. The customer model is intentionally
+small and starts with exactly ten seeded users. Registration can add more users using the same
+minimal fields.
 
-## Data domains
+## Customer data
 
-| Domain | Tables | Primary consumers |
-|---|---|---|
-| Application identity | `platform_users` | authentication/bootstrap services |
-| Banking customers | `users`, `beneficiaries` | dashboard, balance, beneficiary, transfer, gift tools |
-| Ledger and reporting | `transactions` | dashboard activity, transaction search, monthly reports, financial analysis, daily-limit enforcement |
-| Shared expenses and bills | `qattas`, `qatta_bills`, `fatoorahs` | Qatta and SADAD-style bill tools |
-| Investments | `investment_assets`, `investment_holdings` | dashboard portfolio, portfolio, buy, and sell tools |
-| Interaction boundary | `interaction_sessions`, `interaction_requests`, `interaction_tasks`, `interaction_events`, `voice_turns` | voice service authentication, idempotency, webhook correlation, bounded encrypted recall |
-| Agent runtime | `agent_tasks`, `task_events`, `event_outbox`, `clarification_requests`, `action_authorizations`, `tool_executions` | guarded agent workflow and reliable event delivery |
-| Memory, audit, evaluation | `memory_items`, `audit_events`, `eval_runs` | session-scoped memory, security evidence, regression evaluation |
-| LangGraph-owned | `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `store`, and migration tables | resumable graphs and namespaced store |
+| Requested data | Storage |
+|---|---|
+| Username | `users.username` |
+| Arabic and English full names | `users.full_name_ar`, `users.full_name_en` |
+| Password | `users.password_hash` as salted scrypt; plaintext is never stored |
+| Unique Nafi IBAN | `users.nafi_iban` |
+| Daily spend limit | `users.daily_spend_limit_sar` |
+| One or more banks | one `bank_accounts` row per connected account |
+| Per-account balance | `bank_accounts.balance_sar` |
+| Total balance | computed as the sum of the user's `bank_accounts.balance_sar` values |
+| Beneficiaries | `beneficiaries`, linked from owner to another Nafi user resolved by Nafi IBAN |
 
-## Important design decisions
+`users.uuid` and child-table UUIDs are internal relational keys, not registration fields. There
+are no email, phone, KYC, Nafath, role, demographic, verification, status, or duplicate platform
+profile requirements.
 
-- Currency uses `NUMERIC`, never floating point. Quantities use `NUMERIC(24,8)`.
-- UUIDs, `DATE`, timezone-aware timestamps, `JSONB`, and `BYTEA` replace untyped source text,
-  epoch, JSON text, and blob fields.
-- Banking login names, IBANs, emails, phones, references, request fingerprints, and idempotency
-  boundaries are constrained or indexed according to their lookup semantics.
-- `tenant_id` and source lineage live with every banking customer. Authentication identity is
-  injected from trusted request context and is never accepted from model tool arguments.
-- Voice turns remain AES-GCM ciphertext. Agent requests, memory, tool arguments/results, and audit
-  details retain the application's encrypted SQLAlchemy types.
-- Foreign keys use cascade only for session-owned interaction records and beneficiary/Qatta child
-  records. Ledger rows are retained as financial history.
+Beneficiary rows store only the owner, resolved beneficiary user, short name, and creation time.
+Names, Nafi IBAN, and the current primary bank account are read from their authoritative tables
+instead of being copied into the beneficiary record.
 
-## Legacy import and enrichment
+## Operational data
 
-`scripts/seed_postgres.py` loads all 1,000 basic-user CSV rows and all 1,001 advanced banking-user
-CSV rows in one transaction.
-It also creates realistic beneficiaries, three months of transaction history for active accounts,
-demo bills, market assets, and holdings needed by the tools.
+The remaining tables are workflow records rather than extra user attributes:
 
-The five duplicated legacy banking usernames are not discarded. Their original value is stored in
-`source_username`; later occurrences receive a stable account-derived login suffix. New fields are
-deterministically derived from source identity and account state: unique demo contact details,
-locale/timezone/currency, available balance, KYC tier/status, risk rating, and plausible login
-timestamps. Plaintext passwords from `basic_users` are converted to scrypt hashes during import.
+- `transactions`, `qattas`, `qatta_bills`, `fatoorahs`, `investment_assets`, and
+  `investment_holdings` support the financial tools.
+- `interaction_*` and `voice_turns` support authenticated chat and voice sessions.
+- `agent_tasks`, tool executions, audit, encrypted memory, and LangGraph tables support the
+  agent runtime, recovery, and diagnostics.
 
-Run:
+## Recreate and seed
 
 ```bash
+docker compose down --volumes
 docker compose up -d postgres
 .venv/bin/alembic upgrade head
 .venv/bin/python scripts/seed_postgres.py
 ```
 
-Both commands load `DATABASE_URL` from the repository-root `.env.backend`.
-
-The import uses stable UUIDv5 identifiers and conflict-safe inserts, so rerunning it updates source
-records without duplicating generated rows.
+The seed command inserts exactly 10 initial users, 11 bank accounts (one user demonstrates multiple
+banks), four beneficiary links, and compact operational demo data. Newly registered users receive
+a unique Nafi IBAN and a zero-balance primary Nafi account automatically. Every seeded user uses password
+`password123`; each database rebuild stores it as a new randomly salted scrypt hash.

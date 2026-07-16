@@ -109,13 +109,11 @@ def build_financial_agent(
             {item.name for item in tool_metadata},
             required_tool_sequences={
                 Intent.SAVED_BENEFICIARY_TRANSFER.value: (
-                    "list_beneficiaries",
                     "transfer_between_accounts",
                 ),
                 # Backward-compatible fallback: a classifier that emits the
                 # broader transfer intent still cannot expose gift execution.
                 Intent.MONEY_TRANSFER.value: (
-                    "list_beneficiaries",
                     "transfer_between_accounts",
                 ),
             },

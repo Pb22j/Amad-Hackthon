@@ -1,21 +1,22 @@
-"""``transfer_between_accounts`` — move money to an activated beneficiary.
+"""``transfer_between_accounts`` — move money to a saved Nafi beneficiary.
 
 The transfer only completes when every database rule passes: the destination
-must be an *active* entry in the owner's beneficiary list, the destination
-bank account must still exist and be active, the balance must cover the
-amount, and the owner's daily spend limit must not be exceeded. Both ledger
-entries and both balances are written in one atomic database transaction, and
-a completed transfer returns an authoritative receipt.
+must be saved in the owner's beneficiary list, the beneficiary must still map
+to a bank account, the balance must cover the amount, and the owner's daily
+spend limit must not be exceeded. Both ledger entries and both balances are
+written in one atomic database transaction, and a completed transfer returns
+an authoritative receipt.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
+import math
 from typing import Any
 from uuid import uuid4
 
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from agentic.tools.bank_db import (
     BankToolArgs,
@@ -31,6 +32,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
+    update_account_balance,
 )
 
 
@@ -39,18 +41,23 @@ class TransferBetweenAccountsArgs(BankToolArgs):
         min_length=1,
         max_length=200,
         description=(
-            "Destination account number (IBAN) or the saved beneficiary short name, "
+            "Destination Nafi IBAN or the saved beneficiary short/full name, "
             "exactly as the user stated it."
         ),
     )
-    # Declared as float so the JSON schema is a plain number: Decimal renders a
-    # look-around regex branch that grammar-constrained providers reject. The
-    # tool converts to Decimal and quantizes to two places itself.
+    # Keep the provider-facing schema to a plain JSON number. Some
+    # grammar-constrained tool providers reject numeric range keywords before
+    # the tool can run, so enforce the same limits with a Pydantic validator.
     amount: float = Field(
-        gt=0,
-        le=9_999_999_999,
         description="Amount to transfer in SAR.",
     )
+
+    @field_validator("amount")
+    @classmethod
+    def validate_amount(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0 or value > 9_999_999_999:
+            raise ValueError("amount must be positive and no more than 9,999,999,999 SAR")
+        return value
 
 
 def _validate_transfer(
@@ -70,33 +77,17 @@ def _validate_transfer(
             data={},
             error_code="customer_not_found",
         )
-    if owner["status"] != "active":
-        return tool_result(
-            status="failed",
-            summary="The source account is not active, so it cannot send transfers.",
-            data={},
-            error_code="source_account_inactive",
-        )
-
     beneficiary = find_beneficiary(connection, owner["uuid"], destination_account)
     if beneficiary is None:
         return tool_result(
             status="failed",
             summary=(
                 "The destination is not in the beneficiary list. It must be added and "
-                "activated with add_benefit before transferring."
+                "added with add_benefit before transferring."
             ),
             data={"destination_account": destination_account},
             error_code="beneficiary_not_found",
         )
-    if beneficiary["status"] != "active":
-        return tool_result(
-            status="failed",
-            summary="The beneficiary exists but is not activated for transfers.",
-            data={"destination_account": beneficiary["Account_Number"]},
-            error_code="beneficiary_not_active",
-        )
-
     balance = money(owner["Balance_SAR"])
     if amount > balance:
         return tool_result(
@@ -124,7 +115,7 @@ def _validate_transfer(
         )
 
     receiver = find_user_by_account_number(connection, beneficiary["Account_Number"])
-    if receiver is None or receiver["status"] != "active":
+    if receiver is None:
         return tool_result(
             status="failed",
             summary="The destination bank account is no longer available.",
@@ -177,33 +168,17 @@ async def transfer_between_accounts(
                 data={},
                 error_code="customer_not_found",
             )
-        if owner["status"] != "active":
-            return tool_result(
-                status="failed",
-                summary="The source account is not active, so it cannot send transfers.",
-                data={},
-                error_code="source_account_inactive",
-            )
-
         beneficiary = find_beneficiary(connection, owner["uuid"], destination_account)
         if beneficiary is None:
             return tool_result(
                 status="failed",
                 summary=(
                     "The destination is not in the beneficiary list. It must be added and "
-                    "activated with add_benefit before transferring."
+                    "added with add_benefit before transferring."
                 ),
                 data={"destination_account": destination_account},
                 error_code="beneficiary_not_found",
             )
-        if beneficiary["status"] != "active":
-            return tool_result(
-                status="failed",
-                summary="The beneficiary exists but is not activated for transfers.",
-                data={"destination_account": beneficiary["Account_Number"]},
-                error_code="beneficiary_not_active",
-            )
-
         balance = money(owner["Balance_SAR"])
         if amount > balance:
             return tool_result(
@@ -231,7 +206,7 @@ async def transfer_between_accounts(
             )
 
         receiver = find_user_by_account_number(connection, beneficiary["Account_Number"])
-        if receiver is None or receiver["status"] != "active":
+        if receiver is None:
             return tool_result(
                 status="failed",
                 summary="The destination bank account is no longer available.",
@@ -244,14 +219,8 @@ async def transfer_between_accounts(
         sender_balance_after = balance - amount
         receiver_balance_after = money(receiver["Balance_SAR"]) + amount
 
-        connection.execute(
-            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-            (float(sender_balance_after), now, owner["uuid"]),
-        )
-        connection.execute(
-            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-            (float(receiver_balance_after), now, receiver["uuid"]),
-        )
+        update_account_balance(connection, owner, sender_balance_after)
+        update_account_balance(connection, receiver, receiver_balance_after)
         connection.execute(
             "INSERT INTO transactions"
             " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
@@ -295,14 +264,14 @@ async def transfer_between_accounts(
             status="completed",
             summary=(
                 f"Transferred {amount} SAR to {beneficiary['Short_Name']} "
-                f"({beneficiary['Account_Number']})."
+                f"({beneficiary['nafi_iban']})."
             ),
             data={
                 "reference": reference,
                 "amount_sar": str(amount),
                 "destination": {
                     "short_name": beneficiary["Short_Name"],
-                    "account_number": beneficiary["Account_Number"],
+                    "nafi_iban": beneficiary["nafi_iban"],
                 },
                 "new_balance_sar": str(sender_balance_after),
                 "executed_at": now,
@@ -318,15 +287,14 @@ TOOL: BaseTool = StructuredTool.from_function(
     coroutine=transfer_between_accounts,
     name="transfer_between_accounts",
     description=(
-        "Transfer money from the authenticated user's account to an activated beneficiary "
-        "immediately in hackathon demo mode. The destination must already be active in the benefit list, and "
+        "Transfer money from the authenticated user's account to a saved Nafi beneficiary "
+        "immediately in hackathon demo mode. The destination must already be in the benefit list, and "
         "the amount must be covered by the balance and the daily spend limit. When the user "
         "provides both a destination and amount, call this capability directly: its preflight "
         "is the authority on whether the beneficiary exists. Never ask the user to confirm "
         "whether a named beneficiary is saved before calling it. Preserve the destination text "
-        "as the user stated it when possible. It may also use the account number returned by the "
-        "authoritative beneficiary list; database preflight guarantees that the destination is "
-        "an active beneficiary owned by the authenticated user."
+        "as the user stated it when possible. The database resolves the saved Nafi beneficiary "
+        "to their current primary bank account only when executing the transfer."
     ),
     args_schema=TransferBetweenAccountsArgs,
 )

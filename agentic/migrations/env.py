@@ -38,8 +38,8 @@ LANGGRAPH_TABLES = {
 # service. Their explicit migration is authoritative; excluding them keeps
 # SQLAlchemy autogenerate from proposing destructive drops.
 UNIFIED_RUNTIME_TABLES = {
-    "platform_users",
     "users",
+    "bank_accounts",
     "beneficiaries",
     "qattas",
     "qatta_bills",

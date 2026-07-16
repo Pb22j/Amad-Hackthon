@@ -143,10 +143,9 @@ _ARABIC_FIELD_LABELS = {
     "account_reference": "مرجع الحساب",
     "amount": "المبلغ",
     "biller": "مقدم الخدمة",
-    "benefit_account_number": "رقم حساب المستفيد",
+    "nafi_iban": "آيبان نافي للمستفيد",
     "destination": "الوجهة",
-    "destination_account": "الحساب المستلم",
-    "full_name_of_benefit_account": "اسم المستفيد الكامل",
+    "destination_account": "اسم المستفيد أو آيبان نافي",
     "gift_message": "رسالة الهدية",
     "last_four_digits": "آخر أربعة أرقام",
     "name": "الاسم",
@@ -170,7 +169,8 @@ def _clarification_copy(field_name: str, request: str) -> tuple[str, str]:
     questions = {
         "amount": "ما المبلغ المطلوب؟",
         "destination": "إلى من تريد التحويل؟",
-        "destination_account": "ما الحساب الذي تريد التحويل إليه؟",
+        "destination_account": "ما اسم المستفيد أو آيبان نافي الذي تريد التحويل إليه؟",
+        "nafi_iban": "ما آيبان نافي الخاص بالمستفيد؟",
         "quantity": "كم عدد الأسهم المطلوب؟",
         "symbol": "ما رمز الاستثمار أو اسم الشركة المطلوب؟",
     }
@@ -478,9 +478,17 @@ class GuardedToolFactory:
                     preflight_transfer_between_accounts,
                 )
 
-                preflight = ToolResult.model_validate(
-                    await preflight_transfer_between_accounts(**arguments)
-                )
+                # Preflight queries the same owner-scoped database records as
+                # execution. Bind authenticated identity here as well; without
+                # it owner_identity() falls back to the demo user and can
+                # incorrectly report that a real user's beneficiary is absent.
+                with bind_tool_identity(
+                    user_id=context.auth.user_id,
+                    tenant_id=context.auth.tenant_id,
+                ):
+                    preflight = ToolResult.model_validate(
+                        await preflight_transfer_between_accounts(**arguments)
+                    )
                 if preflight.status != "completed":
                     return preflight.model_dump_json()
 

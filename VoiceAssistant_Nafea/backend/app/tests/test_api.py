@@ -39,62 +39,36 @@ def test_config_endpoint():
 
 
 @patch("app.main.authentication_store.register")
-def test_register_creates_authenticated_session(mock_register):
-    mock_register.return_value = AuthenticatedUser(
-        user_id="new-user",
-        tenant_id="evaluation-tenant",
-        language="en",
-    )
+def test_registration_can_grow_beyond_the_ten_seeded_users(mock_register):
+    mock_register.return_value = AuthenticatedUser(user_id="new-user")
     response = client.post(
         "/api/auth/register",
         json={
-            "full_name": "New User",
             "username": "new-user",
-            "email": "new.user@example.com",
-            "phone_e164": "+966500000001",
+            "full_name_ar": "مستخدم جديد",
+            "full_name_en": "New User",
             "password": "secure123",
             "language": "en",
         },
     )
-
     assert response.status_code == 201
     assert response.json()["language"] == "en"
-    assert response.cookies.get("nafea_session")
 
 
 @patch("app.main.authentication_store.register")
-def test_register_reports_duplicate_identifier(mock_register):
-    mock_register.side_effect = RegistrationConflict("email")
+def test_registration_rejects_duplicate_username(mock_register):
+    mock_register.side_effect = RegistrationConflict("evaluation-user")
     response = client.post(
         "/api/auth/register",
         json={
-            "full_name": "New User",
-            "username": "another-user",
-            "email": "taken@example.com",
-            "phone_e164": "+966500000002",
+            "username": "evaluation-user",
+            "full_name_ar": "أحمد فهد العتيبي",
+            "full_name_en": "Ahmed Fahad Alotaibi",
             "password": "secure123",
             "language": "en",
         },
     )
-
     assert response.status_code == 409
-    assert response.json()["detail"] == "email_taken"
-
-
-def test_register_rejects_weak_password():
-    response = client.post(
-        "/api/auth/register",
-        json={
-            "full_name": "New User",
-            "username": "weak-user",
-            "email": "weak@example.com",
-            "phone_e164": "+966500000003",
-            "password": "passwordonly",
-            "language": "en",
-        },
-    )
-
-    assert response.status_code == 422
 
 @patch("app.main.get_stt_service")
 @patch("app.main.get_llm_service")

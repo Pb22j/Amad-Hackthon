@@ -21,6 +21,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
+    update_account_balance,
 )
 
 
@@ -151,13 +152,6 @@ async def _trade(*, symbol: str, quantity: float | Decimal, side: str) -> dict[s
                 data={},
                 error_code="customer_not_found",
             )
-        if user["status"] != "active":
-            return tool_result(
-                status="failed",
-                summary="Account is inactive.",
-                data={},
-                error_code="source_account_inactive",
-            )
         asset = _asset(connection, normalized_symbol)
         if asset is None:
             return tool_result(
@@ -239,10 +233,7 @@ async def _trade(*, symbol: str, quantity: float | Decimal, side: str) -> dict[s
                 (float(new_quantity), now, holding["uuid"]),
             )
             direction, transaction_type = "credit", "investment_sell"
-        connection.execute(
-            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-            (float(balance_after), now, user["uuid"]),
-        )
+        update_account_balance(connection, user, balance_after)
         connection.execute(
             "INSERT INTO transactions (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR, Counterparty_Name, Counterparty_Account, Description, Category, Balance_After_SAR, Reference, createdAt)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, %s, 'استثمار', %s, %s, %s)",

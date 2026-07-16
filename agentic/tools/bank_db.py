@@ -191,6 +191,7 @@ def _ensure_ready(url: str) -> None:
         connection = BankConnection(url)
         try:
             connection.execute("SELECT 1 FROM users LIMIT 1")
+            connection.execute("SELECT 1 FROM bank_accounts LIMIT 1")
             connection.execute("SELECT 1 FROM transactions LIMIT 1")
         finally:
             connection.close()
@@ -213,9 +214,23 @@ async def run_in_bank_db(work: Callable[[BankConnection], T]) -> T:
     return await asyncio.to_thread(execute)
 
 
+_USER_ACCOUNT_PROJECTION = """
+    SELECT u.uuid, u.username, u.full_name_ar, u.full_name_en, u.nafi_iban,
+           u.daily_spend_limit_sar,
+           a.uuid AS account_uuid, a.account_number, a.account_type AS account_type_ar,
+           a.bank_name_ar, a.bank_name_en, a.balance_sar,
+           (SELECT COALESCE(SUM(total.balance_sar), 0)
+              FROM bank_accounts total WHERE total.user_uuid = u.uuid) AS total_balance_sar
+      FROM users u
+      JOIN bank_accounts a ON a.user_uuid = u.uuid
+"""
+
+
 def find_user_by_username(connection: BankConnection, username: str) -> BankRow | None:
     return connection.execute(
-        "SELECT * FROM users WHERE Username = %s", (username,)
+        _USER_ACCOUNT_PROJECTION
+        + " WHERE u.username = %s ORDER BY a.is_primary DESC, a.uuid LIMIT 1",
+        (username,),
     ).fetchone()
 
 
@@ -223,17 +238,54 @@ def find_user_by_account_number(
     connection: BankConnection, account_number: str
 ) -> BankRow | None:
     return connection.execute(
-        "SELECT * FROM users WHERE Account_Number = %s", (account_number,)
+        _USER_ACCOUNT_PROJECTION + " WHERE a.account_number = %s LIMIT 1",
+        (account_number,),
     ).fetchone()
+
+
+def find_user_by_uuid(connection: BankConnection, user_uuid: str) -> BankRow | None:
+    return connection.execute(
+        _USER_ACCOUNT_PROJECTION
+        + " WHERE u.uuid = %s ORDER BY a.is_primary DESC, a.uuid LIMIT 1",
+        (user_uuid,),
+    ).fetchone()
+
+
+def find_user_by_nafi_iban(connection: BankConnection, nafi_iban: str) -> BankRow | None:
+    return connection.execute(
+        _USER_ACCOUNT_PROJECTION
+        + " WHERE u.nafi_iban = %s ORDER BY a.is_primary DESC, a.uuid LIMIT 1",
+        (normalize_account_number(nafi_iban),),
+    ).fetchone()
+
+
+def update_account_balance(
+    connection: BankConnection, user: BankRow, balance: Decimal
+) -> None:
+    """Update the exact account selected in the projected user row."""
+
+    connection.execute(
+        "UPDATE bank_accounts SET balance_sar = %s WHERE uuid = %s",
+        (balance, user["account_uuid"]),
+    )
 
 
 def find_beneficiary(
     connection: BankConnection, owner_uuid: str, destination: str
 ) -> BankRow | None:
     normalized = normalize_account_number(destination)
+    projection = """
+        SELECT b.uuid, b.owner_uuid, b.beneficiary_uuid, b.short_name,
+               target.full_name_ar AS full_name, target.full_name_en,
+               target.nafi_iban, account.account_number, account.bank_name_ar
+          FROM beneficiaries b
+          JOIN users target ON target.uuid = b.beneficiary_uuid
+          JOIN bank_accounts account ON account.user_uuid = target.uuid AND account.is_primary
+    """
     row = connection.execute(
-        "SELECT * FROM beneficiaries WHERE owner_uuid = %s AND Account_Number = %s",
-        (owner_uuid, normalized),
+        projection
+        + " WHERE b.owner_uuid = %s AND (target.nafi_iban = %s OR account.account_number = %s)",
+        (owner_uuid, normalized, normalized),
     ).fetchone()
     if row is not None:
         return row
@@ -246,7 +298,7 @@ def find_beneficiary(
     transliterated_matches: list[BankRow] = []
     short_name_matches: list[BankRow] = []
     for beneficiary in connection.execute(
-        "SELECT * FROM beneficiaries WHERE owner_uuid = %s", (owner_uuid,)
+        projection + " WHERE b.owner_uuid = %s", (owner_uuid,)
     ).fetchall():
         short_name = str(beneficiary["Short_Name"])
         full_name = str(beneficiary["Full_Name"])
@@ -271,10 +323,12 @@ def find_beneficiary(
 
 def spent_today(connection: BankConnection, user_uuid: str) -> Decimal:
     day_start = riyadh_now().strftime("%Y-%m-%d 00:00:00")
+    now = timestamp()
     total = connection.execute(
         "SELECT COALESCE(SUM(Amount_SAR), 0) FROM transactions"
-        " WHERE user_uuid = %s AND direction = 'debit' AND createdAt >= %s",
-        (user_uuid, day_start),
+        " WHERE user_uuid = %s AND direction = 'debit'"
+        " AND createdAt >= %s AND createdAt <= %s",
+        (user_uuid, day_start, now),
     ).fetchone()[0]
     return money(total)
 

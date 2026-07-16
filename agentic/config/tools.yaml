@@ -2,7 +2,7 @@ tools:
   add_benefit:
     risk: write
     intents: [beneficiary_management]
-    explicit_user_fields: [full_name_of_benefit_account, benefit_account_number, short_name]
+    explicit_user_fields: [nafi_iban, short_name]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: false
@@ -16,17 +16,16 @@ tools:
     requires_owner_metadata: true
     max_calls_per_task: 5
   transfer_between_accounts:
-    # Hackathon demo mode: execute an eligible transfer immediately. The bank
-    # tool still enforces authenticated ownership, active-beneficiary status,
-    # balance, daily limit, atomic ledger updates, and an authoritative receipt.
+    # Every transfer pauses for the demo OTP after database preflight validates
+    # ownership, beneficiary membership, balance, and daily spend limit.
     risk: write
     intents: [saved_beneficiary_transfer, money_transfer]
     # Hackathon UX: the model may resolve a user-stated beneficiary name to an
     # account number from list_beneficiaries. Database preflight still limits
-    # the destination to this user's active beneficiary list.
+    # the destination to this user's saved Nafi beneficiary list.
     explicit_user_fields: [amount]
     required_scopes: [financial:write]
-    requires_confirmation: false
+    requires_confirmation: true
     requires_receipt: true
     requires_owner_metadata: true
     idempotent: true

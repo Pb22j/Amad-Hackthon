@@ -1,12 +1,12 @@
 """``send_gift`` — send a money gift with a dedication message.
 
-The sender picks a recipient from their active beneficiary list, an amount,
+The sender picks a recipient from their saved Nafi beneficiary list, an amount,
 and a gift message. The amount moves atomically from sender to recipient, and
 the recipient's ledger entry carries the dedication along with the sender's
 full name — so the gift shows up in their transactions and monthly report as
 "هدية من <الاسم الكامل>: <الرسالة>".
 
-Rules: the recipient must be an active beneficiary, the amount must be above
+Rules: the recipient must be a saved beneficiary, the amount must be above
 zero and covered by the sender's balance, and the action requires
 confirmation and returns a receipt. Gift debits count toward the same daily
 spend limit as every other outgoing financial action.
@@ -34,6 +34,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
+    update_account_balance,
 )
 
 
@@ -42,7 +43,7 @@ class SendGiftArgs(BankToolArgs):
         min_length=1,
         max_length=200,
         description=(
-            "Gift recipient: the saved beneficiary short name or account number, "
+            "Gift recipient: the saved beneficiary short/full name or Nafi IBAN, "
             "exactly as the user stated it."
         ),
     )
@@ -63,7 +64,7 @@ class SendGiftArgs(BankToolArgs):
 async def send_gift(
     recipient: str, amount: float | Decimal, gift_message: str
 ) -> dict[str, Any]:
-    """Send a gift to an active beneficiary with the dedication message."""
+    """Send a gift to a saved beneficiary with the dedication message."""
 
     username, _ = owner_identity()
     amount = money(amount)
@@ -87,33 +88,17 @@ async def send_gift(
                 data={},
                 error_code="customer_not_found",
             )
-        if sender["status"] != "active":
-            return tool_result(
-                status="failed",
-                summary="The account is not active, so it cannot send gifts.",
-                data={},
-                error_code="source_account_inactive",
-            )
-
         beneficiary = find_beneficiary(connection, sender["uuid"], recipient)
         if beneficiary is None:
             return tool_result(
                 status="failed",
                 summary=(
                     "The gift recipient is not in the beneficiary list. They must be "
-                    "added and activated with add_benefit before receiving a gift."
+                    "added with add_benefit before receiving a gift."
                 ),
                 data={"recipient": recipient},
                 error_code="beneficiary_not_found",
             )
-        if beneficiary["status"] != "active":
-            return tool_result(
-                status="failed",
-                summary="The recipient exists but is not activated for transfers.",
-                data={"recipient": beneficiary["Short_Name"]},
-                error_code="beneficiary_not_active",
-            )
-
         balance = money(sender["Balance_SAR"])
         if amount > balance:
             return tool_result(
@@ -140,7 +125,7 @@ async def send_gift(
             )
 
         receiver = find_user_by_account_number(connection, beneficiary["Account_Number"])
-        if receiver is None or receiver["status"] != "active":
+        if receiver is None:
             return tool_result(
                 status="failed",
                 summary="The recipient's bank account is no longer available.",
@@ -153,14 +138,8 @@ async def send_gift(
         sender_name = sender["Full_Name_Ar"]
         sender_balance_after = balance - amount
         receiver_balance_after = money(receiver["Balance_SAR"]) + amount
-        connection.execute(
-            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-            (float(sender_balance_after), now, sender["uuid"]),
-        )
-        connection.execute(
-            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-            (float(receiver_balance_after), now, receiver["uuid"]),
-        )
+        update_account_balance(connection, sender, sender_balance_after)
+        update_account_balance(connection, receiver, receiver_balance_after)
         connection.execute(
             "INSERT INTO transactions"
             " (uuid, user_uuid, Account_Number, direction, Transaction_Type, Amount_SAR,"
@@ -216,7 +195,7 @@ async def send_gift(
                 "to": {
                     "short_name": beneficiary["Short_Name"],
                     "full_name": beneficiary["Full_Name"],
-                    "account_number": beneficiary["Account_Number"],
+                    "nafi_iban": beneficiary["nafi_iban"],
                 },
                 "new_balance_sar": str(sender_balance_after),
                 "executed_at": now,
@@ -232,7 +211,7 @@ TOOL: BaseTool = StructuredTool.from_function(
     coroutine=send_gift,
     name="send_gift",
     description=(
-        "Send a money gift (هدية) to an activated beneficiary after confirmation. "
+        "Send a money gift (هدية) to a saved Nafi beneficiary after confirmation. "
         "Takes the recipient, the amount (must be above 0.0 SAR), and a dedication "
         "message; the amount is deducted from the sender and delivered to the "
         "recipient together with the message and the sender's full name."

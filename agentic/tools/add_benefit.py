@@ -1,8 +1,7 @@
 """``add_benefit`` — register and activate a beneficiary for transfers.
 
-A destination becomes transferable only after it passes both database checks:
-the account number must belong to a real, active bank customer, and it must
-not already be in the owner's beneficiary list. Rejections return stable error
+A destination becomes transferable only after its unique Nafi IBAN resolves to
+a real user who is not already in the owner's beneficiary list. Rejections return stable error
 codes instead of raising, so the agent can explain the outcome safely.
 """
 
@@ -18,7 +17,7 @@ from agentic.tools.bank_db import (
     BankToolArgs,
     BankConnection,
     find_beneficiary,
-    find_user_by_account_number,
+    find_user_by_nafi_iban,
     find_user_by_username,
     normalize_account_number,
     owner_identity,
@@ -29,16 +28,11 @@ from agentic.tools.bank_db import (
 
 
 class AddBenefitArgs(BankToolArgs):
-    full_name_of_benefit_account: str = Field(
-        min_length=1,
-        max_length=200,
-        description="Full name of the beneficiary account holder as provided by the user.",
-    )
-    benefit_account_number: str = Field(
+    nafi_iban: str = Field(
         min_length=10,
         max_length=34,
         pattern=r"^[A-Za-z0-9\- ]+$",
-        description="IBAN / account number of the beneficiary account.",
+        description="The beneficiary's unique Nafi IBAN.",
     )
     short_name: str = Field(
         min_length=1,
@@ -48,13 +42,10 @@ class AddBenefitArgs(BankToolArgs):
 
 
 class ListBeneficiariesArgs(BankToolArgs):
-    active_only: bool = Field(
-        default=True,
-        description="Return only beneficiaries currently active for transfers.",
-    )
+    pass
 
 
-async def list_beneficiaries(active_only: bool = True) -> dict[str, Any]:
+async def list_beneficiaries() -> dict[str, Any]:
     """Return the authenticated customer's authoritative beneficiary list."""
 
     username, _ = owner_identity()
@@ -69,24 +60,23 @@ async def list_beneficiaries(active_only: bool = True) -> dict[str, Any]:
                 error_code="customer_not_found",
             )
         statement = (
-            "SELECT b.Full_Name, b.Short_Name, b.Account_Number, b.status,"
-            " target.Bank_Name_Ar FROM beneficiaries b"
-            " LEFT JOIN users target ON target.Account_Number = b.Account_Number"
+            "SELECT target.full_name_ar, target.full_name_en, target.nafi_iban,"
+            " b.short_name, account.bank_name_ar"
+            " FROM beneficiaries b"
+            " JOIN users target ON target.uuid = b.beneficiary_uuid"
+            " JOIN bank_accounts account ON account.user_uuid = target.uuid AND account.is_primary"
             " WHERE b.owner_uuid = %s"
         )
         parameters: list[Any] = [owner["uuid"]]
-        if active_only:
-            statement += " AND b.status = %s"
-            parameters.append("active")
-        statement += " ORDER BY b.Short_Name, b.Full_Name"
+        statement += " ORDER BY b.Short_Name, target.full_name_ar"
         rows = connection.execute(statement, tuple(parameters)).fetchall()
         beneficiaries = [
             {
-                "full_name": row["Full_Name"],
+                "full_name": row["full_name_ar"],
+                "full_name_en": row["full_name_en"],
                 "short_name": row["Short_Name"],
-                "account_number": row["Account_Number"],
+                "nafi_iban": row["nafi_iban"],
                 "bank_name": row["Bank_Name_Ar"],
-                "status": row["status"],
             }
             for row in rows
         ]
@@ -100,14 +90,13 @@ async def list_beneficiaries(active_only: bool = True) -> dict[str, Any]:
 
 
 async def add_benefit(
-    full_name_of_benefit_account: str,
-    benefit_account_number: str,
+    nafi_iban: str,
     short_name: str,
 ) -> dict[str, Any]:
     """Validate and activate a new beneficiary in the owner's benefit list."""
 
     username, _ = owner_identity()
-    normalized = normalize_account_number(benefit_account_number)
+    normalized = normalize_account_number(nafi_iban)
 
     def work(connection: BankConnection) -> dict[str, Any]:
         owner = find_user_by_username(connection, username)
@@ -122,8 +111,8 @@ async def add_benefit(
         if find_beneficiary(connection, owner["uuid"], normalized) is not None:
             return tool_result(
                 status="failed",
-                summary="This account is already in the beneficiary list, so it was not added again.",
-                data={"benefit_account_number": normalized},
+                summary="This Nafi user is already in the beneficiary list.",
+                data={"nafi_iban": normalized},
                 error_code="beneficiary_already_exists",
             )
 
@@ -140,43 +129,32 @@ async def add_benefit(
                 error_code="short_name_already_used",
             )
 
-        target = find_user_by_account_number(connection, normalized)
+        target = find_user_by_nafi_iban(connection, normalized)
         if target is None:
             return tool_result(
                 status="failed",
-                summary="The account number does not match any existing bank account.",
-                data={"benefit_account_number": normalized},
-                error_code="account_not_found",
+                summary="The Nafi IBAN does not match an existing Nafi user.",
+                data={"nafi_iban": normalized},
+                error_code="nafi_iban_not_found",
             )
         if target["uuid"] == owner["uuid"]:
             return tool_result(
                 status="failed",
-                summary="The owner's own account cannot be added as a beneficiary.",
-                data={"benefit_account_number": normalized},
+                summary="Your own Nafi IBAN cannot be added as a beneficiary.",
+                data={"nafi_iban": normalized},
                 error_code="cannot_add_own_account",
             )
-        if target["status"] != "active":
-            return tool_result(
-                status="failed",
-                summary="The destination bank account is not active, so it cannot receive transfers.",
-                data={"benefit_account_number": normalized},
-                error_code="account_inactive",
-            )
-
         beneficiary_id = str(uuid4())
         now = timestamp()
         connection.execute(
             "INSERT INTO beneficiaries"
-            " (uuid, owner_uuid, Full_Name, Short_Name, Account_Number, status,"
-            "  createdAt, updatedAt)"
-            " VALUES (%s, %s, %s, %s, %s, 'active', %s, %s)",
+            " (uuid, owner_uuid, beneficiary_uuid, Short_Name, createdAt)"
+            " VALUES (%s, %s, %s, %s, %s)",
             (
                 beneficiary_id,
                 owner["uuid"],
-                full_name_of_benefit_account.strip(),
+                target["uuid"],
                 short_name.strip(),
-                normalized,
-                now,
                 now,
             ),
         )
@@ -185,11 +163,11 @@ async def add_benefit(
             summary=f"Beneficiary {short_name.strip()} was verified and activated for transfers.",
             data={
                 "beneficiary": {
-                    "full_name": full_name_of_benefit_account.strip(),
+                    "full_name": target["Full_Name_Ar"],
+                    "full_name_en": target["full_name_en"],
                     "short_name": short_name.strip(),
-                    "account_number": normalized,
+                    "nafi_iban": normalized,
                     "bank_name": target["Bank_Name_Ar"],
-                    "status": "active",
                 }
             },
             operation_id=beneficiary_id,
@@ -202,9 +180,8 @@ TOOL: BaseTool = StructuredTool.from_function(
     coroutine=add_benefit,
     name="add_benefit",
     description=(
-        "Add and activate a beneficiary account in the authenticated user's benefit list "
-        "after verifying the account number belongs to a real bank customer and is not "
-        "already registered. Required before any transfer to that account."
+        "Add a beneficiary by unique Nafi IBAN after resolving the authoritative Nafi user. "
+        "Only the Nafi IBAN and a short name are required."
     ),
     args_schema=AddBenefitArgs,
 )
@@ -214,7 +191,7 @@ LIST_TOOL: BaseTool = StructuredTool.from_function(
     coroutine=list_beneficiaries,
     name="list_beneficiaries",
     description=(
-        "List the authenticated customer's saved beneficiaries and their active status. "
+        "List the authenticated customer's saved Nafi beneficiaries. "
         "Use this authoritative read when the user asks to view beneficiaries or when a "
         "saved name must be resolved before a transfer. Do not use Qatta tools for this."
     ),

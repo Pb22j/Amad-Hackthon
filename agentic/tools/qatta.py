@@ -42,6 +42,7 @@ from agentic.tools.bank_db import (
     BankRow,
     find_beneficiary,
     find_user_by_account_number,
+    find_user_by_uuid,
     find_user_by_username,
     money,
     next_reference,
@@ -50,6 +51,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
+    update_account_balance,
 )
 
 
@@ -161,16 +163,8 @@ async def create_qatta(
                 data={},
                 error_code="customer_not_found",
             )
-        if creator["status"] != "active":
-            return tool_result(
-                status="failed",
-                summary="The account is not active, so it cannot create a qatta.",
-                data={},
-                error_code="source_account_inactive",
-            )
-
         # Participants come exclusively from the creator's beneficiary list and
-        # must be active there — the same trust boundary transfers rely on.
+        # use the same Nafi identity boundary that transfers rely on.
         resolved: dict[str, BankRow] = {}
         for reference in participants:
             beneficiary = find_beneficiary(connection, creator["uuid"], reference)
@@ -179,27 +173,20 @@ async def create_qatta(
                     status="failed",
                     summary=(
                         "A participant is not in the beneficiary list. They must be "
-                        "added and activated with add_benefit before joining a qatta."
+                        "added with add_benefit before joining a qatta."
                     ),
                     data={"participant": reference},
                     error_code="participant_not_beneficiary",
                 )
-            if beneficiary["status"] != "active":
-                return tool_result(
-                    status="failed",
-                    summary="A participant's beneficiary entry is not activated.",
-                    data={"participant": beneficiary["Short_Name"]},
-                    error_code="beneficiary_not_active",
-                )
             participant = find_user_by_account_number(
                 connection, beneficiary["Account_Number"]
             )
-            if participant is None or participant["status"] != "active":
+            if participant is None:
                 return tool_result(
                     status="failed",
                     summary="A participant's bank account is no longer available.",
                     data={"participant": beneficiary["Short_Name"]},
-                    error_code="participant_inactive",
+                    error_code="participant_account_missing",
                 )
             resolved.setdefault(participant["uuid"], participant)
 
@@ -259,10 +246,7 @@ async def create_qatta(
         qatta_id = str(uuid4())
         reference = next_reference(connection, "qatta")
         balance_after = balance - creator_share
-        connection.execute(
-            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-            (float(balance_after), now, creator["uuid"]),
-        )
+        update_account_balance(connection, creator, balance_after)
         _insert_transaction(
             connection,
             user=creator,
@@ -401,10 +385,8 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
                 },
                 error_code="daily_limit_exceeded",
             )
-        creator = connection.execute(
-            "SELECT * FROM users WHERE uuid = %s", (bill["creator_uuid"],)
-        ).fetchone()
-        if creator is None or creator["status"] != "active":
+        creator = find_user_by_uuid(connection, bill["creator_uuid"])
+        if creator is None:
             return tool_result(
                 status="failed",
                 summary="The qatta creator's account is no longer available.",
@@ -415,10 +397,7 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
         reference = next_reference(connection, "qatta")
         now = timestamp()
         payer_balance_after = balance - amount
-        connection.execute(
-            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-            (float(payer_balance_after), now, payer["uuid"]),
-        )
+        update_account_balance(connection, payer, payer_balance_after)
         _insert_transaction(
             connection,
             user=payer,
@@ -453,10 +432,7 @@ async def pay_qatta_bill(qatta_name: str) -> dict[str, Any]:
             )
             payout_reference = next_reference(connection, "qatta-payout")
             creator_balance_after = money(creator["Balance_SAR"]) + pot_total
-            connection.execute(
-                "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-                (float(creator_balance_after), now, creator["uuid"]),
-            )
+            update_account_balance(connection, creator, creator_balance_after)
             _insert_transaction(
                 connection,
                 user=creator,
@@ -577,15 +553,10 @@ async def cancel_qatta(qatta_name: str) -> dict[str, Any]:
         refunds: list[dict[str, str]] = []
         total_refunded = Decimal("0.00")
         for bill in paid_bills:
-            payer = connection.execute(
-                "SELECT * FROM users WHERE uuid = %s", (bill["payer_uuid"],)
-            ).fetchone()
+            payer = find_user_by_uuid(connection, bill["payer_uuid"])
             amount = money(bill["Amount_SAR"])
             balance_after = money(payer["Balance_SAR"]) + amount
-            connection.execute(
-                "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-                (float(balance_after), now, payer["uuid"]),
-            )
+            update_account_balance(connection, payer, balance_after)
             _insert_transaction(
                 connection,
                 user=payer,
@@ -713,7 +684,7 @@ CREATE_QATTA_TOOL: BaseTool = StructuredTool.from_function(
     description=(
         "Create a qatta (قطة): split a total amount equally between the creator and "
         "participants chosen by their saved beneficiary short names, after "
-        "confirmation. Participants must be active beneficiaries in the creator's "
+        "confirmation. Participants must be saved Nafi beneficiaries in the creator's "
         "benefit list. The creator's own share is deducted immediately into the qatta "
         "pot, so the creator's balance must cover their share."
     ),

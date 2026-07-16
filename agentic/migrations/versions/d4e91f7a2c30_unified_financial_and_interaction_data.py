@@ -26,71 +26,43 @@ def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS citext")
 
     op.create_table(
-        "platform_users",
-        sa.Column("id", sa.BigInteger(), primary_key=True),
-        sa.Column("username", postgresql.CITEXT(), nullable=False, unique=True),
-        sa.Column("full_name", sa.String(200), nullable=False),
-        sa.Column("email", postgresql.CITEXT(), nullable=False, unique=True),
-        sa.Column("password_hash", sa.String(255), nullable=False),
-        sa.Column("phone_e164", sa.String(20), nullable=False, unique=True),
-        sa.Column("country_code", sa.String(2), nullable=False, server_default="SA"),
-        sa.Column("city", sa.String(100), nullable=False),
-        sa.Column("role", sa.String(40), nullable=False, server_default="user"),
-        sa.Column("preferred_language", sa.String(5), nullable=False, server_default="ar"),
-        sa.Column("timezone", sa.String(50), nullable=False, server_default="Asia/Riyadh"),
-        sa.Column("verified", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("status", sa.String(20), nullable=False, server_default="active"),
-        sa.Column("last_login_at", sa.DateTime(timezone=True)),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint("status IN ('active','inactive','suspended')", name="ck_platform_user_status"),
-    )
-    op.create_index("ix_platform_users_phone", "platform_users", ["phone_e164"])
-
-    op.create_table(
         "users",
         sa.Column("uuid", UUID, primary_key=True),
-        sa.Column("tenant_id", sa.String(200), nullable=False, server_default="evaluation-tenant"),
-        sa.Column("platform_user_id", sa.BigInteger(), sa.ForeignKey("platform_users.id")),
         sa.Column("username", postgresql.CITEXT(), nullable=False, unique=True),
-        sa.Column("source_username", sa.String(200), nullable=False),
         sa.Column("full_name_ar", sa.String(200), nullable=False),
-        sa.Column("full_name_en", sa.String(200)),
-        sa.Column("dateofbirth", sa.Date()),
-        sa.Column("gender", sa.String(10)),
-        sa.Column("email", postgresql.CITEXT(), nullable=False, unique=True),
-        sa.Column("phone_e164", sa.String(20), nullable=False, unique=True),
-        sa.Column("nationality_code", sa.String(2), nullable=False, server_default="SA"),
-        sa.Column("preferred_language", sa.String(5), nullable=False, server_default="ar"),
-        sa.Column("bank_name_ar", sa.String(200), nullable=False),
-        sa.Column("account_number", sa.String(34), nullable=False, unique=True),
-        sa.Column("account_type_ar", sa.String(100), nullable=False),
-        sa.Column("currency_code", sa.String(3), nullable=False, server_default="SAR"),
-        sa.Column("balance_sar", MONEY, nullable=False, server_default="0"),
-        sa.Column("available_balance_sar", MONEY, nullable=False, server_default="0"),
+        sa.Column("full_name_en", sa.String(200), nullable=False),
+        sa.Column("password_hash", sa.String(255), nullable=False),
+        sa.Column("nafi_iban", sa.String(34), nullable=False, unique=True),
         sa.Column("daily_spend_limit_sar", MONEY, nullable=False, server_default="5000"),
-        sa.Column("hashedpassword", sa.String(255), nullable=False),
-        sa.Column("status", sa.String(20), nullable=False, server_default="active"),
-        sa.Column("nafath_linked", sa.String(3), nullable=False, server_default="No"),
-        sa.Column("kyc_status", sa.String(20), nullable=False, server_default="verified"),
-        sa.Column("kyc_tier", sa.SmallInteger(), nullable=False, server_default="2"),
-        sa.Column("risk_rating", sa.String(20), nullable=False, server_default="low"),
-        sa.Column("last_login_at", sa.DateTime(timezone=True)),
-        sa.Column("createdat", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updatedat", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint("gender IN ('Male','Female')", name="ck_users_gender"),
-        sa.CheckConstraint("status IN ('active','inactive')", name="ck_users_status"),
-        sa.CheckConstraint("nafath_linked IN ('Yes','No')", name="ck_users_nafath"),
-        sa.CheckConstraint("balance_sar >= 0 AND available_balance_sar >= 0", name="ck_users_balances"),
-        sa.CheckConstraint("daily_spend_limit_sar > 0", name="ck_users_daily_limit"),
-        sa.UniqueConstraint("tenant_id", "source_username", "account_number", name="uq_users_source_identity"),
+        sa.CheckConstraint("daily_spend_limit_sar >= 0", name="ck_users_daily_limit"),
     )
-    op.create_index("ix_users_tenant_username", "users", ["tenant_id", "username"])
+
+    op.create_table(
+        "bank_accounts",
+        sa.Column("uuid", UUID, primary_key=True),
+        sa.Column("user_uuid", UUID, sa.ForeignKey("users.uuid", ondelete="CASCADE"), nullable=False),
+        sa.Column("bank_name_ar", sa.String(200), nullable=False),
+        sa.Column("bank_name_en", sa.String(200), nullable=False),
+        sa.Column("account_number", sa.String(34), nullable=False, unique=True),
+        sa.Column("account_type", sa.String(100), nullable=False, server_default="Current"),
+        sa.Column("balance_sar", MONEY, nullable=False, server_default="0"),
+        sa.Column("is_primary", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.CheckConstraint("balance_sar >= 0", name="ck_bank_accounts_balance"),
+    )
+    op.create_index("ix_bank_accounts_user", "bank_accounts", ["user_uuid"])
+    op.create_index(
+        "uq_bank_accounts_primary_user",
+        "bank_accounts",
+        ["user_uuid"],
+        unique=True,
+        postgresql_where=sa.text("is_primary"),
+    )
 
     op.create_table(
         "beneficiaries",
         sa.Column("uuid", UUID, primary_key=True),
         sa.Column("owner_uuid", UUID, sa.ForeignKey("users.uuid", ondelete="CASCADE"), nullable=False),
+        sa.Column("beneficiary_uuid", UUID, sa.ForeignKey("users.uuid", ondelete="CASCADE"), nullable=False),
         sa.Column("full_name", sa.String(200), nullable=False),
         sa.Column("short_name", postgresql.CITEXT(), nullable=False),
         sa.Column("account_number", sa.String(34), nullable=False),
@@ -100,8 +72,7 @@ def upgrade() -> None:
         sa.Column("verified_at", sa.DateTime(timezone=True)),
         sa.Column("createdat", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updatedat", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint("status IN ('active','inactive')", name="ck_beneficiaries_status"),
-        sa.UniqueConstraint("owner_uuid", "account_number", name="uq_beneficiary_account"),
+        sa.UniqueConstraint("owner_uuid", "beneficiary_uuid", name="uq_beneficiary_user"),
         sa.UniqueConstraint("owner_uuid", "short_name", name="uq_beneficiary_short_name"),
     )
     op.create_index("ix_beneficiaries_owner", "beneficiaries", ["owner_uuid"])
@@ -267,6 +238,6 @@ def downgrade() -> None:
     for table in (
         "voice_turns", "interaction_events", "interaction_tasks", "interaction_requests",
         "interaction_sessions", "investment_holdings", "investment_assets", "transactions",
-        "fatoorahs", "qatta_bills", "qattas", "beneficiaries", "users", "platform_users",
+        "fatoorahs", "qatta_bills", "qattas", "beneficiaries", "bank_accounts", "users",
     ):
         op.drop_table(table)

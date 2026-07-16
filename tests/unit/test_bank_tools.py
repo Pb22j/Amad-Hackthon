@@ -30,16 +30,17 @@ from agentic.tools.qatta import (
     pay_qatta_bill,
 )
 from agentic.tools.transfer_between_accounts import (
+    TransferBetweenAccountsArgs,
     preflight_transfer_between_accounts,
     transfer_between_accounts,
 )
 from agentic.tools.runtime_identity import bind_tool_identity
 
-# Seeded fixture accounts (see agentic/tools/bank_db.py).
-LATIFA_ACCOUNT = "SA98000068368508501525"  # active, pre-registered beneficiary
-MOHAMMED_ACCOUNT = "SA0320000005556667772222"  # active, not yet a beneficiary
-SAUD_ACCOUNT = "SA91000032763205429515"  # inactive bank customer
-OWN_ACCOUNT = "SA4405000068201234567890"  # the evaluation user's own account
+# Seeded Nafi identities (see scripts/seed_postgres.py).
+EVALUATION_NAFI_IBAN = "SA9900000000000000000001"
+MOHAMMED_NAFI_IBAN = "SA9900000000000000000004"
+LATIFA_NAFI_IBAN = "SA9900000000000000000006"
+SAUD_NAFI_IBAN = "SA9900000000000000000007"
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -111,10 +112,24 @@ def _validated(result: dict) -> ToolResult:
     return ToolResult.model_validate(result)
 
 
+def test_transfer_provider_schema_uses_plain_number_with_server_side_limits():
+    amount_schema = TransferBetweenAccountsArgs.model_json_schema()["properties"]["amount"]
+    assert amount_schema["type"] == "number"
+    assert "exclusiveMinimum" not in amount_schema
+    assert "maximum" not in amount_schema
+
+    with pytest.raises(ValueError):
+        TransferBetweenAccountsArgs(destination_account="Ahmed", amount=0)
+    with pytest.raises(ValueError):
+        TransferBetweenAccountsArgs(destination_account="Ahmed", amount=float("inf"))
+
+
 async def test_balance_and_transaction_search_are_bank_backed():
     balance = _validated(await get_balance())
     assert balance.status == "completed"
     assert balance.data["balance_sar"] == "25431.50"
+    assert balance.data["total_balance_sar"] == "29631.50"
+    assert len(balance.data["accounts"]) == 2
     assert "*" in balance.data["masked_account_number"]
 
     transactions = _validated(await search_transactions(query="راتب", limit=5))
@@ -175,15 +190,15 @@ async def test_investment_accepts_arabic_name_and_tadawul_aliases(alias):
 async def test_add_benefit_activates_verified_account():
     result = _validated(
         await add_benefit(
-            full_name_of_benefit_account="محمد ناصر القحطاني",
-            benefit_account_number=MOHAMMED_ACCOUNT,
+            nafi_iban=MOHAMMED_NAFI_IBAN,
             short_name="محمد",
         )
     )
     assert result.status == "completed"
     assert result.operation_id
     assert result.user_id == "evaluation-user"
-    assert result.data["beneficiary"]["status"] == "active"
+    assert result.data["beneficiary"]["nafi_iban"] == MOHAMMED_NAFI_IBAN
+    assert result.data["beneficiary"]["full_name"] == "محمد ناصر القحطاني"
 
 
 async def test_list_beneficiaries_returns_authoritative_active_entries():
@@ -192,23 +207,13 @@ async def test_list_beneficiaries_returns_authoritative_active_entries():
     assert result.status == "completed"
     assert result.data["count"] == len(result.data["beneficiaries"])
     assert result.data["count"] > 0
-    assert all(item["status"] == "active" for item in result.data["beneficiaries"])
-    assert any(item["account_number"] == LATIFA_ACCOUNT for item in result.data["beneficiaries"])
+    assert any(item["nafi_iban"] == LATIFA_NAFI_IBAN for item in result.data["beneficiaries"])
 
 
-async def test_add_benefit_rejects_existing_inactive_beneficiary():
-    with psycopg.connect(os.environ["BANK_DATABASE_URL"]) as connection:
-        connection.execute(
-            "UPDATE beneficiaries SET status = 'inactive'"
-            " WHERE owner_uuid = (SELECT uuid FROM users WHERE Username = %s)"
-            " AND Account_Number = %s",
-            ("evaluation-user", LATIFA_ACCOUNT),
-        )
-
+async def test_add_benefit_rejects_existing_beneficiary_by_nafi_identity():
     result = _validated(
         await add_benefit(
-            full_name_of_benefit_account="لطيفة العنزي",
-            benefit_account_number=LATIFA_ACCOUNT,
+            nafi_iban=LATIFA_NAFI_IBAN,
             short_name="لطيفة",
         )
     )
@@ -220,8 +225,7 @@ async def test_add_benefit_rejects_existing_inactive_beneficiary():
 async def test_add_benefit_rejects_duplicate_beneficiary():
     result = _validated(
         await add_benefit(
-            full_name_of_benefit_account="لطيفة العنزي",
-            benefit_account_number=LATIFA_ACCOUNT,
+            nafi_iban=LATIFA_NAFI_IBAN,
             short_name="لطيفة",
         )
     )
@@ -229,42 +233,39 @@ async def test_add_benefit_rejects_duplicate_beneficiary():
     assert result.error_code == "beneficiary_already_exists"
 
 
-async def test_add_benefit_rejects_unknown_account_number():
+async def test_add_benefit_rejects_unknown_nafi_iban():
     result = _validated(
         await add_benefit(
-            full_name_of_benefit_account="غير موجود",
-            benefit_account_number="SA0000000000000000000000",
+            nafi_iban="SA0000000000000000000000",
             short_name="مجهول",
         )
     )
     assert result.status == "failed"
-    assert result.error_code == "account_not_found"
+    assert result.error_code == "nafi_iban_not_found"
 
 
-async def test_add_benefit_rejects_own_and_inactive_accounts():
+async def test_add_benefit_rejects_own_and_accepts_another_nafi_user():
     own = _validated(
         await add_benefit(
-            full_name_of_benefit_account="أحمد فهد العتيبي",
-            benefit_account_number=OWN_ACCOUNT,
+            nafi_iban=EVALUATION_NAFI_IBAN,
             short_name="حسابي",
         )
     )
     assert own.error_code == "cannot_add_own_account"
 
-    inactive = _validated(
+    added = _validated(
         await add_benefit(
-            full_name_of_benefit_account="سعود العنزي",
-            benefit_account_number=SAUD_ACCOUNT,
+            nafi_iban=SAUD_NAFI_IBAN,
             short_name="سعود",
         )
     )
-    assert inactive.error_code == "account_inactive"
+    assert added.status == "completed"
 
 
 async def test_transfer_completes_with_receipt_and_updates_balance():
     result = _validated(
         await transfer_between_accounts(
-            destination_account=LATIFA_ACCOUNT, amount=Decimal("250.00")
+            destination_account=LATIFA_NAFI_IBAN, amount=Decimal("250.00")
         )
     )
     assert result.status == "completed"
@@ -281,7 +282,7 @@ async def test_transfer_accepts_saved_short_name():
         await transfer_between_accounts(destination_account="لطيفة", amount=Decimal("10.00"))
     )
     assert result.status == "completed"
-    assert result.data["destination"]["account_number"] == LATIFA_ACCOUNT
+    assert result.data["destination"]["nafi_iban"] == LATIFA_NAFI_IBAN
 
 
 @pytest.mark.parametrize(
@@ -301,13 +302,13 @@ async def test_transfer_accepts_saved_full_name_and_arabic_spelling_variants(des
         await transfer_between_accounts(destination_account=destination, amount=Decimal("10.00"))
     )
     assert result.status == "completed"
-    assert result.data["destination"]["account_number"] == LATIFA_ACCOUNT
+    assert result.data["destination"]["nafi_iban"] == LATIFA_NAFI_IBAN
 
 
 async def test_transfer_rejects_unregistered_destination():
     result = _validated(
         await transfer_between_accounts(
-            destination_account=MOHAMMED_ACCOUNT, amount=Decimal("50.00")
+            destination_account=MOHAMMED_NAFI_IBAN, amount=Decimal("50.00")
         )
     )
     assert result.status == "failed"
@@ -319,7 +320,7 @@ async def test_transfer_preflight_rejects_ineligible_action_without_mutation():
     before = _validated(await get_balance())
     result = _validated(
         await preflight_transfer_between_accounts(
-            destination_account=MOHAMMED_ACCOUNT, amount=Decimal("50.00")
+            destination_account=MOHAMMED_NAFI_IBAN, amount=Decimal("50.00")
         )
     )
     after = _validated(await get_balance())
@@ -344,7 +345,7 @@ async def test_transfer_preflight_accepts_existing_active_beneficiary():
 async def test_transfer_rejects_insufficient_funds():
     result = _validated(
         await transfer_between_accounts(
-            destination_account=LATIFA_ACCOUNT, amount=Decimal("999999.00")
+            destination_account=LATIFA_NAFI_IBAN, amount=Decimal("999999.00")
         )
     )
     assert result.status == "failed"
@@ -354,14 +355,14 @@ async def test_transfer_rejects_insufficient_funds():
 async def test_transfer_enforces_daily_spend_limit():
     first = _validated(
         await transfer_between_accounts(
-            destination_account=LATIFA_ACCOUNT, amount=Decimal("4900.00")
+            destination_account=LATIFA_NAFI_IBAN, amount=Decimal("4900.00")
         )
     )
     assert first.status == "completed"
 
     second = _validated(
         await transfer_between_accounts(
-            destination_account=LATIFA_ACCOUNT, amount=Decimal("200.00")
+            destination_account=LATIFA_NAFI_IBAN, amount=Decimal("200.00")
         )
     )
     assert second.status == "failed"
@@ -469,7 +470,7 @@ async def test_pay_fatoorah_counts_toward_the_daily_spend_limit():
     _validated(await pay_fatoorah(last_four_digits="1234"))
     transfer = _validated(
         await transfer_between_accounts(
-            destination_account=LATIFA_ACCOUNT, amount=Decimal("4950.00")
+            destination_account=LATIFA_NAFI_IBAN, amount=Decimal("4950.00")
         )
     )
     assert transfer.error_code == "daily_limit_exceeded"
@@ -491,12 +492,12 @@ async def test_send_gift_delivers_message_with_sender_full_name(monkeypatch):
 
     # The recipient's statement shows the gift with the dedication and the
     # sender's full name.
-    monkeypatch.setenv("BANK_TOOL_USER_ID", "user_69491")
+    monkeypatch.setenv("BANK_TOOL_USER_ID", "latifa")
     report = _validated(await monthly_report())
     gift_entry = next(item for item in report.data["transactions"] if item["type"] == "gift_in")
     assert gift_entry["counterparty"] == "أحمد فهد العتيبي"
     assert gift_entry["description"] == "هدية من أحمد فهد العتيبي: مبروك التخرج يا لطيفة"
-    assert report.data["current_balance_sar"] == "32966.00"  # 32716 + 250
+    assert report.data["current_balance_sar"] == "12750.00"  # 12500 + 250
 
 
 async def test_send_gift_rejects_non_beneficiary_and_insufficient_funds():
@@ -521,8 +522,7 @@ async def test_send_gift_enforces_the_daily_spend_limit():
 async def test_create_qatta_splits_equally_and_deducts_creator_share():
     _validated(
         await add_benefit(
-            full_name_of_benefit_account="محمد ناصر القحطاني",
-            benefit_account_number=MOHAMMED_ACCOUNT,
+            nafi_iban=MOHAMMED_NAFI_IBAN,
             short_name="محمد",
         )
     )
@@ -542,15 +542,14 @@ async def test_create_qatta_splits_equally_and_deducts_creator_share():
     assert qatta["creator_new_balance_sar"] == "25398.17"  # 25431.50 - 33.33
     statuses = {item["full_name"]: item["status"] for item in qatta["participants"]}
     assert statuses["أحمد فهد العتيبي"] == "تم الدفع"  # creator paid into the pot
-    assert statuses["لطيفة العنزي"] == "غير مدفوعة"
+    assert statuses["لطيفة محمد العنزي"] == "غير مدفوعة"
     assert statuses["محمد ناصر القحطاني"] == "غير مدفوعة"
 
 
 async def test_qatta_rounding_preserves_the_exact_requested_total():
     _validated(
         await add_benefit(
-            full_name_of_benefit_account="محمد ناصر القحطاني",
-            benefit_account_number=MOHAMMED_ACCOUNT,
+            nafi_iban=MOHAMMED_NAFI_IBAN,
             short_name="محمد",
         )
     )
@@ -579,7 +578,7 @@ async def test_qatta_payments_count_toward_the_transfer_daily_limit():
     _validated(await pay_qatta_bill(qatta_name="قطة عشاء الجمعة"))
     transfer = _validated(
         await transfer_between_accounts(
-            destination_account=LATIFA_ACCOUNT, amount=Decimal("4950.00")
+            destination_account=LATIFA_NAFI_IBAN, amount=Decimal("4950.00")
         )
     )
     assert transfer.error_code == "daily_limit_exceeded"
@@ -602,8 +601,7 @@ async def test_create_qatta_rejects_non_beneficiary_participant():
 async def test_add_benefit_rejects_duplicate_short_name():
     result = _validated(
         await add_benefit(
-            full_name_of_benefit_account="محمد ناصر القحطاني",
-            benefit_account_number=MOHAMMED_ACCOUNT,
+            nafi_iban=MOHAMMED_NAFI_IBAN,
             short_name="لطيفة",  # already used by the seeded beneficiary
         )
     )
@@ -625,17 +623,17 @@ async def test_pay_qatta_bill_fills_pot_and_pays_out_creator(monkeypatch):
     again = _validated(await pay_qatta_bill(qatta_name="قطة عشاء الجمعة"))
     assert again.error_code == "already_paid"
 
-    monkeypatch.setenv("BANK_TOOL_USER_ID", "user_69491")
+    monkeypatch.setenv("BANK_TOOL_USER_ID", "latifa")
     last = _validated(await pay_qatta_bill(qatta_name="قطة عشاء الجمعة"))
     assert last.status == "completed"
     assert last.data["qatta_status"] == "completed"
     # The full pot (3 x 100) pays out to the creator only on completion.
     assert last.data["payout"]["payout_sar"] == "300.00"
-    assert last.data["payout"]["paid_to_creator"] == "عبدالإله سعيد المسفر"
+    assert last.data["payout"]["paid_to_creator"] == "ماجد عبدالله السبيعي"
 
     monkeypatch.setenv("BANK_TOOL_USER_ID", "admin")
     report = _validated(await monthly_report())
-    assert report.data["current_balance_sar"] == "150300.00"  # 150000 + pot
+    assert report.data["current_balance_sar"] == "75300.00"  # 75000 + pot
 
 
 async def test_cancel_qatta_refunds_everyone_who_paid(monkeypatch):
@@ -654,7 +652,7 @@ async def test_cancel_qatta_refunds_everyone_who_paid(monkeypatch):
     # Pot held admin's seeded share + evaluation-user's payment.
     assert result.data["total_refunded_sar"] == "200.00"
     refunded = {item["full_name"]: item["refunded_sar"] for item in result.data["refunds"]}
-    assert refunded["عبدالإله سعيد المسفر"] == "100.00"
+    assert refunded["ماجد عبدالله السبيعي"] == "100.00"
     assert refunded["أحمد فهد العتيبي"] == "100.00"
 
     # The payer got their money back and the qatta is gone.
@@ -671,7 +669,7 @@ async def test_cancel_qatta_rejects_unknown_and_completed(monkeypatch):
 
     # Complete the seeded qatta, then the creator tries to cancel it.
     _validated(await pay_qatta_bill(qatta_name="قطة عشاء الجمعة"))
-    monkeypatch.setenv("BANK_TOOL_USER_ID", "user_69491")
+    monkeypatch.setenv("BANK_TOOL_USER_ID", "latifa")
     _validated(await pay_qatta_bill(qatta_name="قطة عشاء الجمعة"))
     monkeypatch.setenv("BANK_TOOL_USER_ID", "admin")
     completed = _validated(await cancel_qatta(qatta_name="قطة عشاء الجمعة"))
@@ -702,4 +700,4 @@ async def test_list_qatta_bills_shows_owed_and_created(monkeypatch):
     assert qatta["paid_out_sar"] == "0.00"
     paid = {item["full_name"]: item["status"] for item in qatta["participants"]}
     assert paid["أحمد فهد العتيبي"] == "تم الدفع"
-    assert paid["لطيفة العنزي"] == "غير مدفوعة"
+    assert paid["لطيفة محمد العنزي"] == "غير مدفوعة"

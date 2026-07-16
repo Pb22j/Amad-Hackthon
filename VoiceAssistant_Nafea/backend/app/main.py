@@ -24,7 +24,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import AuthenticatedUser, AuthenticationStore, RegistrationConflict
 from app.config import settings
@@ -193,33 +193,13 @@ class LoginRequest(StrictModel):
 
 
 class RegistrationRequest(StrictModel):
-    full_name: str = Field(min_length=2, max_length=200)
     username: str = Field(
-        min_length=3,
-        max_length=32,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]+$",
+        min_length=3, max_length=32, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]+$"
     )
-    email: str = Field(min_length=3, max_length=254)
-    phone_e164: str = Field(pattern=r"^\+[1-9]\d{7,14}$")
+    full_name_ar: str = Field(min_length=2, max_length=200)
+    full_name_en: str = Field(min_length=2, max_length=200)
     password: str = Field(min_length=8, max_length=256, repr=False)
     language: str = Field(default="ar", pattern="^(ar|en)$")
-
-    @field_validator("full_name")
-    @classmethod
-    def normalize_full_name(cls, value: str) -> str:
-        normalized = " ".join(value.split())
-        if len(normalized) < 2:
-            raise ValueError("full name is required")
-        return normalized
-
-    @field_validator("email")
-    @classmethod
-    def normalize_email(cls, value: str) -> str:
-        normalized = value.strip().lower()
-        local, separator, domain = normalized.partition("@")
-        if not separator or not local or "." not in domain or domain.startswith("."):
-            raise ValueError("a valid email address is required")
-        return normalized
 
     @model_validator(mode="after")
     def validate_password_strength(self) -> "RegistrationRequest":
@@ -407,21 +387,17 @@ async def register(payload: RegistrationRequest, response: Response) -> SessionR
     try:
         user = await asyncio.to_thread(
             authentication_store.register,
-            full_name=payload.full_name,
             username=payload.username,
-            email=payload.email,
-            phone_e164=payload.phone_e164,
+            full_name_ar=payload.full_name_ar,
+            full_name_en=payload.full_name_en,
             password=payload.password,
-            language=payload.language,
-            tenant_id=settings.DEMO_TENANT_ID,
         )
     except RegistrationConflict as error:
-        raise HTTPException(status_code=409, detail=f"{error.field}_taken") from error
-
+        raise HTTPException(status_code=409, detail="username_taken") from error
     session, token = interaction_store.create_session(
         user_id=user.user_id,
         tenant_id=user.tenant_id,
-        language=user.language,
+        language=payload.language,
         scopes=_scopes_for_user(user),
         ttl_seconds=settings.SESSION_TTL_SECONDS,
     )

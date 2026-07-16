@@ -1,4 +1,4 @@
-"""Server-side banking-user authentication with legacy hash migration."""
+"""Authentication against the minimal ten-user Nafi demo database."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from uuid import uuid4
 
 import psycopg
@@ -17,17 +16,13 @@ from psycopg.rows import dict_row
 @dataclass(frozen=True, slots=True)
 class AuthenticatedUser:
     user_id: str
-    tenant_id: str
-    language: str
-    verified: bool = False
+    tenant_id: str = "evaluation-tenant"
+    language: str = "ar"
+    verified: bool = True
 
 
 class RegistrationConflict(Exception):
-    """A public registration identifier is already assigned."""
-
-    def __init__(self, field: str) -> None:
-        self.field = field
-        super().__init__(field)
+    pass
 
 
 def hash_password(password: str, *, salt: bytes | None = None) -> str:
@@ -37,23 +32,22 @@ def hash_password(password: str, *, salt: bytes | None = None) -> str:
 
 
 def verify_password(password: str, encoded: str) -> bool:
+    """Verify the salted scrypt hashes stored in ``users.password_hash``."""
+
     try:
-        if encoded.startswith("scrypt$"):
-            _, n, r, p, salt_hex, expected_hex = encoded.split("$", 5)
-            actual = hashlib.scrypt(
-                password.encode("utf-8"),
-                salt=bytes.fromhex(salt_hex),
-                n=int(n),
-                r=int(r),
-                p=int(p),
-            )
-            return hmac.compare_digest(actual, bytes.fromhex(expected_hex))
-        if len(encoded) == 64:
-            actual_hex = hashlib.sha256(password.encode("utf-8")).hexdigest()
-            return hmac.compare_digest(actual_hex, encoded.lower())
+        algorithm, n, r, p, salt_hex, expected_hex = encoded.split("$", 5)
+        if algorithm != "scrypt":
+            return False
+        actual = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=bytes.fromhex(salt_hex),
+            n=int(n),
+            r=int(r),
+            p=int(p),
+        )
+        return hmac.compare_digest(actual, bytes.fromhex(expected_hex))
     except (TypeError, ValueError, OverflowError):
         return False
-    return False
 
 
 class AuthenticationStore:
@@ -63,138 +57,53 @@ class AuthenticationStore:
         )
 
     def authenticate(self, *, identifier: str, password: str) -> AuthenticatedUser | None:
-        normalized = identifier.strip()
-        if not normalized or not password:
+        username = identifier.strip()
+        if not username or not password:
             return None
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             row = connection.execute(
-                """
-                SELECT username::text AS username, tenant_id, preferred_language,
-                       hashedpassword, status, kyc_status
-                FROM users
-                WHERE username = %s OR email = %s
-                LIMIT 1
-                """,
-                (normalized, normalized),
+                "SELECT username::text AS username, password_hash FROM users WHERE username = %s",
+                (username,),
             ).fetchone()
-            if row is None or row["status"] != "active":
-                return None
-            if not verify_password(password, row["hashedpassword"]):
-                return None
-            if not row["hashedpassword"].startswith("scrypt$"):
-                connection.execute(
-                    """
-                    UPDATE users SET hashedpassword = %s, last_login_at = %s
-                    WHERE username = %s
-                    """,
-                    (hash_password(password), datetime.now(timezone.utc), row["username"]),
-                )
-            else:
-                connection.execute(
-                    "UPDATE users SET last_login_at = %s WHERE username = %s",
-                    (datetime.now(timezone.utc), row["username"]),
-                )
-            connection.commit()
-        return AuthenticatedUser(
-            user_id=row["username"],
-            tenant_id=row["tenant_id"],
-            language=row["preferred_language"] if row["preferred_language"] in {"ar", "en"} else "ar",
-            verified=row["kyc_status"] == "verified",
-        )
+        if row is None or not verify_password(password, row["password_hash"]):
+            return None
+        return AuthenticatedUser(user_id=row["username"])
 
     def register(
         self,
         *,
-        full_name: str,
         username: str,
-        email: str,
-        phone_e164: str,
+        full_name_ar: str,
+        full_name_en: str,
         password: str,
-        language: str,
-        tenant_id: str,
     ) -> AuthenticatedUser:
-        """Create an active zero-balance banking profile atomically."""
+        """Create a user and their initial Nafi account using only minimal fields."""
 
         normalized_username = username.strip()
-        normalized_email = email.strip().lower()
-        normalized_phone = phone_e164.strip()
-        normalized_name = " ".join(full_name.split())
-        now = datetime.now(timezone.utc)
         user_uuid = str(uuid4())
-        account_number = f"SA99{uuid4().int % 10**20:020d}"
-
+        account_uuid = str(uuid4())
+        # UUID-derived digits make collisions practically impossible; the unique
+        # database constraints remain the final authority.
+        digits = f"{uuid4().int % 10**20:020d}"
+        nafi_iban = f"SA99{digits}"
         try:
-            with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
-                duplicate = connection.execute(
-                    """
-                    SELECT
-                      CASE
-                        WHEN username = %s THEN 'username'
-                        WHEN email = %s THEN 'email'
-                        WHEN phone_e164 = %s THEN 'phone'
-                      END AS field
-                    FROM users
-                    WHERE username = %s OR email = %s OR phone_e164 = %s
-                    LIMIT 1
-                    """,
-                    (
-                        normalized_username,
-                        normalized_email,
-                        normalized_phone,
-                        normalized_username,
-                        normalized_email,
-                        normalized_phone,
-                    ),
-                ).fetchone()
-                if duplicate is not None:
-                    raise RegistrationConflict(duplicate["field"])
-
+            with psycopg.connect(self.database_url) as connection:
                 connection.execute(
-                    """
-                    INSERT INTO users (
-                      uuid, tenant_id, username, source_username, full_name_ar,
-                      full_name_en, email, phone_e164, preferred_language,
-                      bank_name_ar, account_number, account_type_ar, currency_code,
-                      balance_sar, available_balance_sar, daily_spend_limit_sar,
-                      hashedpassword, status, nafath_linked, kyc_status, kyc_tier,
-                      risk_rating, createdat, updatedat
-                    ) VALUES (
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      'محفظة نافع', %s, 'محفظة رقمية', 'SAR',
-                      0, 0, 5000, %s, 'active', 'No', 'pending', 1,
-                      'low', %s, %s
-                    )
-                    """,
-                    (
-                        user_uuid,
-                        tenant_id,
-                        normalized_username,
-                        normalized_username,
-                        normalized_name,
-                        normalized_name,
-                        normalized_email,
-                        normalized_phone,
-                        language,
-                        account_number,
-                        hash_password(password),
-                        now,
-                        now,
-                    ),
+                    """INSERT INTO users
+                       (uuid,username,full_name_ar,full_name_en,password_hash,nafi_iban)
+                       VALUES (%s,%s,%s,%s,%s,%s)""",
+                    (user_uuid, normalized_username, full_name_ar.strip(), full_name_en.strip(),
+                     hash_password(password), nafi_iban),
                 )
-                connection.commit()
+                connection.execute(
+                    """INSERT INTO bank_accounts
+                       (uuid,user_uuid,bank_name_ar,bank_name_en,account_number,
+                        account_type,balance_sar,is_primary)
+                       VALUES (%s,%s,'نافي','Nafi',%s,'Nafi Account',0,true)""",
+                    (account_uuid, user_uuid, nafi_iban),
+                )
         except UniqueViolation as error:
-            constraint = error.diag.constraint_name or ""
-            if "username" in constraint:
-                raise RegistrationConflict("username") from error
-            if "email" in constraint:
-                raise RegistrationConflict("email") from error
-            if "phone" in constraint:
-                raise RegistrationConflict("phone") from error
+            if "username" in (error.diag.constraint_name or ""):
+                raise RegistrationConflict(normalized_username) from error
             raise
-
-        return AuthenticatedUser(
-            user_id=normalized_username,
-            tenant_id=tenant_id,
-            language=language,
-            verified=False,
-        )
+        return AuthenticatedUser(user_id=normalized_username)

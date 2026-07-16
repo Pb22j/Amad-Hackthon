@@ -271,9 +271,8 @@ function knownArgumentLabel(key: string, t: Translate): string | undefined {
   const labels: Record<string, string> = {
     account_reference: t("accountReference"),
     biller: t("biller"),
-    benefit_account_number: t("beneficiaryAccountNumber"),
+    nafi_iban: t("beneficiaryNafiIban"),
     beneficiary_short_name: t("shortName"),
-    full_name_of_benefit_account: t("beneficiaryFullName"),
     symbol: t("investmentSymbol"),
     quantity: t("quantity"),
     amount: t("amount"),

@@ -79,16 +79,22 @@ class DashboardStore:
             user = connection.execute(
                 """
                 SELECT uuid::text AS id, username::text, full_name_ar, full_name_en,
-                       bank_name_ar, account_number, account_type_ar,
-                       available_balance_sar, status
+                       nafi_iban
                 FROM users
-                WHERE tenant_id = %s AND username = %s
+                WHERE username = %s
                 LIMIT 1
                 """,
-                (tenant_id, user_id),
+                (user_id,),
             ).fetchone()
             if user is None:
                 raise LookupError("Authenticated customer profile was not found")
+            accounts = connection.execute(
+                """SELECT uuid::text AS id, bank_name_ar, account_number,
+                          account_type, balance_sar, is_primary
+                     FROM bank_accounts WHERE user_uuid = %s
+                     ORDER BY is_primary DESC, uuid""",
+                (user["id"],),
+            ).fetchall()
 
             holdings = connection.execute(
                 """
@@ -123,17 +129,17 @@ class DashboardStore:
             ).fetchall()
             recipients = connection.execute(
                 """
-                SELECT b.uuid::text AS id, b.full_name, b.short_name::text,
-                       COALESCE(b.bank_name_ar, target.bank_name_ar) AS bank_name_ar
+                SELECT b.uuid::text AS id, target.full_name_ar AS full_name,
+                       b.short_name::text, account.bank_name_ar
                 FROM beneficiaries b
-                LEFT JOIN users target
-                  ON target.account_number = b.account_number
-                 AND target.tenant_id = %s
-                WHERE b.owner_uuid = %s AND b.status = 'active'
-                ORDER BY b.updatedat DESC
+                JOIN users target ON target.uuid = b.beneficiary_uuid
+                JOIN bank_accounts account
+                  ON account.user_uuid = target.uuid AND account.is_primary
+                WHERE b.owner_uuid = %s
+                ORDER BY b.createdat DESC
                 LIMIT 3
                 """,
-                (tenant_id, user["id"]),
+                (user["id"],),
             ).fetchall()
             stats = connection.execute(
                 """
@@ -145,14 +151,17 @@ class DashboardStore:
                   (SELECT COUNT(*) FROM fatoorahs
                     WHERE user_uuid = %s AND status = 'unpaid') AS unpaid_bills,
                   (SELECT COUNT(*) FROM beneficiaries
-                    WHERE owner_uuid = %s AND status = 'active') AS saved_recipients
+                    WHERE owner_uuid = %s) AS saved_recipients
                 FROM transactions
                 WHERE user_uuid = %s
                 """,
                 (user["id"], user["id"], user["id"]),
             ).fetchone()
 
-        balance = Decimal(str(user["available_balance_sar"]))
+        balance = sum(
+            (Decimal(str(account["balance_sar"])) for account in accounts),
+            start=Decimal("0"),
+        )
         portfolio_value = Decimal("0")
         portfolio_cost = Decimal("0")
         holding_values: list[tuple[dict[str, Any], Decimal, Decimal]] = []
@@ -169,14 +178,16 @@ class DashboardStore:
         portfolio_gain = portfolio_value - portfolio_cost
         net_worth = balance + portfolio_value
         net_basis = balance + portfolio_cost
-        bank = _bank(user["bank_name_ar"])
-        account = {
-            "id": user["id"],
-            **bank,
-            "account_type": user["account_type_ar"],
-            "masked_account_number": _masked_account(user["account_number"]),
-            "status": user["status"],
-        }
+        account_views = [
+            {
+                "id": account["id"],
+                **_bank(account["bank_name_ar"]),
+                "account_type": account["account_type"],
+                "masked_account_number": _masked_account(account["account_number"]),
+                "status": "active",
+            }
+            for account in accounts
+        ]
 
         recent = []
         for transaction in transactions:
@@ -222,7 +233,7 @@ class DashboardStore:
                 "amount_sar": _money(net_worth),
                 "delta_percent": _percent(net_worth - net_basis, net_basis),
             },
-            "accounts": [account],
+            "accounts": account_views,
             "portfolio": {
                 "value_sar": _money(portfolio_value),
                 "total_return_percent": _percent(portfolio_gain, portfolio_cost),
@@ -241,7 +252,7 @@ class DashboardStore:
                 "recent": recent,
                 "upcoming": upcoming,
                 "metrics": {
-                    "linked_accounts": 1,
+                    "linked_accounts": len(account_views),
                     "monthly_spend_sar": _money(stats["monthly_spend_sar"]),
                     "unpaid_bills": int(stats["unpaid_bills"]),
                     "saved_recipients": int(stats["saved_recipients"]),

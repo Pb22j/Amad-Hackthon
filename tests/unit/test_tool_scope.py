@@ -62,12 +62,11 @@ async def test_tool_scope_removes_unrelated_external_tools():
     assert observed == ["allowed_tool", "internal_response_tool"]
 
 
-async def test_required_sequence_forces_each_authoritative_step():
+async def test_required_sequence_forces_authoritative_transfer_directly():
     middleware = IntentToolScopeMiddleware(
         {"list_beneficiaries", "transfer_between_accounts"},
         required_tool_sequences={
             "saved_beneficiary_transfer": (
-                "list_beneficiaries",
                 "transfer_between_accounts",
             )
         },
@@ -101,10 +100,6 @@ async def test_required_sequence_forces_each_authoritative_step():
         return observed, request_options
 
     observed, options = await visible([])
-    assert observed == ["list_beneficiaries"]
-    assert options == {"response_format": None, "tool_choice": "list_beneficiaries"}
-    listed = ToolMessage(content="listed", tool_call_id="list-1", name="list_beneficiaries")
-    observed, options = await visible([listed])
     assert observed == ["transfer_between_accounts"]
     assert options == {"response_format": None, "tool_choice": "transfer_between_accounts"}
     transferred = ToolMessage(
@@ -112,7 +107,7 @@ async def test_required_sequence_forces_each_authoritative_step():
         tool_call_id="transfer-1",
         name="transfer_between_accounts",
     )
-    observed, options = await visible([listed, transferred])
+    observed, options = await visible([transferred])
     assert observed == ["internal_response_tool"]
     assert options == {"response_format": "agent-report", "tool_choice": None}
 
@@ -122,16 +117,21 @@ async def test_required_sequence_recovers_tool_name_from_call_id():
         {"list_beneficiaries", "transfer_between_accounts"},
         required_tool_sequences={
             "saved_beneficiary_transfer": (
-                "list_beneficiaries",
                 "transfer_between_accounts",
             )
         },
     )
     call = AIMessage(
         content="",
-        tool_calls=[{"id": "list-1", "name": "list_beneficiaries", "args": {}}],
+        tool_calls=[
+            {
+                "id": "transfer-1",
+                "name": "transfer_between_accounts",
+                "args": {"destination_account": "Ahmed", "amount": 700},
+            }
+        ],
     )
-    result_without_name = ToolMessage(content="listed", tool_call_id="list-1")
+    result_without_name = ToolMessage(content="transferred", tool_call_id="transfer-1")
     observed = []
     request = ModelRequest(
         model=ScriptedChatModel(responses=[]),
@@ -150,14 +150,14 @@ async def test_required_sequence_recovers_tool_name_from_call_id():
 
     await middleware.awrap_model_call(request, handler)
 
-    assert observed == ["transfer_between_accounts"]
+    assert observed == ["internal_response_tool"]
 
 
 async def test_required_sequence_is_ignored_when_workflow_is_not_registered():
     middleware = IntentToolScopeMiddleware(
         {"allowed_tool"},
         required_tool_sequences={
-            "money_transfer": ("list_beneficiaries", "transfer_between_accounts")
+            "money_transfer": ("transfer_between_accounts",)
         },
     )
     observed = []

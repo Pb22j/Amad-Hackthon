@@ -123,8 +123,8 @@ async def test_generic_clarification_answer_is_bound_by_missing_field_reason(
         repository = ClarificationRepository(session)
         clarification = await repository.create(
             task_id=task.id,
-            question="Which beneficiary account?",
-            reason_code="missing_benefit_account_number",
+            question="Which beneficiary Nafi IBAN?",
+            reason_code="missing_nafi_iban",
             expected_answer={"type": "string", "field": "answer"},
             expires_in_seconds=60,
         )
@@ -135,7 +135,7 @@ async def test_generic_clarification_answer_is_bound_by_missing_field_reason(
         )
 
         assert await repository.answered_field_values(task.id) == {
-            "benefit_account_number": ("SA82000094331951278286",)
+            "nafi_iban": ("SA82000094331951278286",)
         }
 
 

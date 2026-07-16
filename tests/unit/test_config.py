@@ -12,6 +12,7 @@ def test_config_loads_separate_model_roles(app_config):
     assert app_config.llm.models["primary"].provider == "openrouter"
     assert app_config.limits.task.max_tool_calls == 15
     assert "transfer_funds" in app_config.policies.financial_actions.require_exact_confirmation
+    assert app_config.tools.tools["transfer_between_accounts"]["requires_confirmation"]
 
 
 def test_model_config_forbids_unknown_keys():

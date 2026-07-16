@@ -17,6 +17,7 @@ from agentic.security.confirmation import ConfirmationSigner
 from agentic.security.identity import AuthContext
 from agentic.tools.guard import AgentRuntimeContext, ToolGuardError
 from agentic.tools.metadata import ToolMetadata, ToolRisk
+from agentic.tools.runtime_identity import current_tool_identity
 from tests.fakes import ScriptedChatModel, StaticClassifier, report_message
 
 
@@ -27,6 +28,11 @@ class BalanceArgs(BaseModel):
 class TransferArgs(BaseModel):
     amount: int
     destination: str
+
+
+class NafiTransferArgs(BaseModel):
+    destination_account: str
+    amount: float
 
 
 async def add_task(database, *, task_id: str = "task-1") -> None:
@@ -741,6 +747,88 @@ async def test_guard_accepts_unambiguous_argument_from_prior_user_statement(
     )
 
     assert observed == [{"amount": 25, "destination": "Yousef"}]
+    assert result["status"] == "completed"
+
+
+@pytest.mark.integration
+async def test_transfer_preflight_uses_authenticated_runtime_identity(
+    database, app_config, monkeypatch
+):
+    await add_task(database)
+    observed: list[tuple[str, str] | None] = []
+
+    async def preflight_transfer_between_accounts(**_: Any) -> dict[str, Any]:
+        observed.append(current_tool_identity())
+        return {
+            "status": "completed",
+            "summary": "Beneficiary found for authenticated owner",
+            "data": {},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    async def transfer_between_accounts(
+        destination_account: str, amount: float
+    ) -> dict[str, Any]:
+        del destination_account, amount
+        observed.append(current_tool_identity())
+        return {
+            "status": "completed",
+            "summary": "Transfer completed",
+            "data": {},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    monkeypatch.setattr(
+        "agentic.tools.transfer_between_accounts.preflight_transfer_between_accounts",
+        preflight_transfer_between_accounts,
+    )
+    tool = StructuredTool.from_function(
+        coroutine=transfer_between_accounts,
+        name="transfer_between_accounts",
+        description="Transfer to a saved Nafi beneficiary.",
+        args_schema=NafiTransferArgs,
+    )
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_between_accounts",
+                        "args": {"destination_account": "Ahmed", "amount": 17000},
+                        "id": "authenticated-preflight",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            report_message(summary="Transfer completed"),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(Intent.SAVED_BENEFICIARY_TRANSFER),
+        external_tools=[tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="transfer_between_accounts",
+                risk=ToolRisk.WRITE,
+                intents=frozenset({Intent.SAVED_BENEFICIARY_TRANSFER.value}),
+                required_scopes=frozenset({"financial:write"}),
+            )
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state("Transfer 17000 SAR to Ahmed"),
+        config={"configurable": {"thread_id": "authenticated-preflight"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert observed == [("user-1", "tenant-1"), ("user-1", "tenant-1")]
     assert result["status"] == "completed"
 
 

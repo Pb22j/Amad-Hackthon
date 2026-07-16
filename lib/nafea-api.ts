@@ -12,10 +12,9 @@ export type NafeaSession = {
 };
 
 export type NafeaRegistration = {
-  full_name: string;
   username: string;
-  email: string;
-  phone_e164: string;
+  full_name_ar: string;
+  full_name_en: string;
   password: string;
   language: NafeaLanguage;
 };

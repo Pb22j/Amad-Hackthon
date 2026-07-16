@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import re
 import time
 from decimal import Decimal, InvalidOperation
@@ -61,6 +62,9 @@ from agentic.security.rate_limit import InMemoryRateLimiter
 from agentic.telemetry.events import EventPublisher
 from agentic.telemetry.metrics import TASK_DURATION, TASKS
 from agentic.tools.guard import AgentRuntimeContext
+
+
+logger = logging.getLogger(__name__)
 
 
 _NUMBER_TOKEN = re.compile(r"(?<!\w)[+-]?\d[\d,]*(?:\.\d+)?")
@@ -630,6 +634,17 @@ class AgentService:
                 return
             await self._record_completion(task_id, request, result)
         except Exception as exc:
+            logger.exception(
+                "agent task execution failed",
+                extra={
+                    "task_id": task_id,
+                    "request_id": str(request.request_id),
+                    "session_id": str(request.session_id),
+                    "tenant_id": request.tenant_id,
+                    "user_id": request.user_id,
+                    "error_code": type(exc).__name__,
+                },
+            )
             await self._record_failure(task_id, request, type(exc).__name__)
             raise
         finally:

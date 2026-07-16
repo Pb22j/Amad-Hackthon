@@ -30,6 +30,9 @@ class RedactingJsonFormatter(logging.Formatter):
         ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
+        if record.exc_info and record.exc_info[1] is not None:
+            payload["exception_type"] = type(record.exc_info[1]).__name__
+            payload["exception_message"] = str(record.exc_info[1])
         return json.dumps(redact(payload), ensure_ascii=False, default=str)
 
 

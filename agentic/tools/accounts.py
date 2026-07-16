@@ -54,24 +54,48 @@ async def get_balance(account: str = "primary") -> dict[str, Any]:
             )
         requested = normalize_account_number(account)
         aliases = {"PRIMARY", "CHECKING", "CURRENT", "الرئيسي", "الجاري"}
-        if requested not in aliases and requested != user["Account_Number"]:
+        accounts = connection.execute(
+            """SELECT a.* FROM bank_accounts a JOIN users u ON u.uuid = a.user_uuid
+               WHERE u.username = %s ORDER BY a.is_primary DESC, a.uuid""",
+            (username,),
+        ).fetchall()
+        selected = next(
+            (
+                row for row in accounts
+                if requested in aliases and row["is_primary"]
+                or requested == normalize_account_number(row["account_number"])
+            ),
+            None,
+        )
+        if selected is None:
             return tool_result(
                 status="failed",
                 summary="The requested account does not belong to the authenticated customer.",
                 data={},
                 error_code="account_not_found",
             )
-        balance = money(user["Balance_SAR"])
+        balance = money(selected["balance_sar"])
+        total = sum((money(row["balance_sar"]) for row in accounts), start=money(0))
         return tool_result(
             status="completed",
-            summary=f"The available primary-account balance is {balance} SAR.",
+            summary=f"The total balance is {total} SAR across {len(accounts)} account(s).",
             data={
                 "balance_sar": str(balance),
+                "total_balance_sar": str(total),
                 "currency": "SAR",
-                "account_type": user["Account_Type_Ar"],
-                "bank_name": user["Bank_Name_Ar"],
-                "masked_account_number": _masked_account(user["Account_Number"]),
-                "account_status": user["status"],
+                "account_type": selected["account_type"],
+                "bank_name": selected["bank_name_ar"],
+                "masked_account_number": _masked_account(selected["account_number"]),
+                "accounts": [
+                    {
+                        "bank_name": row["bank_name_ar"],
+                        "account_type": row["account_type"],
+                        "balance_sar": str(money(row["balance_sar"])),
+                        "masked_account_number": _masked_account(row["account_number"]),
+                        "is_primary": bool(row["is_primary"]),
+                    }
+                    for row in accounts
+                ],
             },
             operation_id=next_reference(connection, "balance"),
         )
@@ -139,7 +163,7 @@ async def search_transactions(query: str = "", limit: int = 10) -> dict[str, Any
 GET_BALANCE_TOOL: BaseTool = StructuredTool.from_function(
     coroutine=get_balance,
     name="get_balance",
-    description="Get the authenticated customer's current bank balance and account status.",
+    description="Get total balance and per-account balances for the authenticated customer.",
     args_schema=GetBalanceArgs,
 )
 

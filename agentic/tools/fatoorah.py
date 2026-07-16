@@ -29,6 +29,7 @@ from agentic.tools.bank_db import (
     spent_today,
     timestamp,
     tool_result,
+    update_account_balance,
 )
 
 
@@ -83,14 +84,6 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
                 data={},
                 error_code="customer_not_found",
             )
-        if payer["status"] != "active":
-            return tool_result(
-                status="failed",
-                summary="The account is not active, so it cannot pay bills.",
-                data={},
-                error_code="source_account_inactive",
-            )
-
         # Bills are assigned to one customer; only the owner's bills match.
         matches = connection.execute(
             "SELECT * FROM fatoorahs"
@@ -162,10 +155,7 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
         reference = next_reference(connection, "fatoorah")
         now = timestamp()
         balance_after = balance - amount
-        connection.execute(
-            "UPDATE users SET Balance_SAR = %s, updatedAt = %s WHERE uuid = %s",
-            (float(balance_after), now, payer["uuid"]),
-        )
+        update_account_balance(connection, payer, balance_after)
         connection.execute(
             "UPDATE fatoorahs SET status = 'paid', paidAt = %s WHERE uuid = %s",
             (now, fatoorah["uuid"]),
