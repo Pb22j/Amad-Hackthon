@@ -272,8 +272,18 @@ def load_config(config_dir: str | Path | None = None) -> AppConfig:
         app_file = app_file.model_copy(
             update={"agent": app_file.agent.model_copy(update={"tool_provider": provider})}
         )
+    llm_config = LLMConfig.model_validate(_read_yaml(root / "llm.yaml"))
+    if model := os.getenv("LLM_MODEL"):
+        llm_config = llm_config.model_copy(
+            update={
+                "models": {
+                    role: item.model_copy(update={"model": model})
+                    for role, item in llm_config.models.items()
+                }
+            }
+        )
     return AppConfig(
-        llm=LLMConfig.model_validate(_read_yaml(root / "llm.yaml")),
+        llm=llm_config,
         app=app_file,
         limits=LimitsConfig.model_validate(_read_yaml(root / "limits.yaml")),
         policies=PoliciesConfig.model_validate(_read_yaml(root / "policies.yaml")),

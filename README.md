@@ -135,6 +135,66 @@ The unified customer, banking, interaction, and agent data model is documented i
 .venv/bin/amad-agent eval-security
 ```
 
+## Security screening evaluation
+
+`amad-agent eval-security` runs a 100-scenario bilingual adversarial dataset
+(`agentic/evals/datasets/security.jsonl`) against `PolicyEngine.screen_request`. It is
+deterministic, needs no model provider, and covers ten categories across Arabic and English:
+benign reads and actions, benign text containing trigger words, prompt injection, credential
+extraction, cross-user access, obfuscated injection, authority manipulation, tool-argument
+injection, and bulk exfiltration.
+
+Cases are labelled with the outcome the policy is *intended* to produce, not the outcome the
+current detector produces, so the dataset is free to disagree with the implementation. A case
+the detector cannot yet satisfy carries a `known_gap` reason and, where the attempt is stopped
+by a deeper layer, a `mitigation` note. The run reports gaps but only fails on an
+*undocumented* mismatch — or on a `known_gap` case that starts passing, which means the marker
+is stale and should be deleted.
+
+```bash
+.venv/bin/amad-agent eval-security --json      # full machine-readable report
+.venv/bin/amad-agent eval-security --dataset holdout  # strict fresh cases; no gap exemptions
+.venv/bin/amad-agent eval-security --dataset challenge # second disjoint challenge set
+.venv/bin/python scripts/build_eval_report.py  # render outputs/security-eval-report.html
+```
+
+The holdout dataset contains 100 prompts that do not occur in the baseline: exactly five
+English and five Arabic cases in each category. It has no `known_gap` markers, so use it as
+the acceptance target for detector fixes; any mismatch exits non-zero.
+
+The report page is generated from a live run, so its figures cannot drift from the suite's.
+
+## Financial functionality evaluation
+
+The functionality evaluator is independent of security screening. It runs 100 bilingual
+workflows against the real agent graph and an in-memory dummy financial ledger, then scores
+observable behavior from persisted task state, interaction events, and tool executions. Its
+checks cover outcome, intent, risk, exact tool sequence, arguments, clarification, confirmation,
+and receipts.
+
+The matrix contains 50 English and 50 Arabic cases: account and transaction reads, portfolio
+reads, transfers, bill payments, beneficiary creation, investment purchases, insufficient-share
+sales, withdrawals that exceed available cash, and requests that require clarification. It pins
+every agent role to MiniMax (MiniMax-M2.7-highspeed by default) and uses PostgreSQL, but no
+external bank or broker.
+
+```bash
+# Load provider and database settings first.
+set -a
+source .env.backend
+set +a
+
+# One-case smoke test, then the complete 100-case evaluation.
+.venv/bin/python scripts/run_functionality_eval.py --limit 1
+.venv/bin/python scripts/run_functionality_eval.py
+# Optionally select another MiniMax model id.
+.venv/bin/python scripts/run_functionality_eval.py --model MiniMax-M2.7
+```
+
+The complete machine-readable result is written to
+`outputs/functionality-eval-report.json`. Every case is reset to the same dummy ledger state,
+and cases run sequentially so one financial action cannot affect another.
+
 PostgreSQL integration tests are enabled with:
 
 ```bash

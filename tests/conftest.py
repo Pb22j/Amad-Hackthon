@@ -56,7 +56,7 @@ def environment(monkeypatch: pytest.MonkeyPatch, postgres_test_url: str) -> None
     # Deterministic tests must not need provider credentials, but the opt-in
     # compatibility suite must retain the real key loaded by the caller.
     if os.getenv("RUN_REAL_MODEL_TESTS") != "1":
-        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
 
 
 @pytest.fixture

@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class Intent(StrEnum):
     ACCOUNT_INFORMATION = "account_information"
     TRANSACTION_SEARCH = "transaction_search"
+    BENEFICIARY_INFORMATION = "beneficiary_information"
+    BILL_INFORMATION = "bill_information"
     FINANCIAL_CALCULATION = "financial_calculation"
     FINANCIAL_ADVICE = "financial_advice"
     IDLE_CASH_TRANSFER = "idle_cash_transfer"

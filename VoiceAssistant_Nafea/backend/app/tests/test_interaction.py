@@ -16,7 +16,13 @@ from fastapi.testclient import TestClient
 from app.auth import AuthenticatedUser, hash_password, verify_password
 from app.config import settings
 from app.config import Settings
-from app.interaction import AgentEvent, InteractionStore, sign_message
+from app.interaction import (
+    AgentEvent,
+    InteractionStore,
+    _compact_voice_outcome,
+    compact_event_for_voice,
+    sign_message,
+)
 from app.main import (
     _issue_voice_evidence,
     _localized_user_name,
@@ -999,8 +1005,9 @@ def test_interaction_persona_is_financial_data_aware_strict_and_backend_grounded
     assert "submit every financial" in normalized_prompt
     assert "Submit unexpected requests" in normalized_prompt
     assert "Never mention agents, tools, a backend" in normalized_prompt
-    assert "complete report is displayed in chat" in normalized_prompt
-    assert "Do not repeat, summarize, infer" in normalized_prompt
+    assert "trusted update includes a safe voice summary" in normalized_prompt
+    assert "Do not merely redirect the user to the text chat" in normalized_prompt
+    assert "Never invent or infer details beyond the supplied summary" in normalized_prompt
 
     arabic_prompt = instructions_for("ar")
     normalized_arabic_prompt = " ".join(arabic_prompt.split())
@@ -1011,7 +1018,8 @@ def test_interaction_persona_is_financial_data_aware_strict_and_backend_grounded
     assert "تم التحقق" in normalized_arabic_prompt
     assert "بانتظار الموافقة" in normalized_arabic_prompt
     assert "تم التنفيذ" in normalized_arabic_prompt
-    assert "التقرير الكامل ظهر في المحادثة" in normalized_arabic_prompt
+    assert "ملخص صوتي آمن" in normalized_arabic_prompt
+    assert "لا تكتفِ بإحالته إلى المحادثة النصية" in normalized_arabic_prompt
 
 
 def test_voice_memory_is_encrypted_bounded_and_never_recalls_assistant_claims():
@@ -1087,6 +1095,50 @@ def test_voice_reconnect_context_has_one_aggregate_character_budget():
     assert len(serialized) <= 500
     assert "Preference 7" in serialized
     assert "Preference 0" not in serialized
+
+
+def test_long_agent_outcome_becomes_a_quick_voice_summary():
+    summary = (
+        "Your monthly report is ready. "
+        + "This detailed explanation should not be loaded into realtime voice context. " * 20
+    )
+
+    compacted, was_compacted = _compact_voice_outcome(summary, 160)
+
+    assert compacted == "Your monthly report is ready."
+    assert was_compacted is True
+    assert len(compacted) <= 160
+
+
+def test_short_agent_outcome_is_preserved_for_voice_context():
+    compacted, was_compacted = _compact_voice_outcome("Transfer completed.", 160)
+
+    assert compacted == "Transfer completed."
+    assert was_compacted is False
+
+
+def test_completed_report_uses_canonical_compact_report_summary_for_voice():
+    event = AgentEvent(
+        task_id="task-report",
+        request_id="request-report",
+        session_id="session-report",
+        event_type="completed",
+        user_safe_summary="A generic event message that should not win.",
+        details={
+            "report": {
+                "summary": "Your monthly report is ready. "
+                + "Verbose report context must stay in chat. " * 20
+            }
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+
+    voice_context = compact_event_for_voice(event, 160)
+
+    assert voice_context == {
+        "summary": "Your monthly report is ready.",
+        "compacted": True,
+    }
 
 
 def test_voice_memory_rejects_credentials_and_instruction_injection():

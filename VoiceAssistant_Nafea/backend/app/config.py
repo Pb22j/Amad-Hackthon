@@ -38,13 +38,14 @@ class Settings(BaseSettings):
     DEMO_TENANT_ID: str = "evaluation-tenant"
     DEMO_SCOPES: str = "financial:read,financial:write,investment:trade"
     SESSION_TTL_SECONDS: int = 3600
-    VOICE_MEMORY_MAX_USER_TURNS: int = 12
-    VOICE_MEMORY_MAX_ASSISTANT_TURNS: int = 6
-    VOICE_MEMORY_CONTEXT_TURNS: int = 8
-    VOICE_MEMORY_MAX_TEXT_CHARACTERS: int = 2000
-    VOICE_MEMORY_CONTEXT_MAX_CHARACTERS: int = Field(default=6000, ge=1000, le=20_000)
-    VOICE_CONTEXT_TRIGGER_TOKENS: int = Field(default=12_000, ge=4000, le=120_000)
-    VOICE_CONTEXT_TARGET_TOKENS: int = Field(default=6000, ge=2000, le=60_000)
+    VOICE_MEMORY_MAX_USER_TURNS: int = 8
+    VOICE_MEMORY_MAX_ASSISTANT_TURNS: int = 3
+    VOICE_MEMORY_CONTEXT_TURNS: int = 4
+    VOICE_MEMORY_MAX_TEXT_CHARACTERS: int = 1000
+    VOICE_MEMORY_CONTEXT_MAX_CHARACTERS: int = Field(default=2500, ge=1000, le=20_000)
+    VOICE_OUTCOME_SUMMARY_MAX_CHARACTERS: int = Field(default=160, ge=120, le=1000)
+    VOICE_CONTEXT_TRIGGER_TOKENS: int = Field(default=6000, ge=4000, le=120_000)
+    VOICE_CONTEXT_TARGET_TOKENS: int = Field(default=2500, ge=2000, le=60_000)
     VOICE_REALTIME_MAX_TEXT_CHARACTERS: int = Field(default=8000, ge=1000, le=20_000)
     SESSION_COOKIE_SECURE: bool = False
     FRONTEND_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"

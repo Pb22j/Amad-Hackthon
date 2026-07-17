@@ -12,6 +12,7 @@ import {
   ChevronRight,
   CircleDollarSign,
   Compass,
+  Download,
   Info,
   PieChart,
   RefreshCw,
@@ -99,6 +100,10 @@ const copy = {
     equity: "Equity",
     viewAll: "Ask about this asset",
     marketNote: "Market prices may be delayed. Review the exact order and risk before confirming any trade.",
+    reportEyebrow: "Research resource",
+    reportTitle: "Financial Stability Report 2025",
+    reportCopy: "Read the Saudi Central Bank's latest review of the economy, banking system resilience, and financial-sector outlook.",
+    openReport: "Open report",
     refreshed: "Refresh portfolio",
     exchange: "Tadawul",
   },
@@ -172,6 +177,10 @@ const copy = {
     equity: "أسهم",
     viewAll: "اسأل عن هذا الأصل",
     marketNote: "قد تتأخر أسعار السوق. راجع تفاصيل الأمر والمخاطر بدقة قبل تأكيد أي صفقة.",
+    reportEyebrow: "مصدر بحثي",
+    reportTitle: "تقرير الاستقرار المالي 2025",
+    reportCopy: "اطلع على أحدث مراجعة للبنك المركزي السعودي للاقتصاد ومتانة النظام المصرفي وآفاق القطاع المالي.",
+    openReport: "افتح التقرير",
     refreshed: "تحديث المحفظة",
     exchange: "تداول",
   },
@@ -199,6 +208,13 @@ function InvestmentsContent() {
   const [targetAmount, setTargetAmount] = React.useState("100000");
   const [projection, setProjection] = React.useState<InvestmentProjection | null>(null);
   const [projectionStatus, setProjectionStatus] = React.useState<"loading" | "ready" | "error">("loading");
+
+  React.useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh({ silent: true });
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
 
   React.useEffect(() => {
     if (!snapshot) return;
@@ -261,10 +277,22 @@ function InvestmentsContent() {
       : c.insightBalanced;
 
   const sectors = portfolio.analytics.sector_allocations.map((sector, index) => ({
+    id: sector.sector,
     label: localize(sector.name, sector.name_ar),
     color: sectorColors[sector.sector] || ["#7867b8", "#b78228", "#59736d"][index % 3],
     weight: sector.weight_percent,
   }));
+  let allocationCursor = 0;
+  const allocationGradient = sectors.length
+    ? `conic-gradient(${sectors.map((sector) => {
+      const start = allocationCursor;
+      allocationCursor += sector.weight;
+      return `${sector.color} ${start}% ${allocationCursor}%`;
+    }).join(", ")})`
+    : "var(--surface-soft)";
+  const allocationDescription = sectors.length
+    ? `${c.allocation}: ${sectors.map((sector) => `${sector.label} ${sector.weight.toFixed(1)}%`).join(", ")}`
+    : c.noHoldings;
   const projectedValue = Number(projection?.projected_value_sar || 0);
   const inflationAdjustedValue = Number(projection?.inflation_adjusted_value_sar || 0);
   const totalContributions = Number(projection?.total_contributions_sar || 0);
@@ -332,8 +360,8 @@ function InvestmentsContent() {
         <article className="surface-card diversification-card">
           <div className="section-heading"><div><h2>{c.sectors}</h2><p>{c.sectorsCopy}</p></div></div>
           <div className="diversification-visual">
-            <div className="score-ring" style={{ background: `conic-gradient(var(--brand) ${diversificationScore}%, var(--brand-soft) 0)` }}><span><strong>{diversificationScore}</strong><small>/100</small></span></div>
-            <div className="sector-list">{sectors.length ? sectors.map((sector, index) => <div key={`${sector.label}-sector-${index}`}><span><i style={{ background: sector.color }} />{sector.label}</span><b>{sector.weight.toFixed(0)}%</b></div>) : <div><span>{c.noHoldings}</span></div>}</div>
+            <div className="allocation-wheel" role="img" aria-label={allocationDescription} style={{ background: allocationGradient }}><span aria-hidden="true"><strong>{sectors.length ? "100%" : "—"}</strong><small>{c.allocation}</small></span></div>
+            <div className="sector-list">{sectors.length ? sectors.map((sector) => <div key={sector.id}><span><i style={{ background: sector.color }} />{sector.label}</span><b>{sector.weight.toFixed(1)}%</b></div>) : <div><span>{c.noHoldings}</span></div>}</div>
           </div>
         </article>
         <article className="nafi-insight-card">
@@ -377,6 +405,16 @@ function InvestmentsContent() {
       <div className="opportunity-grid">
         {portfolio.supported_assets.map((asset, index) => <OpportunityCard key={asset.ticker} asset={asset} holding={portfolio.holdings.find((holding) => holding.ticker === asset.ticker)} lang={lang} money={money} localize={localize} tone={index % 3} labels={{ owned: c.owned, equity: c.equity, viewAll: c.viewAll }} />)}
       </div>
+      <article className="research-resource-card">
+        <div className="research-resource-copy">
+          <span>{c.reportEyebrow}</span>
+          <h3>{c.reportTitle}</h3>
+          <p>{c.reportCopy}</p>
+        </div>
+        <a className="secondary-button" href="/reports/financial-stability-report-2025-en.pdf" target="_blank" rel="noreferrer">
+          <Download size={17} />{c.openReport}
+        </a>
+      </article>
       <p className="market-note"><ShieldCheck size={14} />{c.marketNote}</p>
     </section>
   </div>;

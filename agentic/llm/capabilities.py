@@ -5,9 +5,7 @@ from __future__ import annotations
 
 PROVIDER_CAPABILITIES: dict[str, frozenset[str]] = {
     "openai": frozenset({"tool_calling", "structured_output", "async", "streaming", "embeddings"}),
-    "openrouter": frozenset(
-        {"tool_calling", "structured_output", "async", "streaming", "embeddings"}
-    ),
+    "minimax": frozenset({"tool_calling", "structured_output", "async", "streaming"}),
     "anthropic": frozenset({"tool_calling", "structured_output", "async", "streaming"}),
 }
 

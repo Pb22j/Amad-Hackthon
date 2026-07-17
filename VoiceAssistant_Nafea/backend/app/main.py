@@ -44,6 +44,7 @@ from app.interaction import (
     issue_confirmation_token,
     sign_message,
     verify_message,
+    compact_event_for_voice,
 )
 from app.prompts import gemini_initial_history, gemini_setup
 from app.services.llm_service import LLMException, get_llm_service
@@ -84,6 +85,7 @@ interaction_store = InteractionStore(
     max_assistant_turns=settings.VOICE_MEMORY_MAX_ASSISTANT_TURNS,
     max_memory_text_characters=settings.VOICE_MEMORY_MAX_TEXT_CHARACTERS,
     max_context_characters=settings.VOICE_MEMORY_CONTEXT_MAX_CHARACTERS,
+    max_outcome_summary_characters=settings.VOICE_OUTCOME_SUMMARY_MAX_CHARACTERS,
 )
 dashboard_store = DashboardStore(settings.INTERACTION_DATABASE_URL)
 authentication_store = AuthenticationStore(settings.INTERACTION_DATABASE_URL)
@@ -1094,6 +1096,10 @@ async def handle_agentic_webhook(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     try:
         event = AgentEvent.model_validate_json(body)
+        if event.event_type in {"completed", "rejected", "failed"}:
+            event.details["voice_context"] = compact_event_for_voice(
+                event, settings.VOICE_OUTCOME_SUMMARY_MAX_CHARACTERS
+            )
         inserted = await _interaction_call(interaction_store.record_event, event)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -14,5 +14,20 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body><Providers>{children}</Providers></body></html>;
+  const themeScript = `
+    let saved;
+    try { saved = localStorage.getItem("nafi-theme"); } catch (_) {}
+    const theme = saved === "light" || saved === "dark"
+      ? saved
+      : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  `;
+
+  return (
+    <html lang="en" suppressHydrationWarning>
+      <head><script dangerouslySetInnerHTML={{ __html: themeScript }} /></head>
+      <body><Providers>{children}</Providers></body>
+    </html>
+  );
 }

@@ -50,15 +50,15 @@ class ModelFactory:
             "timeout": item.timeout_seconds,
             "max_retries": item.max_retries,
         }
-        if item.provider == "openrouter":
-            api_key = os.getenv("OPENROUTER_API_KEY")
+        if item.provider == "minimax":
+            api_key = os.getenv("MINIMAX_API_KEY")
             if not api_key:
-                raise RuntimeError("OPENROUTER_API_KEY is required for an OpenRouter model")
+                raise RuntimeError("MINIMAX_API_KEY is required for a MiniMax model")
             return init_chat_model(
                 item.model,
                 model_provider="openai",
                 api_key=api_key,
-                base_url="https://openrouter.ai/api/v1",
+                base_url="https://api.minimax.io/v1",
                 **common,
             )
         if item.provider == "openai":

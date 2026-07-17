@@ -1,7 +1,8 @@
 "use client";
 
-import { ArrowDownLeft, CreditCard, Landmark, Receipt, Send } from "lucide-react";
+import { ArrowDownLeft, CreditCard, Receipt, Send } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { BankLogo } from "@/components/bank-logo";
 import { DashboardState } from "@/components/page-state";
 import { useDashboard } from "@/components/dashboard-provider";
 import { WalletDeposit } from "@/components/wallet-deposit";
@@ -23,7 +24,7 @@ function ActivityContent() {
       <WalletDeposit accounts={accounts} wallet={snapshot.wallet} /></div>
       <div className="account-grid">
         <article className="account-card nafi-account"><span className="account-bank-icon"><span>N</span></span><div><small>{t("wallet")}</small><strong>{money(Number(snapshot.wallet.balance_sar))}</strong><span>{snapshot.wallet.nafi_iban}</span></div></article>
-        {accounts.map((account) => <article className="account-card" key={account.id}><span className="account-bank-icon"><Landmark size={20} /></span><div><small>{localize(account.bank_name, account.bank_name_ar)}</small><strong>{money(Number(account.balance_sar))}</strong><span>{account.masked_account_number}</span></div></article>)}
+        {accounts.map((account) => <article className="account-card" key={account.id}><BankLogo bank={account} className="account-bank-icon bank-logo-tile" /><div><small>{localize(account.bank_name, account.bank_name_ar)}</small><strong>{money(Number(account.balance_sar))}</strong><span>{account.masked_account_number}</span></div></article>)}
       </div>
     </section>
     <section className="activity-columns">

@@ -71,8 +71,9 @@ foreign keys, and shared safely across interaction-service replicas.
   conversation turns.
 - Transcript text is encrypted at rest and scoped to the exact interaction session.
 - Credential-like, long-number, and instruction-injection text is refused admission.
-- Compaction is deterministic: it retains a bounded number of recent turns and never asks a model to
-  summarize or rewrite them.
+- Compaction is deterministic: completed reports use one sentence-aware backend summary for live
+  voice and reconnect recall, while only a bounded set of recent turns is retained. No model is asked
+  to summarize or rewrite memory.
 - Only explicit user statements are recalled, labeled as untrusted. Assistant responses are retained
   briefly for audit continuity but are never recalled as facts.
 - Signed terminal agentic events are the only remembered financial outcomes. Balances, transactions,

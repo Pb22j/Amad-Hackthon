@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
+import { BankLogo } from "@/components/bank-logo";
 import type { DashboardAccount, DashboardWallet } from "@/lib/dashboard";
 import { useLang } from "@/lib/i18n";
 import { NafeaApiError, nafeaPost } from "@/lib/nafea-api";
@@ -151,7 +152,7 @@ export function WalletDeposit({
                 </label>
                 {selected ? (
                   <div className="selected-account">
-                    <span><Landmark size={19} /></span>
+                    <BankLogo bank={selected} className="selected-bank-logo bank-logo-tile" />
                     <div><strong>{localize(selected.bank_name, selected.bank_name_ar)}</strong>
                       <small>{selected.masked_account_number}</small></div>
                     <div><small>{t("available")}</small><strong>{money(Number(selected.balance_sar))}</strong></div>
@@ -185,7 +186,7 @@ export function WalletDeposit({
                 </div>
                 <label className="field">
                   <span>{t("demoOtp")}</span>
-                  <input className="otp-input" type="password" inputMode="numeric" maxLength={4}
+                  <input className="otp-input" type="text" inputMode="numeric" pattern="[0-9]*" maxLength={4}
                     autoComplete="one-time-code" placeholder="1111" value={otp}
                     onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 4))} autoFocus />
                   <small>{t("otpHint")}</small>

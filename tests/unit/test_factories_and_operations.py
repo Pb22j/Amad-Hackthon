@@ -7,10 +7,11 @@ import pytest
 
 from agentic.cli import main
 from agentic.config.loader import ModelConfig
+from agentic.evals.runner import SecurityEvalReport
 from agentic.llm.factory import ModelFactory
 
 
-def test_model_factory_builds_openrouter_and_caches(monkeypatch, app_config):
+def test_model_factory_builds_minimax_and_caches(monkeypatch, app_config):
     calls = []
     sentinel = object()
 
@@ -23,7 +24,10 @@ def test_model_factory_builds_openrouter_and_caches(monkeypatch, app_config):
     assert factory.create("primary") is sentinel
     assert factory.create("primary") is sentinel
     assert len(calls) == 1
-    assert calls[0][1]["base_url"] == "https://openrouter.ai/api/v1"
+    assert calls[0][0] == ("MiniMax-M2.7-highspeed",)
+    assert calls[0][1]["model_provider"] == "openai"
+    assert calls[0][1]["base_url"] == "https://api.minimax.io/v1"
+    assert calls[0][1]["api_key"] == "test-key"
 
 
 def test_model_factory_builds_configured_fallbacks(monkeypatch, app_config):
@@ -77,7 +81,11 @@ def test_model_factory_builds_direct_providers(
 
 @pytest.mark.parametrize(
     ("provider", "key_name"),
-    [("openrouter", "OPENROUTER_API_KEY"), ("openai", "OPENAI_API_KEY"), ("anthropic", "ANTHROPIC_API_KEY")],
+    [
+        ("minimax", "MINIMAX_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("anthropic", "ANTHROPIC_API_KEY"),
+    ],
 )
 def test_model_factory_requires_provider_key(monkeypatch, app_config, provider, key_name):
     monkeypatch.delenv(key_name, raising=False)
@@ -101,7 +109,39 @@ def test_eval_cli_exits_successfully(monkeypatch, capsys, app_config):
     monkeypatch.setattr("agentic.cli.load_config", lambda: app_config)
     monkeypatch.setattr(sys, "argv", ["amad-agent", "eval-security"])
     main()
+    output = capsys.readouterr().out
+    assert "Security screening evaluation:" in output
+    assert "regressions : 0" in output
+
+
+def test_eval_cli_emits_json_on_request(monkeypatch, capsys, app_config):
+    monkeypatch.setattr("agentic.cli.load_config", lambda: app_config)
+    monkeypatch.setattr(sys, "argv", ["amad-agent", "eval-security", "--json"])
+    main()
     assert '"failures": []' in capsys.readouterr().out
+
+
+def test_eval_cli_selects_strict_holdout_dataset(monkeypatch, app_config):
+    selected = []
+
+    def fake_run(path, policy):
+        selected.append(path)
+        return SecurityEvalReport(
+            total=100,
+            passed=100,
+            failures=[],
+            known_gaps=[],
+            fixed_gaps=[],
+            categories=[],
+        )
+
+    monkeypatch.setattr("agentic.cli.load_config", lambda: app_config)
+    monkeypatch.setattr("agentic.cli.run_security_dataset", fake_run)
+    monkeypatch.setattr(
+        sys, "argv", ["amad-agent", "eval-security", "--dataset", "holdout"]
+    )
+    main()
+    assert selected[0].name == "security_holdout.jsonl"
 
 
 @pytest.mark.asyncio

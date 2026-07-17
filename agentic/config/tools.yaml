@@ -11,14 +11,14 @@ tools:
     max_calls_per_task: 2
   list_beneficiaries:
     risk: sensitive_read
-    intents: [beneficiary_management, saved_beneficiary_transfer, money_transfer]
+    intents: [beneficiary_information, beneficiary_management, saved_beneficiary_transfer, money_transfer]
     required_scopes: [financial:read]
     requires_owner_metadata: true
     max_calls_per_task: 5
   transfer_between_accounts:
     # Every transfer pauses for the demo OTP after database preflight validates
     # ownership, beneficiary membership, balance, and daily spend limit.
-    risk: write
+    risk: financial_action
     intents: [saved_beneficiary_transfer, money_transfer]
     # Hackathon UX: the model may resolve a user-stated beneficiary name to a
     # Nafi IBAN from list_beneficiaries. Database preflight still limits
@@ -116,7 +116,7 @@ tools:
     max_calls_per_task: 2
   list_fatoorahs:
     risk: sensitive_read
-    intents: [bill_payment, account_information, transaction_search]
+    intents: [bill_information, bill_payment, account_information, transaction_search]
     required_scopes: [financial:read]
     requires_owner_metadata: true
     max_calls_per_task: 3
@@ -133,7 +133,7 @@ tools:
     max_calls_per_task: 2
   list_qatta_bills:
     risk: sensitive_read
-    intents: [account_information, transaction_search, bill_payment, beneficiary_management]
+    intents: [bill_information, account_information, transaction_search, bill_payment, beneficiary_management]
     required_scopes: [financial:read]
     requires_owner_metadata: true
     max_calls_per_task: 3

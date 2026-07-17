@@ -76,6 +76,44 @@ class PendingTaskWatchdog:
     deadline_at: float
 
 
+def _compact_voice_outcome(summary: str, limit: int) -> tuple[str, bool]:
+    """Create a short, sentence-aware outcome for the realtime voice context."""
+
+    normalized = " ".join(summary.split())
+    if len(normalized) <= limit:
+        return normalized, False
+
+    # Agent reports put the outcome first. Prefer that complete sentence instead
+    # of feeding a large report into the latency-sensitive realtime context.
+    sentence_end = re.search(r"[.!?؟](?:\s|$)", normalized)
+    if sentence_end is not None and sentence_end.end() <= limit:
+        return normalized[: sentence_end.end()].strip(), True
+
+    prefix = normalized[: limit - 1].rstrip()
+    word_boundary = prefix.rfind(" ")
+    if word_boundary >= limit // 2:
+        prefix = prefix[:word_boundary].rstrip()
+    return f"{prefix}…", True
+
+
+def compact_event_for_voice(event: AgentEvent, limit: int) -> dict[str, Any]:
+    """Derive the one canonical, minimal voice representation of an event.
+
+    Completed events prefer the structured report summary.  The same derived
+    value is persisted, replayed, and sent to realtime voice so reconnects do
+    not fall back to a different (or much larger) representation of a report.
+    """
+
+    source = event.user_safe_summary
+    report = event.details.get("report")
+    if event.event_type == AgentEventType.COMPLETED and isinstance(report, dict):
+        report_summary = report.get("summary")
+        if isinstance(report_summary, str) and report_summary.strip():
+            source = report_summary
+    summary, compacted = _compact_voice_outcome(source, limit)
+    return {"summary": summary, "compacted": compacted}
+
+
 class _PostgresRow:
     def __init__(self, values: dict[str, Any]) -> None:
         self._values = values
@@ -220,7 +258,8 @@ class InteractionStore:
         max_user_turns: int = 12,
         max_assistant_turns: int = 6,
         max_memory_text_characters: int = 2000,
-        max_context_characters: int = 6000,
+        max_context_characters: int = 2500,
+        max_outcome_summary_characters: int = 160,
     ) -> None:
         self.path = path
         if not path.startswith(("postgresql://", "postgresql+psycopg://")):
@@ -231,6 +270,7 @@ class InteractionStore:
         self.max_assistant_turns = max_assistant_turns
         self.max_memory_text_characters = max_memory_text_characters
         self.max_context_characters = max_context_characters
+        self.max_outcome_summary_characters = max_outcome_summary_characters
         self._initialize()
 
     def _connect(self) -> _PostgresConnection:
@@ -1010,14 +1050,31 @@ class InteractionStore:
         """Return evidence labels; assistant text is intentionally never recalled as truth."""
 
         statements = self.recent_user_statements(session_id=session_id, limit=limit)
-        verified_events = [
-            {
-                "event_type": event.get("event_type"),
-                "summary": event.get("user_safe_summary"),
-            }
-            for event in self.recent_events(session_id=session_id, limit=5)
-            if event.get("event_type") in {"completed", "rejected", "failed"}
-        ]
+        verified_events = []
+        for event in self.recent_events(session_id=session_id, limit=5):
+            if event.get("event_type") not in {"completed", "rejected", "failed"}:
+                continue
+            voice_context = (event.get("details") or {}).get("voice_context") or {}
+            summary = voice_context.get("summary")
+            compacted = voice_context.get("compacted")
+            if not isinstance(summary, str) or not summary.strip():
+                source = str(event.get("user_safe_summary") or "")
+                report = (event.get("details") or {}).get("report")
+                if event.get("event_type") == "completed" and isinstance(report, dict):
+                    report_summary = report.get("summary")
+                    if isinstance(report_summary, str) and report_summary.strip():
+                        source = report_summary
+                summary, compacted = _compact_voice_outcome(
+                    source,
+                    self.max_outcome_summary_characters,
+                )
+            verified_events.append(
+                {
+                    "event_type": event.get("event_type"),
+                    "quick_summary": summary,
+                    **({"compacted": True} if compacted else {}),
+                }
+            )
         # Apply one aggregate budget in addition to the per-turn admission limit.
         # Prefer signed outcomes, then the newest user statements; keeping every
         # individually-safe turn could create a surprisingly large reconnect prompt.

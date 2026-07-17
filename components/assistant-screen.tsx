@@ -61,6 +61,7 @@ const VALID_EVENTS = new Set<AgentEventType>(["accepted", "progress", "input_nee
 const VOICE_EVENTS = new Set<AgentEventType>(["input_needed", "confirmation_needed", "completed", "rejected", "failed"]);
 const SENSITIVE_QUESTION = /password|passcode|\bpin\b|\botp\b|\bcvv\b|access token|secret|كلمة المرور|الرقم السري|رمز التحقق|رمز الدخول/i;
 const SENSITIVE_ARGUMENT = /password|passcode|pin|otp|cvv|token|secret/i;
+const VOICE_OUTCOME_SUMMARY_LIMIT = 160;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -80,6 +81,24 @@ function eventText(event: AgentEvent): string {
     return typeof report?.summary === "string" ? report.summary : event.user_safe_summary;
   }
   return event.user_safe_summary;
+}
+
+function voiceOutcomeSummary(event: AgentEvent): string {
+  const voiceContext = asRecord(event.details.voice_context);
+  if (typeof voiceContext?.summary === "string" && voiceContext.summary.trim()) {
+    return voiceContext.summary.trim();
+  }
+  const report = asRecord(event.details.report);
+  const source = event.event_type === "completed" && typeof report?.summary === "string"
+    ? report.summary
+    : event.user_safe_summary;
+  const normalized = source.replace(/\s+/g, " ").trim();
+  if (normalized.length <= VOICE_OUTCOME_SUMMARY_LIMIT) return normalized;
+  const sentence = normalized.match(/^.*?[.!?؟](?:\s|$)/)?.[0]?.trim();
+  if (sentence && sentence.length <= VOICE_OUTCOME_SUMMARY_LIMIT) return sentence;
+  const prefix = normalized.slice(0, VOICE_OUTCOME_SUMMARY_LIMIT - 1).trimEnd();
+  const boundary = prefix.lastIndexOf(" ");
+  return `${boundary >= VOICE_OUTCOME_SUMMARY_LIMIT / 2 ? prefix.slice(0, boundary).trimEnd() : prefix}…`;
 }
 
 function randomKey() {
@@ -208,7 +227,8 @@ export function AssistantScreen({ initialPrompt = "" }: { initialPrompt?: string
       const safe = Object.fromEntries(Object.entries(asRecord(event.details.arguments) ?? {}).filter(([key]) => !SENSITIVE_ARGUMENT.test(key)));
       text = `Authoritative confirmation. Ask the user to review and use the authenticated on-screen controls. Safe details: ${JSON.stringify(safe).slice(0, 3000)}`;
     } else {
-      text = "Authoritative task update. The complete result has been displayed in the chat. Tell the user briefly that their full report is available in the chat and ask them to review it there. Do not restate, summarize, infer, or read any report details aloud.";
+      const summary = voiceOutcomeSummary(event);
+      text = `Authoritative task outcome. Speak this safe summary naturally and lead with the result: ${JSON.stringify(summary)}. Do not invent or infer anything beyond it. Then mention that the full report is available in chat.`;
     }
     socket.send(JSON.stringify({ realtimeInput: { text } }));
     relayedEventsRef.current.add(key);
@@ -572,6 +592,6 @@ function ConfirmationCard({ event, otp, setOtp, submit, loading }: { event: Agen
   const { t } = useLang(); const args = Object.entries(asRecord(event.details.arguments) ?? {}).filter(([key]) => !SENSITIVE_ARGUMENT.test(key));
   return <div className="action-card confirmation-card"><div className="action-card-title"><span><ShieldCheck size={19} /></span><div><strong>{t("confirmation")}</strong><p>{event.user_safe_summary}</p></div></div>
     {args.length ? <dl>{args.map(([key, value]) => <div key={key}><dt>{key.replaceAll("_", " ")}</dt><dd>{typeof value === "object" ? JSON.stringify(value) : String(value)}</dd></div>)}</dl> : null}
-    <div className="confirmation-actions"><label><span>{t("demoOtp")}</span><input className="otp-input small" type="password" inputMode="numeric" maxLength={4} placeholder="1111" value={otp} onChange={(inputEvent) => setOtp(inputEvent.target.value.replace(/\D/g, "").slice(0, 4))} /></label><button type="button" className="primary-button" disabled={otp.length !== 4 || loading} onClick={() => submit(true)}>{loading ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}{t("approve")}</button><button type="button" className="text-button negative-text" disabled={loading} onClick={() => submit(false)}>{t("reject")}</button></div>
+    <div className="confirmation-actions"><label><span>{t("demoOtp")}</span><input className="otp-input small" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]*" maxLength={4} placeholder="1111" value={otp} onChange={(inputEvent) => setOtp(inputEvent.target.value.replace(/\D/g, "").slice(0, 4))} /></label><button type="button" className="primary-button" disabled={otp.length !== 4 || loading} onClick={() => submit(true)}>{loading ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}{t("approve")}</button><button type="button" className="text-button negative-text" disabled={loading} onClick={() => submit(false)}>{t("reject")}</button></div>
     <small><ShieldCheck size={13} /> {t("otpHint")}</small></div>;
 }

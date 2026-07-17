@@ -50,10 +50,13 @@ class PolicyEngine:
         # by deterministic authorization and tool guards even if this detector misses an attack.
         credential_signal = any("credential_request" in code for code in signals.codes)
         identity_signal = any("identity_override" in code for code in signals.codes)
+        bulk_exfiltration_signal = "bulk_data_exfiltration" in signals.codes
         if credential_signal and self.config.security.reject_credential_requests:
             return RequestPolicyDecision(False, "credential_request", signals)
         if identity_signal and self.config.security.reject_cross_user_requests:
             return RequestPolicyDecision(False, "cross_user_request", signals)
+        if bulk_exfiltration_signal and self.config.security.reject_cross_user_requests:
+            return RequestPolicyDecision(False, "bulk_data_exfiltration", signals)
         return RequestPolicyDecision(True, "allowed", signals)
 
     def assess_intent(self, classification: IntentClassification) -> RiskAssessment:
@@ -75,7 +78,10 @@ class PolicyEngine:
         if intents & {
             Intent.ACCOUNT_INFORMATION,
             Intent.TRANSACTION_SEARCH,
+            Intent.BENEFICIARY_INFORMATION,
+            Intent.BILL_INFORMATION,
             Intent.FINANCIAL_ADVICE,
+            Intent.INVESTMENT_RESEARCH,
         }:
             return RiskAssessment(
                 level=RiskLevel.MEDIUM,

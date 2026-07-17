@@ -15,7 +15,7 @@ type DashboardContextValue = {
   snapshot: DashboardSnapshot | null;
   status: DashboardStatus;
   error: string;
-  refresh: () => Promise<void>;
+  refresh: (options?: { silent?: boolean }) => Promise<void>;
 };
 
 const DashboardContext = React.createContext<DashboardContextValue | null>(null);
@@ -26,29 +26,35 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = React.useState<DashboardStatus>("loading");
   const [error, setError] = React.useState("");
   const sequence = React.useRef(0);
+  const hasSnapshot = React.useRef(false);
 
-  const refresh = React.useCallback(async () => {
+  const refresh = React.useCallback(async (options?: { silent?: boolean }) => {
     const request = ++sequence.current;
-    setStatus((current) => (current === "ready" ? "refreshing" : "loading"));
-    setError("");
+    const isBackgroundRefresh = Boolean(options?.silent && hasSnapshot.current);
+    if (!isBackgroundRefresh) {
+      setStatus((current) => (current === "ready" ? "refreshing" : "loading"));
+      setError("");
+    }
     try {
       await ensureNafeaSession(lang);
       let next: DashboardSnapshot;
       try {
-        next = await nafeaRequest<DashboardSnapshot>("/api/dashboard");
+        next = await nafeaRequest<DashboardSnapshot>("/api/dashboard", { cache: "no-store" });
       } catch (requestError) {
         if (!(requestError instanceof NafeaApiError) || requestError.status !== 401) {
           throw requestError;
         }
         invalidateNafeaSession();
         await ensureNafeaSession(lang);
-        next = await nafeaRequest<DashboardSnapshot>("/api/dashboard");
+        next = await nafeaRequest<DashboardSnapshot>("/api/dashboard", { cache: "no-store" });
       }
       if (sequence.current !== request) return;
+      hasSnapshot.current = true;
       setSnapshot(next);
       setStatus("ready");
     } catch {
       if (sequence.current !== request) return;
+      if (isBackgroundRefresh) return;
       setStatus("error");
       setError(t("dashboardError"));
     }

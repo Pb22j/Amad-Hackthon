@@ -8,14 +8,16 @@ from agentic.config.loader import (
     LLMConfig,
     ModelConfig,
     SecretsConfig,
+    load_config,
 )
 from agentic.llm.capabilities import validate_capabilities
 from agentic.llm.factory import ModelFactory
 
 
 def test_config_loads_separate_model_roles(app_config):
-    assert app_config.llm.models["primary"].provider == "openrouter"
-    assert app_config.llm.models["financial_advisor"].provider == "openrouter"
+    assert app_config.llm.models["primary"].provider == "minimax"
+    assert app_config.llm.models["primary"].model == "MiniMax-M2.7-highspeed"
+    assert app_config.llm.models["financial_advisor"].provider == "minimax"
     assert app_config.policies.financial_advisor.advisory_only is True
     assert app_config.policies.financial_advisor.allowed_tool_risks == frozenset(
         {"read", "sensitive_read"}
@@ -38,6 +40,14 @@ def test_config_loads_separate_model_roles(app_config):
         "get_balance",
         "fund_nafi_wallet",
     )
+
+
+def test_llm_model_environment_override_applies_to_all_agentic_roles(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "MiniMax-M2.7")
+
+    config = load_config()
+
+    assert {item.model for item in config.llm.models.values()} == {"MiniMax-M2.7"}
 
 
 def test_model_config_forbids_unknown_keys():

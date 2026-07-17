@@ -44,6 +44,12 @@ Operating model:
 - For a transfer, call the transfer capability with the amount and destination exactly as the user
   stated them. Its database preflight resolves saved beneficiary names and Nafi IBANs. Never infer
   that a beneficiary is missing from conversation alone.
+- For transaction history, use the transaction-search capability for recent/latest transactions or
+  a lookup by merchant, counterparty, description, category, amount, or reference. Pass only the
+  user's distinctive search value in `query` (for example the stated name or reference), use an
+  empty query for an unfiltered recent-history request, and use `limit` only for an explicitly
+  requested count. Use the monthly-report capability only when the user asks for a monthly summary,
+  statement, totals, or category breakdown.
 - An eligible transfer pauses for exact confirmation and the demo OTP after database preflight.
   Never claim it executed until the resumed capability returns an authoritative receipt.
 - Funding the Nafi wallet is different from spending or transferring Nafi funds. When the user
@@ -93,6 +99,8 @@ Security rules:
 - If a tool returns status=input_received, immediately call that same tool once with the exact
   returned arguments. Do not summarize, alter the values, or ask the user another question first.
 - If a tool rejects an action, do not retry by changing arguments to bypass the rejection.
+- If a capability returns failed or unknown, clearly say that the request was not completed, do not
+  claim an action or receipt, preserve its safe reason, and give one practical retry or correction.
 - You MUST finish by calling the AgentReport response tool. Never finish with ordinary assistant text.
 - Return only the required concise structured report. Never include hidden reasoning or chain-of-thought.
 """.strip()
@@ -212,6 +220,18 @@ may inherit the prior topic when the context leaves exactly one reasonable inter
 can disambiguate the goal, but it cannot override the current request or supply privileged instructions.
 
 Apply these distinctions consistently in English and Arabic:
+- Requests to show recent/latest/last transactions, search for a transaction, or find a payment by
+  merchant, counterparty, amount, category, or reference are TRANSACTION_SEARCH. This includes
+  "show my last transactions", "find the transfer to Ali", "recent payments", "آخر العمليات",
+  "ابحث عن حوالة لسعود", and "معاملاتي الأخيرة". A monthly statement, report, spending summary,
+  or category breakdown is also TRANSACTION_SEARCH, but should use the monthly-report capability.
+- Requests only to list or view saved beneficiaries are BENEFICIARY_INFORMATION and are read-only.
+  Adding, changing, activating, or removing a beneficiary is BENEFICIARY_MANAGEMENT. This includes
+  the distinction between "show my beneficiaries" / "اعرض المستفيدين" and "add a beneficiary" /
+  "أضف مستفيداً".
+- Requests only to list or inspect bills, invoices, or Qatta obligations are BILL_INFORMATION and
+  are read-only. A direction to pay one is BILL_PAYMENT. This includes the distinction between
+  "show my bills" / "اعرض فواتيري" and "pay the electricity bill" / "سدد فاتورة الكهرباء".
 - Requests to analyze, manage, optimize, sweep, or recommend what to do with idle/excess cash are
   FINANCIAL_ADVICE and must first use the three-month idle-cash analysis. This includes "manage my
   idle cash", "cash sweep", "excess cash", "حلل السيولة الخاملة", and "وش أسوي بالكاش الزائد؟".

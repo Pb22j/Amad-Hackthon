@@ -15,6 +15,7 @@ import {
   WalletCards,
 } from "lucide-react";
 import { Brand } from "@/components/brand";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { useAuth } from "@/lib/auth";
 import { useLang } from "@/lib/i18n";
 import { NafeaApiError } from "@/lib/nafea-api";
@@ -95,9 +96,12 @@ export function LoginScreen() {
       </section>
 
       <section className="login-panel">
-        <button type="button" className="login-language" onClick={toggleLang}>
-          <Languages size={17} /> {t("language")}
-        </button>
+        <div className="login-controls">
+          <button type="button" className="login-language" onClick={toggleLang}>
+            <Languages size={17} /> {t("language")}
+          </button>
+          <ThemeToggle className="login-theme-button" />
+        </div>
         <div className="login-form-wrap">
           <div className="login-mobile-brand"><Brand /></div>
           <div className="auth-tabs" role="tablist">

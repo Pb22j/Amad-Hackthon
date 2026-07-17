@@ -170,10 +170,26 @@ def _clarification_copy(field_name: str, request: str) -> tuple[str, str]:
     """Return a user-facing clarification question and label in request language."""
 
     if not re.search(r"[\u0600-\u06ff]", request):
-        if field_name == "source_account":
-            return "Which linked bank account should fund the Nafi wallet?", "Source account"
         label = field_name.replace("_", " ").title()
-        return f"What value should be used for {field_name}?", label
+        questions = {
+            "account_reference": "What is the beneficiary's account reference?",
+            "amount": "What amount should be used?",
+            "biller": "Which bill or service provider should be paid?",
+            "destination": "Who should receive the transfer?",
+            "destination_account": "What saved beneficiary name or Nafi IBAN should receive the transfer?",
+            "gift_message": "What message should be included with the gift?",
+            "name": "What is the beneficiary's name?",
+            "nafi_iban": "What is the beneficiary's Nafi IBAN?",
+            "participants": "Who should participate in the Qatta?",
+            "qatta_name": "Which Qatta should be used?",
+            "quantity": "How many shares should be used?",
+            "recipient": "Who should receive it?",
+            "short_name": "What short name should be used for the beneficiary?",
+            "source_account": "Which linked bank account should fund the Nafi wallet?",
+            "symbol": "Which investment symbol or company should be used?",
+            "total_amount": "What is the total amount?",
+        }
+        return questions.get(field_name, f"What value should be used for {label.lower()}?"), label
     label = _ARABIC_FIELD_LABELS.get(field_name, field_name.replace("_", " "))
     if field_name == "source_account":
         return "ما الحساب البنكي المرتبط الذي تريد شحن محفظة نافع منه؟", label
@@ -186,6 +202,25 @@ def _clarification_copy(field_name: str, request: str) -> tuple[str, str]:
         "symbol": "ما رمز الاستثمار أو اسم الشركة المطلوب؟",
     }
     return questions.get(field_name, f"ما القيمة المطلوبة لحقل {label}؟"), label
+
+
+def _preflight_failure(
+    context: AgentRuntimeContext, *, operation: str
+) -> ToolResult:
+    """Return a safe, localizable result when a read-only eligibility check fails."""
+
+    arabic = bool(re.search(r"[\u0600-\u06ff]", context.original_request))
+    return ToolResult(
+        status="failed",
+        summary=(
+            "تعذر التحقق من أهلية العملية الآن، لذلك لم تُنفذ أي حركة مالية. حاول مرة أخرى لاحقاً."
+            if arabic
+            else "The transaction could not be validated right now, so no financial action was executed. Please try again later."
+        ),
+        user_id=context.auth.user_id,
+        tenant_id=context.auth.tenant_id,
+        error_code=f"{operation}_preflight_unavailable",
+    )
 
 
 def _parse_numeric_token(token: str) -> Decimal | None:
@@ -513,13 +548,16 @@ class GuardedToolFactory:
                 # it owner_identity() falls back to the demo user and can
                 # incorrectly report that a real user's beneficiary is absent.
                 async def run_transfer_preflight() -> ToolResult:
-                    with bind_tool_identity(
-                        user_id=context.auth.user_id,
-                        tenant_id=context.auth.tenant_id,
-                    ):
-                        return ToolResult.model_validate(
-                            await preflight_transfer_between_accounts(**arguments)
-                        )
+                    try:
+                        with bind_tool_identity(
+                            user_id=context.auth.user_id,
+                            tenant_id=context.auth.tenant_id,
+                        ):
+                            return ToolResult.model_validate(
+                                await preflight_transfer_between_accounts(**arguments)
+                            )
+                    except Exception:
+                        return _preflight_failure(context, operation="transfer")
 
                 preflight = await run_transfer_preflight()
                 if preflight.error_code == "beneficiary_ambiguous":
@@ -592,13 +630,16 @@ class GuardedToolFactory:
                 from agentic.tools.wallet_funding import preflight_fund_nafi_wallet
 
                 async def run_wallet_funding_preflight() -> ToolResult:
-                    with bind_tool_identity(
-                        user_id=context.auth.user_id,
-                        tenant_id=context.auth.tenant_id,
-                    ):
-                        return ToolResult.model_validate(
-                            await preflight_fund_nafi_wallet(**arguments)
-                        )
+                    try:
+                        with bind_tool_identity(
+                            user_id=context.auth.user_id,
+                            tenant_id=context.auth.tenant_id,
+                        ):
+                            return ToolResult.model_validate(
+                                await preflight_fund_nafi_wallet(**arguments)
+                            )
+                    except Exception:
+                        return _preflight_failure(context, operation="wallet_funding")
 
                 preflight = await run_wallet_funding_preflight()
                 if preflight.error_code == "source_account_ambiguous":
@@ -663,13 +704,16 @@ class GuardedToolFactory:
                     preflight_transfer_idle_cash_to_savings,
                 )
 
-                with bind_tool_identity(
-                    user_id=context.auth.user_id,
-                    tenant_id=context.auth.tenant_id,
-                ):
-                    preflight = ToolResult.model_validate(
-                        await preflight_transfer_idle_cash_to_savings()
-                    )
+                try:
+                    with bind_tool_identity(
+                        user_id=context.auth.user_id,
+                        tenant_id=context.auth.tenant_id,
+                    ):
+                        preflight = ToolResult.model_validate(
+                            await preflight_transfer_idle_cash_to_savings()
+                        )
+                except Exception:
+                    preflight = _preflight_failure(context, operation="idle_cash_transfer")
                 if preflight.status != "completed":
                     return preflight.model_dump_json()
                 resolved_arguments = preflight.data.get("confirmation_arguments")

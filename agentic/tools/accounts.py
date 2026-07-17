@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -19,6 +20,113 @@ from agentic.tools.bank_db import (
     run_in_bank_db,
     tool_result,
 )
+from agentic.tools.entity_resolution import normalize_entity_text
+
+
+_TRANSACTION_QUERY_STOP_WORDS = frozenset(
+    {
+        "a",
+        "about",
+        "all",
+        "for",
+        "find",
+        "from",
+        "last",
+        "latest",
+        "me",
+        "my",
+        "recent",
+        "search",
+        "show",
+        "the",
+        "to",
+        "transaction",
+        "transactions",
+        "with",
+        "اعرض",
+        "ابحث",
+        "اخر",
+        "الاخيره",
+        "العمليات",
+        "المعاملات",
+        "عن",
+        "في",
+        "كل",
+        "لي",
+        "من",
+        "الي",
+    }
+)
+
+_TRANSACTION_QUERY_ALIASES = {
+    "transfer": ("transfer", "حوالة", "حوالات", "تحويل"),
+    "transfers": ("transfer", "حوالة", "حوالات", "تحويل"),
+    "حواله": ("transfer", "حواله", "حوالات", "تحويل"),
+    "حوالات": ("transfer", "حوالة", "حوالات", "تحويل"),
+    "تحويل": ("transfer", "حوالة", "حوالات", "تحويل"),
+    "payment": ("payment", "bill", "فاتوره", "سداد", "دفعه"),
+    "payments": ("payment", "bill", "فاتوره", "سداد", "دفعه"),
+    "دفعه": ("payment", "bill", "فاتوره", "سداد", "دفعه"),
+    "دفعات": ("payment", "bill", "فاتوره", "سداد", "دفعه"),
+    "سداد": ("payment", "bill", "فاتوره", "سداد", "دفعه"),
+    "deposit": ("deposit", "credit", "ايداع", "وارد"),
+    "ايداع": ("deposit", "credit", "ايداع", "وارد"),
+    "incoming": ("credit", "transfer in", "وارد", "داخله"),
+    "outgoing": ("debit", "transfer out", "صادر", "خارجه"),
+    "وارده": ("credit", "transfer in", "وارد", "داخله"),
+    "صادره": ("debit", "transfer out", "صادر", "خارجه"),
+}
+
+_RECENT_COUNT_QUERY = re.compile(
+    r"^(?:(?:show\s+)?(?:me\s+)?(?:my\s+)?(?:last|latest|recent)\s+\d+\s+transactions?"
+    r"|(?:اعرض\s+)?(?:لي\s+)?اخر\s+\d+\s+(?:العمليات|عمليات|المعاملات|معاملات))$",
+    re.IGNORECASE,
+)
+
+
+def _transaction_search_text(row: Any) -> str:
+    """Build a normalized searchable view without changing returned ledger data."""
+
+    values = (
+        row["direction"],
+        row["Transaction_Type"],
+        row["Amount_SAR"],
+        row["Counterparty_Name"],
+        row["Counterparty_Account"],
+        row["Description"],
+        row["Category"],
+        row["Reference"],
+        row["createdAt"],
+    )
+    return normalize_entity_text(" ".join(str(value or "") for value in values))
+
+
+def _transaction_matches(row: Any, query: str) -> bool:
+    """Match practical English/Arabic ledger searches token by token."""
+
+    normalized_query = normalize_entity_text(query)
+    if not normalized_query:
+        return True
+    # Some providers pass the whole "last N transactions" phrase as query
+    # even though N belongs in the limit argument. Treat it as an unfiltered
+    # recent-history request instead of accidentally searching ledger amounts.
+    if _RECENT_COUNT_QUERY.fullmatch(normalized_query):
+        return True
+    searchable = _transaction_search_text(row)
+    if normalized_query in searchable:
+        return True
+    tokens = [
+        token
+        for token in re.findall(r"[\w.]+", normalized_query, flags=re.UNICODE)
+        if token not in _TRANSACTION_QUERY_STOP_WORDS
+    ]
+    if not tokens:
+        return True
+    return all(
+        token in searchable
+        or any(alias in searchable for alias in _TRANSACTION_QUERY_ALIASES.get(token, ()))
+        for token in tokens
+    )
 
 
 class GetBalanceArgs(BankToolArgs):
@@ -123,7 +231,7 @@ async def get_balance(account: str = "primary") -> dict[str, Any]:
 
 async def search_transactions(query: str = "", limit: int = 10) -> dict[str, Any]:
     username, _ = owner_identity()
-    needle = query.strip().casefold()
+    requested_query = query.strip()
 
     def work(connection: BankConnection) -> dict[str, Any]:
         user = find_user_by_username(connection, username)
@@ -138,22 +246,8 @@ async def search_transactions(query: str = "", limit: int = 10) -> dict[str, Any
             "SELECT * FROM transactions WHERE user_uuid = %s ORDER BY createdAt DESC LIMIT 250",
             (user["uuid"],),
         ).fetchall()
-        if needle:
-            rows = [
-                row
-                for row in rows
-                if needle
-                in " ".join(
-                    str(row[key] or "")
-                    for key in (
-                        "Transaction_Type",
-                        "Counterparty_Name",
-                        "Description",
-                        "Category",
-                        "Reference",
-                    )
-                ).casefold()
-            ]
+        if requested_query:
+            rows = [row for row in rows if _transaction_matches(row, requested_query)]
         selected = rows[:limit]
         items = [
             {
@@ -171,7 +265,7 @@ async def search_transactions(query: str = "", limit: int = 10) -> dict[str, Any
         return tool_result(
             status="completed",
             summary=f"Found {len(items)} matching transactions.",
-            data={"query": query.strip(), "transactions": items, "truncated": len(rows) > limit},
+            data={"query": requested_query, "transactions": items, "truncated": len(rows) > limit},
             operation_id=next_reference(connection, "transaction-search"),
         )
 
@@ -192,6 +286,12 @@ GET_BALANCE_TOOL: BaseTool = StructuredTool.from_function(
 SEARCH_TRANSACTIONS_TOOL: BaseTool = StructuredTool.from_function(
     coroutine=search_transactions,
     name="search_transactions",
-    description="Search the authenticated customer's bank ledger by text and return recent matches.",
+    description=(
+        "Return the authenticated customer's recent bank-ledger transactions. Use query='' for "
+        "an unfiltered recent/latest request. For a filtered request, pass only distinctive text "
+        "the user supplied, such as a merchant, counterparty, category, amount, or reference; "
+        "English and Arabic transaction wording are supported. Keep limit=10 unless the user "
+        "explicitly requests a different count."
+    ),
     args_schema=SearchTransactionsArgs,
 )

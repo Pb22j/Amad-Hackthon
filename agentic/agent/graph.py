@@ -156,7 +156,7 @@ def build_financial_agent(
         system_prompt=FINANCIAL_AGENT_SYSTEM_PROMPT,
         middleware=middleware,
         # ToolStrategy avoids  provider-specific native structured-output APIs.
-        # This works consistently through OpenRouter while still validating
+        # This works consistently through OpenAI-compatible providers while validating
         # the final report against the strict Pydantic schema.
         response_format=ToolStrategy(AgentReport),
         context_schema=AgentRuntimeContext,

@@ -19,6 +19,7 @@ import {
 import { Brand } from "@/components/brand";
 import { DashboardProvider, useDashboard } from "@/components/dashboard-provider";
 import { RequireAuth } from "@/components/require-auth";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { useAuth } from "@/lib/auth";
 import { useLang } from "@/lib/i18n";
 
@@ -102,6 +103,7 @@ function Shell({ children }: { children: React.ReactNode }) {
             <Languages size={17} />
             <span>{t("language")}</span>
           </button>
+          <ThemeToggle />
           <button
             type="button"
             className="profile-button"
