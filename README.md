@@ -161,18 +161,6 @@ python evaluation/task.py "Show my current checking account balance."
 Two independent suites ship with the repo. Both are deterministic and run
 locally with no external bank.
 
-### Security (`amad-agent eval-security`)
-
-100 bilingual adversarial prompts across 10 categories, run against
-`PolicyEngine.screen_request` — no model provider needed.
-
-```bash
-.venv/bin/amad-agent eval-security              # full run with gap markers
-.venv/bin/amad-agent eval-security --dataset holdout    # strict, 0 exemptions
-.venv/bin/amad-agent eval-security --json       # machine-readable report
-.venv/bin/python scripts/build_eval_report.py   # render HTML report
-```
-
 ### Functionality (`scripts/run_functionality_eval.py`)
 
 100 bilingual workflows against the real agent graph + an in-memory dummy
