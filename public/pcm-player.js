@@ -5,8 +5,6 @@ class PCMPlayer extends AudioWorkletProcessor {
     this.queuedSamples = 0;
     this.playing = false;
     this.started = false;
-    // Native audio arrives faster than realtime. Dropping the oldest chunks here
-    // cuts words out of normal replies, so retain a bounded full response instead.
     this.maxQueuedSamples = Math.round(sampleRate * 60);
     this.prebufferSamples = Math.round(sampleRate * 0.12);
     this.port.onmessage = (event) => {
@@ -26,7 +24,7 @@ class PCMPlayer extends AudioWorkletProcessor {
           this.queuedSamples = 0;
           this.started = false;
           this.setPlaying(false);
-          this.port.postMessage({ type: "playback-error", reason: "response-too-long" });
+          this.port.postMessage({ type: "playback-error" });
           return;
         }
         this.queue.push(event.data);
@@ -48,12 +46,10 @@ class PCMPlayer extends AudioWorkletProcessor {
   process(_inputs, outputs) {
     const channel = outputs[0][0];
     let offset = 0;
-
     if (!this.started) {
       channel.fill(0);
       return true;
     }
-
     while (offset < channel.length && this.queue.length > 0) {
       const chunk = this.queue[0];
       const count = Math.min(chunk.length, channel.length - offset);
@@ -63,7 +59,6 @@ class PCMPlayer extends AudioWorkletProcessor {
       if (count === chunk.length) this.queue.shift();
       else this.queue[0] = chunk.subarray(count);
     }
-
     if (offset < channel.length) channel.fill(0, offset);
     if (this.queue.length === 0) {
       this.started = false;

@@ -87,6 +87,7 @@ async def get_balance(account: str = "primary") -> dict[str, Any]:
         balance = money(selected["balance_sar"])
         total = sum((money(row["balance_sar"]) for row in accounts), start=money(0))
         nafi_balance = money(user["nafi_balance"])
+        nafi_liquid_savings = money(user["nafi_liquid_savings_balance"])
         return tool_result(
             status="completed",
             summary=(
@@ -96,6 +97,7 @@ async def get_balance(account: str = "primary") -> dict[str, Any]:
             data={
                 "nafi_balance_sar": str(nafi_balance),
                 "spendable_balance_sar": str(nafi_balance),
+                "nafi_liquid_savings_balance_sar": str(nafi_liquid_savings),
                 "balance_sar": str(balance),
                 "total_balance_sar": str(total),
                 "currency": "SAR",
@@ -180,8 +182,9 @@ GET_BALANCE_TOOL: BaseTool = StructuredTool.from_function(
     coroutine=get_balance,
     name="get_balance",
     description=(
-        "Get the spendable Nafi wallet balance plus read-only linked bank-account balances. "
-        "Only nafi_balance_sar can fund Nafi financial actions."
+        "Get the spendable Nafi wallet balance, Nafi liquid-savings balance, plus "
+        "read-only linked bank-account balances. Only nafi_balance_sar can fund "
+        "Nafi financial actions."
     ),
     args_schema=GetBalanceArgs,
 )

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed the minimal Nafi demo database with exactly ten users."""
+"""Seed the Nafi demo database and six months of realistic financial history."""
 
 from __future__ import annotations
 
@@ -7,11 +7,14 @@ import argparse
 import hashlib
 import json
 import os
+from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
+from zoneinfo import ZoneInfo
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from agentic.config.environment import load_backend_environment
 
@@ -58,26 +61,222 @@ ACCOUNTS = (
 )
 
 
-def _monthly_activity(month_start: datetime) -> tuple[dict[str, object], ...]:
-    def at(day: int, hour: int) -> datetime:
-        return month_start.replace(day=day, hour=hour)
+MONTHLY_INCOME = {
+    "evaluation-user": Decimal("15500"),
+    "admin": Decimal("23500"),
+    "waleed": Decimal("14200"),
+    "mohammed": Decimal("11800"),
+    "noura": Decimal("16400"),
+    "latifa": Decimal("13200"),
+    "saud": Decimal("10500"),
+    "faisal": Decimal("14600"),
+    "sara": Decimal("12400"),
+    "khalid": Decimal("17800"),
+}
 
-    return (
-        {"moment": at(1, 9), "direction": "credit", "amount": Decimal("15500.00"), "type": "salary", "counterparty": "شركة أمد للتقنية", "description": "إيداع راتب شهري", "category": "راتب"},
-        {"moment": at(3, 18), "direction": "debit", "amount": Decimal("4200.00"), "type": "rent", "counterparty": "شركة الفيصلية العقارية", "description": "إيجار شقة", "category": "سكن"},
-        {"moment": at(6, 12), "direction": "debit", "amount": Decimal("612.40"), "type": "purchase", "counterparty": "أسواق بنده", "description": "مشتريات بقالة", "category": "بقالة"},
-        {"moment": at(9, 20), "direction": "debit", "amount": Decimal("389.00"), "type": "bill_payment", "counterparty": "الشركة السعودية للكهرباء", "description": "فاتورة كهرباء", "category": "فواتير"},
-        {"moment": at(12, 14), "direction": "debit", "amount": Decimal("145.00"), "type": "bill_payment", "counterparty": "STC", "description": "فاتورة جوال وإنترنت", "category": "فواتير"},
-        {"moment": at(15, 10), "direction": "credit", "amount": Decimal("750.00"), "type": "transfer_in", "counterparty": "لطيفة العنزي", "description": "تسديد مشاركة رحلة", "category": "حوالات"},
-        {"moment": at(19, 21), "direction": "debit", "amount": Decimal("264.75"), "type": "purchase", "counterparty": "هنقرستيشن", "description": "طلبات طعام", "category": "مطاعم"},
-        {"moment": at(24, 16), "direction": "debit", "amount": Decimal("980.00"), "type": "purchase", "counterparty": "مكتبة جرير", "description": "مشتريات إلكترونيات", "category": "تسوق"},
-    )
+HISTORY_MONTHS = 6
+RIYADH = ZoneInfo("Asia/Riyadh")
+EXPENSE_FACTORS = {
+    # Keep the primary evaluation profile cash-positive so idle-cash flows
+    # have a meaningful safe surplus to recommend during demos and tests.
+    "evaluation-user": Decimal(".48"),
+}
+
+
+def _month_starts(now: datetime, count: int = HISTORY_MONTHS) -> list[datetime]:
+    cursor = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    starts = []
+    for _ in range(count):
+        starts.append(cursor)
+        cursor = (cursor - timedelta(days=1)).replace(day=1)
+    return list(reversed(starts))
+
+
+def _varied_amount(
+    income: Decimal,
+    ratio: str,
+    *,
+    username: str,
+    month: datetime,
+    label: str,
+    spread_percent: int = 12,
+) -> Decimal:
+    """Return a stable, user-specific amount with small month-to-month variation."""
+
+    digest = hashlib.sha256(
+        f"{username}:{month:%Y-%m}:{label}".encode()
+    ).digest()
+    offset = int.from_bytes(digest[:2], "big") % (spread_percent * 2 + 1)
+    multiplier = Decimal("1") + Decimal(offset - spread_percent) / Decimal("100")
+    return (income * Decimal(ratio) * multiplier).quantize(Decimal("0.01"))
+
+
+def _monthly_activity(
+    username: str,
+    month_start: datetime,
+    *,
+    now: datetime,
+) -> tuple[dict[str, object], ...]:
+    income = MONTHLY_INCOME[username]
+    last_day = monthrange(month_start.year, month_start.month)[1]
+    rows: list[dict[str, object]] = []
+
+    def add(
+        day: int,
+        hour: int,
+        direction: str,
+        ratio: str,
+        transaction_type: str,
+        counterparty: str,
+        description: str,
+        category: str,
+        channel: str,
+        label: str,
+        city: str = "الرياض",
+    ) -> None:
+        moment = month_start.replace(day=min(day, last_day), hour=hour)
+        if moment > now:
+            return
+        amount = _varied_amount(
+            income,
+            ratio,
+            username=username,
+            month=month_start,
+            label=label,
+            spread_percent=2 if transaction_type == "salary" else 12,
+        )
+        if direction == "debit":
+            amount = (
+                amount * EXPENSE_FACTORS.get(username, Decimal("1"))
+            ).quantize(Decimal("0.01"))
+        rows.append(
+            {
+                "moment": moment,
+                "direction": direction,
+                "amount": amount,
+                "type": transaction_type,
+                "counterparty": counterparty,
+                "description": description,
+                "category": category,
+                "channel": channel,
+                "city": city,
+            }
+        )
+
+    add(1, 9, "credit", "1", "salary", "جهة العمل", "إيداع الراتب الشهري", "راتب", "bank_transfer", "salary")
+    add(2, 10, "debit", ".28", "rent", "شركة العقار السكنية", "دفعة الإيجار الشهرية", "سكن", "direct_debit", "rent")
+    add(3, 8, "debit", ".008", "purchase", "بارنز", "قهوة ومخبوزات", "مطاعم", "card", "coffee")
+    add(4, 19, "debit", ".035", "purchase", "أسواق بنده", "مشتريات بقالة أسبوعية", "بقالة", "card", "groceries-1")
+    add(5, 17, "debit", ".018", "purchase", "محطة الدريس", "وقود", "مواصلات", "card", "fuel-1")
+    add(6, 11, "debit", ".05", "bill_payment", "منصة مدرستي", "رسوم تعليم وتدريب", "تعليم", "online", "education")
+    add(7, 21, "debit", ".018", "purchase", "هنقرستيشن", "طلب عشاء", "مطاعم", "card", "restaurant-1")
+    add(8, 14, "debit", ".025", "bill_payment", "الشركة السعودية للكهرباء", "فاتورة الكهرباء", "فواتير", "sadad", "electricity")
+    add(9, 18, "debit", ".035", "purchase", "لولو هايبرماركت", "مشتريات منزلية", "بقالة", "card", "groceries-2")
+    add(10, 13, "debit", ".012", "bill_payment", "STC", "فاتورة الجوال والإنترنت", "فواتير", "sadad", "telecom")
+    add(11, 16, "credit", ".025", "transfer_in", "صديق", "استرداد حصة مصروف مشترك", "حوالات", "bank_transfer", "shared-refund")
+    add(12, 7, "debit", ".008", "subscription", "شاهد وسبوتيفاي", "اشتراكات رقمية", "ترفيه", "card", "subscriptions")
+    add(13, 20, "debit", ".035", "cash_withdrawal", "صراف آلي", "سحب نقدي", "نقد", "atm", "cash")
+    add(14, 18, "debit", ".035", "purchase", "أسواق التميمي", "مشتريات بقالة أسبوعية", "بقالة", "card", "groceries-3")
+    add(15, 12, "debit", ".10", "transfer_out", "حوالة عائلية", "دعم ومصروف عائلي", "حوالات", "bank_transfer", "family")
+    add(16, 17, "debit", ".018", "purchase", "ساسكو", "وقود وخدمات سيارة", "مواصلات", "card", "fuel-2")
+    add(17, 21, "debit", ".018", "purchase", "جاهز", "طلب طعام", "مطاعم", "card", "restaurant-2")
+    add(18, 11, "debit", ".02", "purchase", "صيدلية النهدي", "أدوية وعناية صحية", "صحة", "card", "health")
+    add(19, 18, "debit", ".035", "purchase", "كارفور", "مشتريات بقالة أسبوعية", "بقالة", "card", "groceries-4")
+    add(20, 10, "debit", ".025", "bill_payment", "شركة التعاونية", "قسط تأمين", "تأمين", "direct_debit", "insurance")
+    add(21, 19, "debit", ".06", "purchase", "مكتبة جرير", "تسوق وإلكترونيات", "تسوق", "card", "shopping")
+    add(22, 8, "debit", ".05", "savings_transfer", "حساب الادخار", "تحويل دوري للادخار", "مدخرات", "bank_transfer", "savings")
+    add(24, 21, "debit", ".018", "purchase", "ذا شفز", "عشاء نهاية الأسبوع", "مطاعم", "card", "restaurant-3")
+    add(25, 15, "debit", ".06", "purchase", "الخطوط السعودية", "سفر وترفيه", "سفر", "card", "travel")
+    add(27, 13, "debit", ".01", "donation", "منصة إحسان", "تبرع شهري", "تبرعات", "online", "donation")
+    return tuple(rows)
+
+
+def seed_history(
+    target: psycopg.Connection[object],
+    *,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Replace only deterministic seed rows with six calendar months of history."""
+
+    current = (now or datetime.now(RIYADH)).astimezone(RIYADH)
+    inserted = 0
+    with target.cursor() as cur:
+        cur.execute(
+            "DELETE FROM transactions "
+            "WHERE reference LIKE 'demo-history-%' OR reference LIKE 'seed-%'"
+        )
+        replaced = cur.rowcount
+        cur.execute(
+            """SELECT u.uuid, u.username, b.account_number, b.balance_sar
+                 FROM users AS u
+                 JOIN bank_accounts AS b ON b.user_uuid = u.uuid AND b.is_primary
+                ORDER BY u.username"""
+        )
+        owners = cur.fetchall()
+        for user_uuid, username, account_number, current_balance in owners:
+            activity = [
+                item
+                for month in _month_starts(current)
+                for item in _monthly_activity(username, month, now=current)
+            ]
+            net_change = sum(
+                (
+                    item["amount"]
+                    if item["direction"] == "credit"
+                    else -item["amount"]
+                )
+                for item in activity
+            )
+            running = max(Decimal("500.00"), Decimal(current_balance) - net_change)
+            for index, item in enumerate(activity):
+                amount = item["amount"]
+                running += amount if item["direction"] == "credit" else -amount
+                reference = (
+                    f"demo-history-{username}-{item['moment']:%Y%m}-{index:03d}"
+                )
+                cur.execute(
+                    """INSERT INTO transactions
+                       (uuid,user_uuid,account_number,direction,transaction_type,
+                        amount_sar,counterparty_name,description,category,
+                        balance_after_sar,reference,channel,merchant_city,metadata,createdat)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        _id("transaction", reference),
+                        user_uuid,
+                        account_number,
+                        item["direction"],
+                        item["type"],
+                        amount,
+                        item["counterparty"],
+                        item["description"],
+                        item["category"],
+                        running,
+                        reference,
+                        item["channel"],
+                        item["city"],
+                        Jsonb(
+                            {
+                                "source": "six_month_demo_seed",
+                                "synthetic": True,
+                                "profile": username,
+                            }
+                        ),
+                        item["moment"],
+                    ),
+                )
+                inserted += 1
+
+    return {
+        "history_users": len(owners),
+        "history_months": HISTORY_MONTHS,
+        "history_transactions": inserted,
+        "replaced_seed_transactions": replaced,
+    }
 
 
 def seed(target: psycopg.Connection[object]) -> dict[str, int]:
     now = datetime.now(timezone.utc)
     users = {username: _id("user", username) for username, *_ in USERS}
-    accounts: dict[str, tuple[str, str]] = {}
     password_hash = _password_hash("password123")
 
     with target.cursor() as cur:
@@ -93,6 +292,24 @@ def seed(target: psycopg.Connection[object]) -> dict[str, int]:
                 ),
             )
 
+        for username, *_ in USERS:
+            savings_uuid = _id("nafi-liquid-savings", username)
+            savings_account_number = "NFS" + users[username].replace("-", "")[:29].upper()
+            cur.execute(
+                """INSERT INTO nafi_savings_accounts
+                   (uuid,user_uuid,account_number,account_type,name,name_ar,
+                    balance_sar,created_at,updated_at)
+                   VALUES (%s,%s,%s,'liquid','Nafi Liquid Savings',
+                           'مدخرات نافي السائلة',0,%s,%s)""",
+                (
+                    savings_uuid,
+                    users[username],
+                    savings_account_number,
+                    now,
+                    now,
+                ),
+            )
+
         for username, bank_ar, bank_en, account_number, account_type, balance, primary in ACCOUNTS:
             account_uuid = _id("account", account_number)
             cur.execute(
@@ -101,8 +318,6 @@ def seed(target: psycopg.Connection[object]) -> dict[str, int]:
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (account_uuid, users[username], bank_ar, bank_en, account_number, account_type, Decimal(balance), primary),
             )
-            if primary:
-                accounts[username] = (account_uuid, account_number)
 
         for owner, beneficiary, short_name in (
             ("evaluation-user", "latifa", "لطيفة"),
@@ -118,28 +333,16 @@ def seed(target: psycopg.Connection[object]) -> dict[str, int]:
                  users[beneficiary], short_name, now),
             )
 
-        primary_uuid, primary_number = accounts["evaluation-user"]
-        for months_ago in range(3):
-            month = (now.replace(day=1, hour=8, minute=0, second=0, microsecond=0) - timedelta(days=months_ago * 31)).replace(day=1)
-            running = Decimal("25431.50")
-            for index, item in enumerate(_monthly_activity(month)):
-                amount = item["amount"]
-                running += amount if item["direction"] == "credit" else -amount
-                reference = f"seed-{month:%Y%m}-{index}-{users['evaluation-user'][:8]}"
-                cur.execute(
-                    """INSERT INTO transactions
-                       (uuid,user_uuid,account_number,direction,transaction_type,amount_sar,
-                        counterparty_name,description,category,balance_after_sar,reference,createdat)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (_id("transaction", reference), users["evaluation-user"], primary_number,
-                     item["direction"], item["type"], amount, item["counterparty"],
-                     item["description"], item["category"], running, reference, item["moment"]),
-                )
-
-        for symbol, name, price in (("ARAMCO", "Saudi Aramco", "27.80"), ("ALRAJHI", "Al Rajhi Bank", "96.40"), ("SABIC", "SABIC", "61.20")):
+        for symbol, name, price, sector, sector_name, sector_name_ar in (
+            ("ARAMCO", "Saudi Aramco", "27.80", "energy", "Energy", "الطاقة"),
+            ("ALRAJHI", "Al Rajhi Bank", "96.40", "financials", "Financials", "القطاع المالي"),
+            ("SABIC", "SABIC", "61.20", "materials", "Materials", "المواد الأساسية"),
+        ):
             cur.execute(
-                "INSERT INTO investment_assets (symbol,name,price_sar,updatedat) VALUES (%s,%s,%s,%s)",
-                (symbol, name, Decimal(price), now),
+                """INSERT INTO investment_assets
+                   (symbol,name,price_sar,sector,sector_name,sector_name_ar,updatedat)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (symbol, name, Decimal(price), sector, sector_name, sector_name_ar, now),
             )
         for username in ("evaluation-user", "admin"):
             cur.execute(
@@ -179,18 +382,29 @@ def seed(target: psycopg.Connection[object]) -> dict[str, int]:
                  status, now if status == "paid" else None, now),
             )
 
-    return {"users": len(USERS), "bank_accounts": len(ACCOUNTS), "beneficiaries": 4}
+    history_counts = seed_history(target)
+    return {
+        "users": len(USERS),
+        "bank_accounts": len(ACCOUNTS),
+        "beneficiaries": 4,
+        **history_counts,
+    }
 
 
 def main() -> None:
     load_backend_environment()
     parser = argparse.ArgumentParser()
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"))
+    parser.add_argument(
+        "--history-only",
+        action="store_true",
+        help="Refresh six months of deterministic history without reseeding users.",
+    )
     args = parser.parse_args()
     if not args.database_url:
         parser.error("--database-url or DATABASE_URL in .env.backend is required")
     with psycopg.connect(_postgres_url(args.database_url)) as target:
-        counts = seed(target)
+        counts = seed_history(target) if args.history_only else seed(target)
     print(json.dumps(counts, indent=2))
 
 

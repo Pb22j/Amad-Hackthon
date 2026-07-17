@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from agentic.config.loader import PoliciesConfig
 from agentic.policy.injection_signals import InjectionSignals, detect_injection_signals
 from agentic.policy.models import Intent, IntentClassification, RiskAssessment, RiskLevel
+from agentic.tools.metadata import ToolMetadata
 
 
 HIGH_RISK_INTENTS = {
+    Intent.IDLE_CASH_TRANSFER,
     Intent.MONEY_TRANSFER,
     Intent.WALLET_FUNDING,
     Intent.SAVED_BENEFICIARY_TRANSFER,
@@ -70,7 +72,11 @@ class PolicyEngine:
                 reason_codes=("financial_action",),
                 requires_confirmation=True,
             )
-        if intents & {Intent.ACCOUNT_INFORMATION, Intent.TRANSACTION_SEARCH}:
+        if intents & {
+            Intent.ACCOUNT_INFORMATION,
+            Intent.TRANSACTION_SEARCH,
+            Intent.FINANCIAL_ADVICE,
+        }:
             return RiskAssessment(
                 level=RiskLevel.MEDIUM,
                 reason_codes=("sensitive_financial_data",),
@@ -85,3 +91,14 @@ class PolicyEngine:
         """Reject a compound request when any requested intent is prohibited."""
 
         return all(self.intent_allowed(intent) for intent in classification.all_intents)
+
+    def advisor_tool_allowed(self, metadata: ToolMetadata) -> bool:
+        """Return whether a capability can cross the advisory read-only boundary."""
+
+        advisor = self.config.financial_advisor
+        return (
+            advisor.advisory_only
+            and metadata.risk.value in advisor.allowed_tool_risks
+            and not metadata.requires_confirmation
+            and not metadata.requires_receipt
+        )

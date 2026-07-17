@@ -27,6 +27,9 @@ def test_unified_columns_use_native_postgresql_types(unified_postgres_url: str) 
                WHERE table_schema='public' AND (
                    (table_name='users' AND column_name IN ('uuid','daily_spend_limit_sar','nafi_balance')) OR
                    (table_name='bank_accounts' AND column_name='balance_sar') OR
+                   (table_name='nafi_savings_accounts' AND column_name IN ('uuid','balance_sar')) OR
+                   (table_name='idle_cash_recommendations' AND column_name IN
+                     ('uuid','regular_idle_cash_sar','created_at')) OR
                    (table_name='transactions' AND column_name IN ('amount_sar','metadata','createdat')) OR
                    (table_name='interaction_events' AND column_name='payload_json') OR
                    (table_name='voice_turns' AND column_name='encrypted_text')
@@ -37,6 +40,11 @@ def test_unified_columns_use_native_postgresql_types(unified_postgres_url: str) 
     assert types[("users", "daily_spend_limit_sar")] == "numeric"
     assert types[("users", "nafi_balance")] == "numeric"
     assert types[("bank_accounts", "balance_sar")] == "numeric"
+    assert types[("nafi_savings_accounts", "uuid")] == "uuid"
+    assert types[("nafi_savings_accounts", "balance_sar")] == "numeric"
+    assert types[("idle_cash_recommendations", "uuid")] == "uuid"
+    assert types[("idle_cash_recommendations", "regular_idle_cash_sar")] == "numeric"
+    assert types[("idle_cash_recommendations", "created_at")] == "timestamp with time zone"
     assert types[("transactions", "amount_sar")] == "numeric"
     assert types[("transactions", "metadata")] == "jsonb"
     assert types[("transactions", "createdat")] == "timestamp with time zone"

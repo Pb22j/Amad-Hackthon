@@ -3,16 +3,33 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from agentic.config.loader import LLMConfig, ModelConfig, SecretsConfig
+from agentic.config.loader import (
+    FinancialAdvisorPolicy,
+    LLMConfig,
+    ModelConfig,
+    SecretsConfig,
+)
 from agentic.llm.capabilities import validate_capabilities
 from agentic.llm.factory import ModelFactory
 
 
 def test_config_loads_separate_model_roles(app_config):
     assert app_config.llm.models["primary"].provider == "openrouter"
+    assert app_config.llm.models["financial_advisor"].provider == "openrouter"
+    assert app_config.policies.financial_advisor.advisory_only is True
+    assert app_config.policies.financial_advisor.allowed_tool_risks == frozenset(
+        {"read", "sensitive_read"}
+    )
+    assert app_config.policies.financial_advisor.max_calls_per_tool == 6
     assert app_config.limits.task.max_tool_calls == 15
     assert "transfer_funds" in app_config.policies.financial_actions.require_exact_confirmation
     assert app_config.tools.tools["transfer_between_accounts"]["requires_confirmation"]
+    assert app_config.tools.tools["analyze_idle_cash"]["risk"] == "sensitive_read"
+    assert app_config.tools.tools["transfer_idle_cash_to_savings"]["risk"] == "financial_action"
+    assert (
+        "transfer_idle_cash_to_savings"
+        in app_config.policies.financial_actions.require_exact_confirmation
+    )
     assert app_config.tools.workflows["saved_beneficiary_transfer"] == (
         "list_beneficiaries",
         "transfer_between_accounts",
@@ -26,6 +43,19 @@ def test_config_loads_separate_model_roles(app_config):
 def test_model_config_forbids_unknown_keys():
     with pytest.raises(ValidationError):
         ModelConfig(provider="openai", model="x", unexpected=True)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"advisory_only": False},
+        {"require_authoritative_data": False},
+        {"allowed_tool_risks": {"financial_action"}},
+    ],
+)
+def test_financial_advisor_policy_cannot_be_relaxed(override):
+    with pytest.raises(ValidationError):
+        FinancialAdvisorPolicy.model_validate(override)
 
 
 def test_llm_config_requires_critical_roles():

@@ -46,6 +46,68 @@ def test_dashboard_uses_only_the_server_owned_session_identity(monkeypatch) -> N
     )
 
 
+def test_investment_projection_requires_authentication() -> None:
+    limiter.buckets.clear()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/investments/projection",
+            json={"monthly_contribution_sar": "1000.00", "years": 5},
+        )
+
+    assert response.status_code == 401
+
+
+def test_investment_projection_uses_authenticated_portfolio(monkeypatch) -> None:
+    limiter.buckets.clear()
+    projection = MagicMock(
+        return_value={
+            "starting_value_sar": "5932.00",
+            "one_time_contribution_sar": "0.00",
+            "monthly_contribution_sar": "1000.00",
+            "years": 5,
+            "annual_return_percent": 7.0,
+            "inflation_percent": 2.5,
+            "contribution_timing": "end_of_month",
+            "projected_value_sar": "80000.00",
+            "inflation_adjusted_value_sar": "70600.00",
+            "total_contributions_sar": "65932.00",
+            "estimated_growth_sar": "14068.00",
+            "target_amount_sar": None,
+            "target_gap_sar": None,
+            "target_surplus_sar": None,
+            "target_achieved": None,
+            "required_monthly_contribution_sar": None,
+            "milestones": [],
+        }
+    )
+    monkeypatch.setattr(dashboard_store, "investment_projection", projection)
+
+    with TestClient(app) as client:
+        session = client.post(
+            "/api/auth/login",
+            json={"identifier": "admin", "password": "password123", "language": "en"},
+        ).json()
+        client.cookies.clear()
+        response = client.post(
+            "/api/investments/projection",
+            headers={"X-Session-Token": session["session_token"]},
+            json={"monthly_contribution_sar": "1000.00", "years": 5},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["starting_value_sar"] == "5932.00"
+    projection.assert_called_once_with(
+        user_id="admin",
+        tenant_id=settings.DEMO_TENANT_ID,
+        monthly_contribution=Decimal("1000.00"),
+        years=5,
+        annual_return_percent=Decimal("7.0"),
+        one_time_contribution=Decimal("0"),
+        inflation_percent=Decimal("2.5"),
+        target_amount=None,
+    )
+
+
 def test_wallet_deposit_requires_authentication() -> None:
     limiter.buckets.clear()
     with TestClient(app) as client:

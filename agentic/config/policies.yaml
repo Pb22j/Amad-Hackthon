@@ -1,5 +1,6 @@
 financial_actions:
   require_exact_confirmation:
+    - transfer_idle_cash_to_savings
     - transfer_between_accounts
     - fund_nafi_wallet
     - add_benefit
@@ -15,6 +16,7 @@ financial_actions:
     - pay_bill
     - add_beneficiary
   require_authoritative_receipt:
+    - transfer_idle_cash_to_savings
     - transfer_between_accounts
     - fund_nafi_wallet
     - send_gift
@@ -27,6 +29,16 @@ financial_actions:
     - buy_investment
     - sell_investment
     - withdraw_funds
+financial_advisor:
+  # The safety values are Literal-validated and cannot be relaxed through deployment config.
+  advisory_only: true
+  require_authoritative_data: true
+  # Advisor reads may need multiple analytical views. The action agent retains
+  # each tool's stricter max_calls_per_task value from tools.yaml.
+  max_calls_per_tool: 6
+  allowed_tool_risks:
+    - read
+    - sensitive_read
 security:
   reject_cross_user_requests: true
   reject_credential_requests: true

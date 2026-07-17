@@ -114,11 +114,13 @@ def create_app(
         graph = build_financial_agent(
             primary_model=models.create("primary"),
             classifier_model=models.create("intent_classifier"),
+            advisor_model=models.create("financial_advisor"),
             external_tools=runtime_tools,
             tool_metadata=runtime_metadata,
             config=runtime_config,
             checkpointer=checkpointer,
             fallback_models=models.create_fallbacks("primary"),
+            advisor_fallback_models=models.create_fallbacks("financial_advisor"),
         )
         signer = ConfirmationSigner(
             runtime_config.secrets.confirmation_signing_key.get_secret_value()

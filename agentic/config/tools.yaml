@@ -43,10 +43,28 @@ tools:
     max_calls_per_task: 3
   analyze_finances:
     risk: sensitive_read
-    intents: [financial_calculation, account_information, transaction_search]
+    intents: [financial_advice, financial_calculation, account_information, transaction_search]
     required_scopes: [financial:read]
     requires_owner_metadata: true
     max_calls_per_task: 3
+  analyze_idle_cash:
+    # Linked-bank balances and transactions are read-only analytical inputs.
+    risk: sensitive_read
+    intents: [financial_advice, financial_calculation]
+    required_scopes: [financial:read]
+    requires_owner_metadata: true
+    max_calls_per_task: 2
+  transfer_idle_cash_to_savings:
+    # The amount comes from a fresh persisted recommendation and the action
+    # moves only Nafi wallet money into the user's Nafi liquid-savings account.
+    risk: financial_action
+    intents: [idle_cash_transfer]
+    required_scopes: [financial:write]
+    requires_confirmation: true
+    requires_receipt: true
+    requires_owner_metadata: true
+    idempotent: true
+    max_calls_per_task: 2
   monthly_report:
     risk: sensitive_read
     intents: [transaction_search, account_information, financial_calculation]
@@ -89,7 +107,7 @@ tools:
   pay_fatoorah:
     risk: financial_action
     intents: [bill_payment]
-    explicit_user_fields: [last_four_digits]
+    explicit_user_fields: [biller]
     required_scopes: [financial:write]
     requires_confirmation: true
     requires_receipt: true

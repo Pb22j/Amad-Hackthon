@@ -22,6 +22,7 @@ from agentic.tools.bank_db import (
     resolve_account_candidates,
     run_in_bank_db,
     resolve_user_account,
+    text_mentions_known_bank,
     timestamp,
     tool_result,
     update_nafi_balance,
@@ -36,7 +37,9 @@ class FundNafiWalletArgs(BankToolArgs):
         max_length=200,
         description=(
             "The linked bank account to debit, using the bank name, account type, "
-            "masked/last-four account number, or 'primary', exactly as the user stated it."
+            "masked/last-four account number, or 'primary'. Preserve the user's wording when "
+            "they name an account; use 'primary' when they name none so the server can accept "
+            "a sole linked account or request a choice for multiple accounts."
         ),
     )
     amount: float = Field(description="Amount to deposit into the Nafi wallet in SAR.")
@@ -87,6 +90,15 @@ async def source_account_is_grounded(
         current_matches = statement_matches[0] if statement_matches else set()
         if current_matches:
             return current_matches == {canonical_id}
+        # Selecting the only owner-scoped linked account is deterministic only
+        # when the request did not name a different bank/account. The exact
+        # sole account is still returned by preflight and bound into
+        # confirmation before money can move.
+        if len(accounts) == 1 and not any(
+            text_mentions_known_bank(connection, statement)
+            for statement in user_statements
+        ):
+            return True
         prior_matches = set().union(*statement_matches[1:]) if len(statement_matches) > 1 else set()
         return prior_matches == {canonical_id}
 
@@ -300,8 +312,10 @@ TOOL: BaseTool = StructuredTool.from_function(
     description=(
         "Deposit money into the authenticated user's Nafi wallet by debiting one selected, "
         "owned linked bank account. Use only when the user explicitly asks to add, fund, "
-        "deposit, or top up their Nafi wallet. The user must specify the source bank/account "
-        "and amount. Account ownership and available bank funds are verified before exact "
+        "deposit, or top up their Nafi wallet. The user must specify the amount. Preserve a "
+        "stated source bank/account; if none is stated, pass 'primary' so the server can "
+        "automatically select the user's sole linked account. Account ownership and available "
+        "bank funds are verified before exact "
         "confirmation and OTP; execution atomically debits the bank and credits nafi_balance."
     ),
     args_schema=FundNafiWalletArgs,

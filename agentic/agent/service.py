@@ -177,13 +177,37 @@ def _sanitize_report_number_grounding(
     if not ungrounded:
         return report
 
+    logger.warning(
+        "removed ungrounded numeric claims from agent report: values=%s",
+        sorted(str(value) for value in ungrounded),
+    )
     cleaned = _drop_ungrounded_values(report.model_dump(mode="json"), ungrounded)
     if cleaned.get("summary") is None:
-        cleaned["summary"] = _localized(
-            language,
-            "The request could not be completed under the current financial constraints.",
-            "تعذر إكمال الطلب وفق القيود المالية الحالية.",
-        )
+        status = cleaned.get("status", report.status)
+        if status == "completed":
+            cleaned["summary"] = _localized(
+                language,
+                "The report was completed successfully. Verified details are shown below.",
+                "تم إعداد التقرير بنجاح. تظهر التفاصيل الموثقة أدناه.",
+            )
+        elif status == "partially_completed":
+            cleaned["summary"] = _localized(
+                language,
+                "The request was partially completed. Verified details are shown below.",
+                "تم إكمال الطلب جزئياً. تظهر التفاصيل الموثقة أدناه.",
+            )
+        else:
+            cleaned["summary"] = _localized(
+                language,
+                "The request could not be completed under the current financial constraints.",
+                "تعذر إكمال الطلب وفق القيود المالية الحالية.",
+            )
+    warnings = list(cleaned.get("warnings") or [])
+    if "numeric_claims_removed" not in warnings:
+        # Preserve the schema's five-warning cap while always surfacing that
+        # unsupported figures were removed from the presentation.
+        warnings = [*warnings[:4], "numeric_claims_removed"]
+    cleaned["warnings"] = warnings
     context = cleaned.get("interaction_context") or {}
     if context.get("user_goal") is None:
         context["user_goal"] = original_request

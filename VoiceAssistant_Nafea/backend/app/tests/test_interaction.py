@@ -19,6 +19,7 @@ from app.config import Settings
 from app.interaction import AgentEvent, InteractionStore, sign_message
 from app.main import (
     _issue_voice_evidence,
+    _localized_user_name,
     _relay_browser_to_provider,
     _relay_provider_to_browser,
     _wait_for_provider_setup,
@@ -864,6 +865,7 @@ def test_realtime_setup_pins_the_configured_single_voice():
         model="gemini-live-model",
         language="ar",
         voice="Charon",
+        user_name="أحمد فهد العتيبي",
     )
 
     generation = payload["setup"]["generationConfig"]
@@ -880,15 +882,42 @@ def test_realtime_setup_pins_the_configured_single_voice():
         "initialHistoryInClientContent": True
     }
     assert "صوت رجالي بالغ واحد وثابت" in payload["setup"]["systemInstruction"]["parts"][0]["text"]
+    assert "أحمد فهد العتيبي" in payload["setup"]["systemInstruction"]["parts"][0]["text"]
+    assert "ولا تخمّن الاسم من صوته" in payload["setup"]["systemInstruction"]["parts"][0]["text"]
 
     resumed = gemini_setup(
         model="gemini-live-model",
         language="ar",
         voice="Charon",
         resume_handle="resume-token",
+        user_name="أحمد فهد العتيبي",
     )
     assert resumed["setup"]["sessionResumption"] == {"handle": "resume-token"}
     assert "historyConfig" not in resumed["setup"]
+
+
+def test_realtime_setup_uses_authenticated_english_profile_name():
+    payload = gemini_setup(
+        model="gemini-live-model",
+        language="en",
+        voice="Charon",
+        user_name="Ahmed Fahad Alotaibi",
+    )
+
+    prompt = payload["setup"]["systemInstruction"]["parts"][0]["text"]
+    assert 'Full name: "Ahmed Fahad Alotaibi"' in prompt
+    assert "never guess a name from their voice" in prompt
+
+
+def test_voice_uses_the_profile_name_for_the_session_language():
+    identity = {
+        "full_name_ar": "أحمد فهد العتيبي",
+        "full_name_en": "Ahmed Fahad Alotaibi",
+    }
+
+    assert _localized_user_name(identity, "ar") == "أحمد فهد العتيبي"
+    assert _localized_user_name(identity, "en") == "Ahmed Fahad Alotaibi"
+    assert _localized_user_name({"full_name_ar": "أحمد", "full_name_en": ""}, "en") == "أحمد"
 
 
 def test_realtime_initial_history_always_closes_the_protocol_phase():
@@ -954,12 +983,35 @@ async def test_browser_cannot_inject_unbounded_realtime_context():
             )
 
 
-def test_interaction_persona_is_polite_seamless_and_backend_grounded():
+def test_interaction_persona_is_financial_data_aware_strict_and_backend_grounded():
     prompt = instructions_for("en")
-    assert "polite, respectful" in prompt
-    assert "submit every financial" in prompt
-    assert "Submit unexpected requests" in prompt
-    assert "Never mention agents, tools, a backend" in prompt
+    normalized_prompt = " ".join(prompt.split())
+    assert "primary role is financial, not general-purpose" in normalized_prompt
+    assert "authenticated user session" in normalized_prompt
+    assert "secure access" in normalized_prompt
+    assert "retrieve it instead of asking the user" in normalized_prompt
+    assert "only the minimum data needed" in normalized_prompt
+    assert (
+        "Never turn advice, exploration, or a hypothetical into execution"
+        in normalized_prompt
+    )
+    assert 'distinguish "verified", "awaiting approval", and "completed"' in normalized_prompt
+    assert "submit every financial" in normalized_prompt
+    assert "Submit unexpected requests" in normalized_prompt
+    assert "Never mention agents, tools, a backend" in normalized_prompt
+    assert "complete report is displayed in chat" in normalized_prompt
+    assert "Do not repeat, summarize, infer" in normalized_prompt
+
+    arabic_prompt = instructions_for("ar")
+    normalized_arabic_prompt = " ".join(arabic_prompt.split())
+    assert "دورك الأساسي مالي، ولست مساعداً عاماً" in normalized_arabic_prompt
+    assert "جلسة مستخدم موثقة" in normalized_arabic_prompt
+    assert "أقل قدر من البيانات اللازمة" in normalized_arabic_prompt
+    assert "لا تحوّل النصيحة أو السؤال الاستكشافي إلى تنفيذ" in normalized_arabic_prompt
+    assert "تم التحقق" in normalized_arabic_prompt
+    assert "بانتظار الموافقة" in normalized_arabic_prompt
+    assert "تم التنفيذ" in normalized_arabic_prompt
+    assert "التقرير الكامل ظهر في المحادثة" in normalized_arabic_prompt
 
 
 def test_voice_memory_is_encrypted_bounded_and_never_recalls_assistant_claims():

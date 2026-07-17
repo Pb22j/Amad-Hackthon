@@ -60,6 +60,14 @@ docker compose up -d postgres
 ```
 
 The seed command inserts exactly 10 initial users with explicit Nafi wallet balances, 11 linked bank
-accounts (one user demonstrates multiple banks), four beneficiary links, and compact operational
-demo data. Newly registered users receive a unique Nafi IBAN and a zero-balance Nafi wallet. Every seeded user uses password
+accounts (one user demonstrates multiple banks), four beneficiary links, and six calendar months of
+realistic transaction history for every seeded user. The current month is partial and never includes
+future-dated activity. To refresh only the deterministic transaction history in an existing database,
+without touching users or real demo actions, run:
+
+```bash
+.venv/bin/python scripts/seed_postgres.py --history-only
+```
+
+Newly registered users receive a unique Nafi IBAN and a zero-balance Nafi wallet. Every seeded user uses password
 `password123`; each database rebuild stores it as a new randomly salted scrypt hash.

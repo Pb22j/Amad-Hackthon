@@ -11,6 +11,8 @@ class Intent(StrEnum):
     ACCOUNT_INFORMATION = "account_information"
     TRANSACTION_SEARCH = "transaction_search"
     FINANCIAL_CALCULATION = "financial_calculation"
+    FINANCIAL_ADVICE = "financial_advice"
+    IDLE_CASH_TRANSFER = "idle_cash_transfer"
     MONEY_TRANSFER = "money_transfer"
     WALLET_FUNDING = "wallet_funding"
     SAVED_BENEFICIARY_TRANSFER = "saved_beneficiary_transfer"

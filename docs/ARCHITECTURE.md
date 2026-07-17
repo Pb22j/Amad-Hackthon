@@ -44,6 +44,29 @@ verification, event delivery, and the read-only session-scoped dashboard project
 service owns policy, model orchestration, guarded tools, durable workflow state, and signed outbox
 delivery.
 
+## Financial-advisor sub-agent
+
+Personalized decision-support requests are routed to a dedicated `financial_advisor_subagent`
+inside the agentic graph. It receives the authenticated user's read capabilities across balances,
+cash flow, transactions, spending analysis, bills, qatta commitments, beneficiaries, and
+investments, even when those capabilities normally belong to different read intents. This allows
+the advisor to build the relevant financial picture instead of reasoning from a single account
+figure.
+
+The boundary is deterministic rather than prompt-only:
+
+- `policies.yaml` permits only `read` and `sensitive_read` risk classes, and the configuration
+  schema uses literal values so deployments cannot add a write class.
+- Tools that require confirmation or an authoritative action receipt are also excluded.
+- Advisory requests combined with an execution request stay on the advisory route. The advisor may
+  describe an optional next request, but it cannot transfer, pay, fund, trade, add, cancel, or
+  withdraw anything.
+- The output policy rejects advisory reports containing executed actions, receipts, or a partial
+  execution claim. Successful reports are marked `advisory_only=true` and `action_taken=false`.
+
+The regular financial action agent and its exact-confirmation/OTP controls remain unchanged for a
+later, separately classified action request initiated by the user.
+
 ## Archived tree
 
 ```text

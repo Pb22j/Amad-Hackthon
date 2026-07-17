@@ -91,6 +91,28 @@ async def test_background_task_is_tracked_and_waited(database, app_config, agent
 
 
 @pytest.mark.integration
+async def test_overlong_report_summary_is_compacted_without_failing_task(
+    database, app_config, agentic_request
+):
+    summary = ("تفاصيل موثقة " * 100).strip()
+    instance = service(
+        database,
+        app_config,
+        FakeGraph(completed_result(summary=summary)),
+    )
+
+    accepted = await instance.submit(agentic_request, background=False)
+
+    async with database.session() as session:
+        row = await session.get(AgentTaskRow, str(accepted.task_id))
+        assert row.status == TaskStatus.COMPLETED.value
+        assert len(row.final_report["summary"]) <= (
+            app_config.limits.report.max_summary_characters
+        )
+        assert row.final_report["summary"].endswith("…")
+
+
+@pytest.mark.integration
 async def test_graph_failure_is_persisted_safely(database, app_config, agentic_request):
     instance = service(database, app_config, FakeGraph(error=RuntimeError("secret stack")))
     with pytest.raises(RuntimeError):

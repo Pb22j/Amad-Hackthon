@@ -40,6 +40,12 @@ _SPIKE_THRESHOLD_PERCENT = 25
 _SPIKE_MIN_AMOUNT = Decimal("100")
 _LOW_SAVINGS_RATE_PERCENT = 10
 _DUE_SOON_DAYS = 14
+_INTERNAL_CASH_MOVEMENTS = {
+    "nafi_top_up",
+    "nafi_top_up_source",
+    "nafi_liquid_savings_debit",
+    "nafi_liquid_savings_credit",
+}
 
 
 class AnalyzeFinancesArgs(BankToolArgs):
@@ -110,6 +116,8 @@ async def analyze_finances(
         largest_expense: BankRow | None = None
         focus_transactions: list[dict[str, Any]] = []
         for row in rows:
+            if str(row["Transaction_Type"] or "").casefold() in _INTERNAL_CASH_MOVEMENTS:
+                continue
             key = row["createdAt"].strftime("%Y-%m")
             if key not in monthly:
                 continue

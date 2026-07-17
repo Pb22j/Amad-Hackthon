@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-
 import {
   authenticateNafea,
   getNafeaSession,
@@ -11,16 +10,15 @@ import {
   type NafeaRegistration,
 } from "@/lib/nafea-api";
 
-type Ctx = {
+type AuthContextValue = {
   isAuthenticated: boolean;
-  /** False until the stored session has been read on the client. */
   ready: boolean;
   signIn: (identifier: string, password: string, language: NafeaLanguage) => Promise<void>;
   signUp: (registration: NafeaRegistration) => Promise<void>;
   signOut: () => Promise<void>;
 };
 
-const AuthContext = React.createContext<Ctx | null>(null);
+const AuthContext = React.createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = React.useState(false);
@@ -31,22 +29,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const unauthorized = () => setIsAuthenticated(false);
     window.addEventListener("nafea:unauthorized", unauthorized);
     void getNafeaSession()
-      .then(() => {
-        if (!disposed) setIsAuthenticated(true);
-      })
-      .catch(() => {
-        if (!disposed) setIsAuthenticated(false);
-      })
-      .finally(() => {
-        if (!disposed) setReady(true);
-      });
+      .then(() => !disposed && setIsAuthenticated(true))
+      .catch(() => !disposed && setIsAuthenticated(false))
+      .finally(() => !disposed && setReady(true));
     return () => {
       disposed = true;
       window.removeEventListener("nafea:unauthorized", unauthorized);
     };
   }, []);
 
-  const value = React.useMemo<Ctx>(
+  const value = React.useMemo<AuthContextValue>(
     () => ({
       isAuthenticated,
       ready,
@@ -70,7 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function useAuth() {
-  const ctx = React.useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
-  return ctx;
+  const context = React.useContext(AuthContext);
+  if (!context) throw new Error("useAuth must be used within AuthProvider");
+  return context;
 }

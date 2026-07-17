@@ -47,6 +47,8 @@ UNIFIED_RUNTIME_TABLES = {
     "transactions",
     "investment_assets",
     "investment_holdings",
+    "nafi_savings_accounts",
+    "idle_cash_recommendations",
     "interaction_sessions",
     "interaction_requests",
     "interaction_tasks",

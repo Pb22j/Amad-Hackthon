@@ -16,6 +16,16 @@ models:
     timeout_seconds: 15
     max_retries: 1
     required_capabilities: [structured_output, async]
+  financial_advisor:
+    provider: openrouter
+    model: openai/gpt-4.1-mini
+    temperature: 0
+    timeout_seconds: 45
+    max_retries: 2
+    required_capabilities: [tool_calling, structured_output, async]
+    fallback_roles: []
+    input_cost_per_million: 0
+    output_cost_per_million: 0
   guardrail:
     provider: openrouter
     model: openai/gpt-4.1-mini

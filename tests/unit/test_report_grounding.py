@@ -115,3 +115,32 @@ def test_ungrounded_reply_suggestion_is_removed_without_dropping_report():
     assert sanitized.interaction_context.suggested_next_steps == [
         "Ask to view your balance."
     ]
+    assert sanitized.warnings == ["numeric_claims_removed"]
+
+
+def test_completed_arabic_report_uses_truthful_fallback_when_summary_is_removed(caplog):
+    report = AgentReport(
+        status="completed",
+        summary="إجمالي غير موثق 999 ريال.",
+        interaction_context={
+            "response_kind": "outcome",
+            "user_goal": "معرفة التقرير الشهري",
+            "key_facts": ["إجمالي المدفوعات الموثق 100 ريال."],
+            "suggested_next_steps": [],
+        },
+    )
+
+    sanitized = _sanitize_report_number_grounding(
+        report,
+        original_request="اعرض تقريري الشهري",
+        executions=[execution(result={"data": {"total_paid_sar": "100.00"}})],
+        language="ar",
+    )
+
+    assert sanitized.status == "completed"
+    assert sanitized.summary == "تم إعداد التقرير بنجاح. تظهر التفاصيل الموثقة أدناه."
+    assert sanitized.interaction_context.key_facts == [
+        "إجمالي المدفوعات الموثق 100 ريال."
+    ]
+    assert sanitized.warnings == ["numeric_claims_removed"]
+    assert "999" in caplog.text

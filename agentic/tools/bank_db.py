@@ -150,13 +150,9 @@ def _account_search_phrase(value: str) -> str:
     )
 
 
-def _account_search_labels(account: BankRow) -> tuple[str, ...]:
+def _spoken_name_labels(*values: Any) -> tuple[str, ...]:
     labels: list[str] = []
-    for value in (
-        account["account_type"],
-        account["bank_name_ar"],
-        account["bank_name_en"],
-    ):
+    for value in values:
         rendered = str(value or "").strip()
         if not rendered:
             continue
@@ -167,10 +163,69 @@ def _account_search_labels(account: BankRow) -> tuple[str, ...]:
             compact = identifying.replace(" ", "")
             if compact != identifying:
                 labels.append(compact)
-            labels.extend(identifying.split())
+            for token in identifying.split():
+                labels.append(token)
+                # Arabic speech-to-text commonly emits a bank name without
+                # the definite article ("Ahli" / "اهلي") even when the
+                # canonical label stores it as "الأهلي". Derive that spoken
+                # alias from authoritative bank data instead of maintaining a
+                # bank-specific alias table.
+                if token.startswith("ال") and len(token) > 4:
+                    labels.append(token[2:])
+    return tuple(dict.fromkeys(labels))
+
+
+def _account_search_labels(account: BankRow) -> tuple[str, ...]:
+    labels = list(
+        _spoken_name_labels(
+            account["account_type"],
+            account["bank_name_ar"],
+            account["bank_name_en"],
+        )
+    )
     account_number = str(account["account_number"])
     labels.extend((masked_account_number(account_number), account_number[-4:]))
     return tuple(dict.fromkeys(labels))
+
+
+def text_mentions_known_bank(connection: BankConnection, text: str) -> bool:
+    """Detect a spoken bank reference without exposing another user's accounts."""
+
+    tokens = normalize_entity_text(text).split()
+    if not tokens:
+        return False
+    account_words = {
+        "account", "bank", "checking", "current", "savings",
+        "بنك", "مصرف", "حساب", "حسابي", "جاري", "توفير",
+    }
+    if account_words.intersection(tokens):
+        return True
+    banks = connection.execute(
+        """
+        SELECT DISTINCT bank_name_ar, bank_name_en
+          FROM bank_accounts
+         WHERE bank_name_ar IS NOT NULL OR bank_name_en IS NOT NULL
+        """
+    ).fetchall()
+    checked = 0
+    for width in range(1, min(4, len(tokens)) + 1):
+        for start in range(0, len(tokens) - width + 1):
+            phrase = " ".join(tokens[start : start + width])
+            if not any(character.isalpha() for character in phrase):
+                continue
+            checked += 1
+            if checked > 120:
+                return False
+            resolution = resolve_entity(
+                phrase,
+                banks,
+                labels=lambda bank: _spoken_name_labels(
+                    bank["bank_name_ar"], bank["bank_name_en"]
+                ),
+            )
+            if resolution.match is not None or resolution.candidates:
+                return True
+    return False
 
 
 def user_accounts(connection: BankConnection, username: str) -> list[BankRow]:
@@ -328,6 +383,8 @@ def _ensure_ready(url: str) -> None:
         connection = BankConnection(url)
         try:
             connection.execute("SELECT nafi_balance FROM users LIMIT 1")
+            connection.execute("SELECT 1 FROM nafi_savings_accounts LIMIT 1")
+            connection.execute("SELECT 1 FROM idle_cash_recommendations LIMIT 1")
             connection.execute("SELECT 1 FROM bank_accounts LIMIT 1")
             connection.execute("SELECT 1 FROM transactions LIMIT 1")
             connection.execute("SELECT 1 FROM financial_operation_results LIMIT 1")
@@ -355,6 +412,10 @@ async def run_in_bank_db(work: Callable[[BankConnection], T]) -> T:
 _USER_ACCOUNT_PROJECTION = """
     SELECT u.uuid, u.username, u.full_name_ar, u.full_name_en, u.nafi_iban,
            u.nafi_balance, u.daily_spend_limit_sar,
+           (SELECT COALESCE(SUM(s.balance_sar), 0)
+              FROM nafi_savings_accounts s
+             WHERE s.user_uuid = u.uuid AND s.account_type = 'liquid')
+             AS nafi_liquid_savings_balance,
            a.uuid AS account_uuid, a.account_number, a.account_type AS account_type_ar,
            a.bank_name_ar, a.bank_name_en, a.balance_sar,
            (SELECT COALESCE(SUM(total.balance_sar), 0)

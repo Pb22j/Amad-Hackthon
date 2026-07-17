@@ -40,6 +40,14 @@ class WalletFundingArgs(BaseModel):
     amount: float
 
 
+class NoArgs(BaseModel):
+    pass
+
+
+class AnalysisArgs(BaseModel):
+    view: int
+
+
 async def add_task(database, *, task_id: str = "task-1") -> None:
     async with database.session() as session:
         session.add(
@@ -198,6 +206,310 @@ async def test_unknown_request_has_deterministic_guidance_when_support_model_fai
     context = result["final_report"]["interaction_context"]
     assert context["response_kind"] == "guidance"
     assert context["suggested_next_steps"]
+
+
+@pytest.mark.integration
+async def test_financial_advisor_subagent_can_use_all_reads_but_no_actions(
+    database, app_config
+):
+    await add_task(database)
+    executed: list[str] = []
+
+    async def read_cash_flow() -> dict[str, Any]:
+        executed.append("read_cash_flow")
+        return {
+            "status": "completed",
+            "summary": "Cash flow retrieved.",
+            "data": {"monthly_surplus_sar": "1200.00"},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    async def read_portfolio() -> dict[str, Any]:
+        executed.append("read_portfolio")
+        return {
+            "status": "completed",
+            "summary": "Portfolio retrieved.",
+            "data": {"portfolio_value_sar": "8000.00"},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    async def transfer_money(amount: int, destination: str) -> dict[str, Any]:
+        executed.append("transfer_money")
+        return {
+            "status": "completed",
+            "summary": "Transfer completed.",
+            "data": {},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+            "receipt_id": "should-never-exist",
+        }
+
+    cash_flow_tool = StructuredTool.from_function(
+        coroutine=read_cash_flow,
+        name="read_cash_flow",
+        description="Read the authenticated user's cash flow.",
+        args_schema=NoArgs,
+    )
+    portfolio_tool = StructuredTool.from_function(
+        coroutine=read_portfolio,
+        name="read_portfolio",
+        description="Read the authenticated user's investment portfolio.",
+        args_schema=NoArgs,
+    )
+    transfer_tool = StructuredTool.from_function(
+        coroutine=transfer_money,
+        name="transfer_money",
+        description="Transfer money.",
+        args_schema=TransferArgs,
+    )
+    advisor = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "read_cash_flow",
+                        "args": {},
+                        "id": "advisor-cash-flow",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "read_portfolio",
+                        "args": {},
+                        "id": "advisor-portfolio",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+            report_message(
+                summary="Keep the purchase within your monthly surplus.",
+                result={"recommendation": "Save first, then reconsider the purchase."},
+                interaction_context={
+                    "response_kind": "guidance",
+                    "user_goal": "Decide whether to make a purchase",
+                    "key_facts": ["Cash flow and investments were reviewed."],
+                    "suggested_next_steps": ["Choose whether to follow the recommendation."],
+                },
+            ),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=ScriptedChatModel(responses=[]),
+        advisor_model=advisor,
+        classifier_model=StaticClassifier(
+            Intent.FINANCIAL_ADVICE,
+            related_intents=(Intent.MONEY_TRANSFER,),
+        ),
+        external_tools=[cash_flow_tool, portfolio_tool, transfer_tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="read_cash_flow",
+                risk=ToolRisk.SENSITIVE_READ,
+                intents=frozenset({Intent.ACCOUNT_INFORMATION.value}),
+                required_scopes=frozenset({"financial:read"}),
+            ),
+            ToolMetadata(
+                name="read_portfolio",
+                risk=ToolRisk.SENSITIVE_READ,
+                intents=frozenset({Intent.INVESTMENT_RESEARCH.value}),
+                required_scopes=frozenset({"financial:read"}),
+            ),
+            ToolMetadata(
+                name="transfer_money",
+                risk=ToolRisk.FINANCIAL_ACTION,
+                intents=frozenset({Intent.MONEY_TRANSFER.value}),
+                explicit_user_fields=frozenset({"amount", "destination"}),
+                required_scopes=frozenset({"financial:write"}),
+                requires_confirmation=True,
+                requires_receipt=True,
+            ),
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state("Should I transfer money for this purchase, or save it?"),
+        config={"configurable": {"thread_id": "advisor-read-only"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert set(result["available_tools"]) == {"read_cash_flow", "read_portfolio"}
+    assert set(executed) == {"read_cash_flow", "read_portfolio"}
+    assert "transfer_money" not in executed
+    report = result["final_report"]
+    assert report["actions"] == []
+    assert report["receipt_ids"] == []
+    assert report["result"]["advisory_only"] is True
+    assert report["result"]["action_taken"] is False
+    assert report["interaction_context"]["response_kind"] == "guidance"
+
+
+@pytest.mark.integration
+async def test_financial_advisor_allows_six_reads_then_blocks_and_responds(
+    database, app_config
+):
+    await add_task(database)
+    calls: list[int] = []
+
+    async def analyze_finances(view: int) -> dict[str, Any]:
+        calls.append(view)
+        return {
+            "status": "completed",
+            "summary": f"Analysis view {view} retrieved.",
+            "data": {"view": view},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    analysis_tool = StructuredTool.from_function(
+        coroutine=analyze_finances,
+        name="analyze_finances",
+        description="Analyze authenticated financial data.",
+        args_schema=AnalysisArgs,
+    )
+    advisor = ScriptedChatModel(
+        responses=[
+            *[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "analyze_finances",
+                            "args": {"view": index},
+                            "id": f"advisor-analysis-{index}",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+                for index in range(7)
+            ],
+            report_message(
+                summary="Recommendation prepared from the completed analysis.",
+                interaction_context={
+                    "response_kind": "guidance",
+                    "user_goal": "Get financial advice",
+                    "key_facts": ["Six analysis views completed."],
+                    "suggested_next_steps": ["Choose whether to follow the recommendation."],
+                },
+            ),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=ScriptedChatModel(responses=[]),
+        advisor_model=advisor,
+        classifier_model=StaticClassifier(Intent.FINANCIAL_ADVICE),
+        external_tools=[analysis_tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="analyze_finances",
+                risk=ToolRisk.SENSITIVE_READ,
+                intents=frozenset({Intent.FINANCIAL_ADVICE.value}),
+                required_scopes=frozenset({"financial:read"}),
+                max_calls_per_task=3,
+            )
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state("Advise me about my finances"),
+        config={"configurable": {"thread_id": "advisor-six-read-limit"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert calls == list(range(6))
+    assert result["status"] == "completed"
+    assert result["final_report"]["summary"] == (
+        "Recommendation prepared from the completed analysis."
+    )
+    assert result["final_report"]["actions"] == []
+    assert result["final_report"]["result"]["action_taken"] is False
+
+
+@pytest.mark.integration
+async def test_financial_advisor_has_deterministic_guidance_when_report_recovery_fails(
+    database, app_config
+):
+    await add_task(database)
+    advisor = ScriptedChatModel(responses=[AIMessage(content="Analysis stopped early.")])
+    graph = build_financial_agent(
+        primary_model=ScriptedChatModel(responses=[]),
+        advisor_model=advisor,
+        classifier_model=StaticClassifier(Intent.FINANCIAL_ADVICE),
+        external_tools=[],
+        tool_metadata=[],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await graph.ainvoke(
+        state("Advise me about my finances"),
+        config={"configurable": {"thread_id": "advisor-recovery-fallback"}},
+        context=runtime_context(database, app_config),
+    )
+
+    assert result["status"] == "completed"
+    report = result["final_report"]
+    assert report["warnings"] == ["advisor_response_limited"]
+    assert report["actions"] == []
+    assert report["receipt_ids"] == []
+    assert report["result"]["action_taken"] is False
+    assert report["interaction_context"]["suggested_next_steps"]
+
+
+@pytest.mark.integration
+async def test_financial_advisor_rejects_output_that_claims_an_action(database, app_config):
+    await add_task(database)
+
+    advisor = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "AgentReport",
+                        "args": {
+                            "status": "completed",
+                            "summary": "I executed the recommendation.",
+                            "actions": ["Transferred money"],
+                            "result": {},
+                            "warnings": [],
+                            "receipt_ids": [],
+                            "needs_follow_up": False,
+                            "interaction_context": {
+                                "response_kind": "outcome",
+                                "user_goal": "Get advice",
+                                "key_facts": [],
+                                "suggested_next_steps": [],
+                            },
+                        },
+                        "id": "unsafe-advisor-report",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=ScriptedChatModel(responses=[]),
+        advisor_model=advisor,
+        classifier_model=StaticClassifier(Intent.FINANCIAL_ADVICE),
+        external_tools=[],
+        tool_metadata=[],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+
+    with pytest.raises(ValueError, match="must not report executed actions"):
+        await graph.ainvoke(
+            state("Advise me about my finances"),
+            config={"configurable": {"thread_id": "advisor-output-policy"}},
+            context=runtime_context(database, app_config),
+        )
 
 
 @pytest.mark.integration
@@ -1019,6 +1331,128 @@ async def test_wallet_funding_preflights_then_requires_exact_confirmation(
         ("execute", ("user-1", "tenant-1")),
     ]
     assert result["final_report"]["receipt_ids"] == ["receipt-wallet-funding"]
+
+
+@pytest.mark.integration
+@pytest.mark.security
+async def test_idle_cash_transfer_binds_confirmation_to_server_recommendation(
+    database, app_config, monkeypatch
+):
+    await add_task(database)
+    observed: list[tuple[str, tuple[str, str] | None]] = []
+    confirmation_arguments = {
+        "recommendation_id": "recommendation-1",
+        "amount_sar": "1250.00",
+        "source": "Nafi Wallet",
+        "destination": "Nafi Liquid Savings",
+        "emergency_reserve_target_sar": "18000.00",
+    }
+
+    async def preflight_transfer_idle_cash_to_savings() -> dict[str, Any]:
+        observed.append(("preflight", current_tool_identity()))
+        return {
+            "status": "completed",
+            "summary": "Recommendation is eligible",
+            "data": {"confirmation_arguments": confirmation_arguments},
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+
+    async def transfer_idle_cash_to_savings() -> dict[str, Any]:
+        observed.append(("execute", current_tool_identity()))
+        return {
+            "status": "completed",
+            "summary": "Moved 1250.00 SAR to Nafi Liquid Savings",
+            "data": {
+                "amount_sar": "1250.00",
+                "new_nafi_wallet_balance_sar": "8750.00",
+                "new_nafi_liquid_savings_balance_sar": "1250.00",
+                "linked_bank_accounts_changed": False,
+            },
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+            "receipt_id": "receipt-idle-cash",
+        }
+
+    monkeypatch.setattr(
+        "agentic.tools.idle_cash.preflight_transfer_idle_cash_to_savings",
+        preflight_transfer_idle_cash_to_savings,
+    )
+    tool = StructuredTool.from_function(
+        coroutine=transfer_idle_cash_to_savings,
+        name="transfer_idle_cash_to_savings",
+        description="Move the active idle-cash recommendation within Nafi.",
+        args_schema=NoArgs,
+    )
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "transfer_idle_cash_to_savings",
+                        "args": {},
+                        "id": "idle-cash-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            report_message(
+                summary="Moved 1250.00 SAR to Nafi Liquid Savings",
+                receipt_ids=["receipt-idle-cash"],
+            ),
+        ]
+    )
+    graph = build_financial_agent(
+        primary_model=model,
+        classifier_model=StaticClassifier(Intent.IDLE_CASH_TRANSFER),
+        external_tools=[tool],
+        tool_metadata=[
+            ToolMetadata(
+                name="transfer_idle_cash_to_savings",
+                risk=ToolRisk.FINANCIAL_ACTION,
+                intents=frozenset({Intent.IDLE_CASH_TRANSFER.value}),
+                required_scopes=frozenset({"financial:write"}),
+                requires_confirmation=True,
+                requires_receipt=True,
+                idempotent=True,
+            )
+        ],
+        config=app_config,
+        checkpointer=InMemorySaver(),
+    )
+    graph_config = {"configurable": {"thread_id": "idle-cash-transfer"}}
+    context = runtime_context(database, app_config)
+    context.original_request = "Yes, move the recommended idle cash"
+
+    interrupted = await graph.ainvoke(
+        state(context.original_request), config=graph_config, context=context
+    )
+    confirmation = interrupted["__interrupt__"][0].value
+    assert confirmation["kind"] == "confirmation"
+    assert confirmation["arguments"] == confirmation_arguments
+
+    token = context.confirmation_signer.issue(
+        auth=context.auth,
+        task_id="task-1",
+        tool_name="transfer_idle_cash_to_savings",
+        arguments=confirmation_arguments,
+    )
+    context.otp_verified = True
+    result = await graph.ainvoke(
+        Command(resume=token), config=graph_config, context=context
+    )
+
+    assert observed[-1] == ("execute", ("user-1", "tenant-1"))
+    assert result["final_report"]["receipt_ids"] == ["receipt-idle-cash"]
+    async with database.session() as session:
+        execution = await session.scalar(
+            select(ToolExecutionRow).where(
+                ToolExecutionRow.tool_name == "transfer_idle_cash_to_savings"
+            )
+        )
+    assert execution is not None
+    assert execution.arguments == confirmation_arguments
 
 
 @pytest.mark.integration

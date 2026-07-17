@@ -122,12 +122,14 @@ def test_default_lifespan_builds_runtime(monkeypatch, app_config):
         def create(self, role):
             if role == "primary":
                 return ScriptedChatModel(responses=[report_message()])
+            if role == "financial_advisor":
+                return ScriptedChatModel(responses=[report_message()])
             if role == "intent_classifier":
                 return StaticClassifier(Intent.ACCOUNT_INFORMATION)
             return MemoryModel()
 
         def create_fallbacks(self, role):
-            assert role == "primary"
+            assert role in {"primary", "financial_advisor"}
             return []
 
     monkeypatch.setattr("agentic.api.app.postgres_checkpointer", fake_checkpointer)

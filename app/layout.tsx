@@ -1,36 +1,18 @@
 import type { Metadata, Viewport } from "next";
-import { Inter } from "next/font/google";
-
+import { Providers } from "@/components/providers";
 import "./globals.css";
-import { Providers } from "@/components/layout/providers";
-
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-inter",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
-  title: {
-    default: "Nafi — Voice-First AI Financial Assistant",
-    template: "%s · Nafi",
-  },
-  description:
-    "Nafi consolidates your accounts via Open Banking and answers with a voice-first AI advisor.",
+  title: { default: "Nafi — Money, made clear", template: "%s · Nafi" },
+  description: "A clear, secure financial home with a bilingual text and voice assistant.",
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0d1119",
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#f6f7f4",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{ children: React.ReactNode }>) {
-  return (
-    <html lang="en" className={inter.variable} data-scroll-behavior="smooth">
-      <body className="font-sans">
-        <Providers>{children}</Providers>
-      </body>
-    </html>
-  );
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  return <html lang="en"><body><Providers>{children}</Providers></body></html>;
 }

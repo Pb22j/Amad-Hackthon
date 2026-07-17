@@ -39,20 +39,24 @@ code owns identity, authorization, confirmation, isolation, persistence, and rep
 6. Truly unknown requests route to a tool-free support responder. A recognized intent reaches the
    reasoning agent even when classifier confidence is low, where it can resolve the request from
    context or ask one precise question. The support path retains a deterministic localized fallback.
-7. The bounded inner agent sees only tools registered for the classified primary and related
+7. Financial-advice requests route to a separate advisory sub-agent. It can use all authenticated
+   read capabilities needed to understand the decision, but policy removes every write, financial
+   action, confirmation-bearing, and receipt-bearing capability. Mixed advice/action requests stay
+   recommendation-only and require a separate later action request.
+8. The bounded action agent sees only tools registered for the classified primary and related
    intents. Middleware injects a trusted task brief containing the advisory classification,
    selected capability descriptions, evidence rules, and a compact execution protocol. Model-call,
    tool-call, clarification, and per-tool limits remain deterministic middleware controls.
-8. Every external tool has already been replaced with a guarded wrapper. The wrapper checks trusted
+9. Every external tool has already been replaced with a guarded wrapper. The wrapper checks trusted
    scopes, exact confirmation, idempotency, ownership, receipts, output size, and safe retries.
-9. Missing information or confirmation produces a LangGraph interrupt. The service persists the
+10. Missing information or confirmation produces a LangGraph interrupt. The service persists the
    state transition and outbound event in one transaction. A background outbox worker retries
    signed webhook delivery in task order until the interaction layer acknowledges it.
-10. `POST /agentic/tasks/{task_id}/resume` verifies the same task/user/tenant/session relationship and
+11. `POST /agentic/tasks/{task_id}/resume` verifies the same task/user/tenant/session relationship and
    resumes with a clarification answer or the exact authorization token plus dedicated demo OTP.
    Signed prior-user statements and the interaction summary are stored encrypted with the task and
    restored into both the model context and guarded argument-provenance checks after every resume.
-11. The final `AgentReport` is validated against authoritative tool executions before it is stored
+12. The final `AgentReport` is validated against authoritative tool executions before it is stored
     and emitted. It includes typed `interaction_context` containing the understood goal, safe key
     facts, and suggested next steps. A financial action cannot be reported as completed without its
     receipt.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any
 from uuid import uuid4
 
@@ -51,6 +51,206 @@ def _percent(numerator: Decimal, denominator: Decimal) -> float:
     return float((numerator / denominator * Decimal("100")).quantize(Decimal("0.1")))
 
 
+def _allocation_percentages(values: list[Decimal], total: Decimal) -> list[float]:
+    """Round allocations to one decimal while preserving an exact 100.0 total."""
+
+    if total <= 0 or not values:
+        return [0.0 for _ in values]
+    rounded = [
+        (value / total * Decimal("100")).quantize(Decimal("0.1"))
+        for value in values
+    ]
+    remainder = Decimal("100.0") - sum(rounded, start=Decimal("0"))
+    largest_index = max(range(len(values)), key=values.__getitem__)
+    rounded[largest_index] += remainder
+    return [float(value) for value in rounded]
+
+
+def calculate_portfolio_analytics(
+    holdings: list[tuple[str, str, str, Decimal]],
+    *,
+    portfolio_value: Decimal,
+    supported_asset_count: int,
+) -> dict[str, Any]:
+    """Return deterministic allocation and concentration analytics.
+
+    The diversification score is a normalized Herfindahl-Hirschman index over
+    the supported investment universe. It is 0 for a single-position portfolio
+    and 100 for an equal allocation across every supported asset.
+    """
+
+    if portfolio_value <= 0 or not holdings:
+        return {
+            "diversification_score": 0,
+            "diversification_level": "focused",
+            "largest_holding_percent": 0.0,
+            "sector_allocations": [],
+        }
+
+    weights = [market_value / portfolio_value for _, _, _, market_value in holdings]
+    largest_holding_percent = _percent(max(market_value for *_, market_value in holdings), portfolio_value)
+    hhi = sum((weight * weight for weight in weights), start=Decimal("0"))
+    universe_size = max(supported_asset_count, len(holdings), 1)
+    max_diversification = Decimal("1") - (Decimal("1") / Decimal(universe_size))
+    raw_score = (
+        (Decimal("1") - hhi) / max_diversification * Decimal("100")
+        if max_diversification > 0
+        else Decimal("0")
+    )
+    diversification_score = int(
+        max(Decimal("0"), min(Decimal("100"), raw_score)).quantize(Decimal("1"))
+    )
+    if diversification_score >= 75:
+        diversification_level = "diversified"
+    elif diversification_score >= 45:
+        diversification_level = "balanced"
+    else:
+        diversification_level = "focused"
+
+    sectors: dict[str, dict[str, Any]] = {}
+    for sector, sector_name, sector_name_ar, market_value in holdings:
+        entry = sectors.setdefault(
+            sector,
+            {
+                "sector": sector,
+                "name": sector_name,
+                "name_ar": sector_name_ar,
+                "market_value": Decimal("0"),
+            },
+        )
+        entry["market_value"] += market_value
+
+    sorted_sectors = sorted(
+        sectors.values(), key=lambda item: item["market_value"], reverse=True
+    )
+    sector_percentages = _allocation_percentages(
+        [entry["market_value"] for entry in sorted_sectors], portfolio_value
+    )
+
+    return {
+        "diversification_score": diversification_score,
+        "diversification_level": diversification_level,
+        "largest_holding_percent": largest_holding_percent,
+        "sector_allocations": [
+            {
+                "sector": entry["sector"],
+                "name": entry["name"],
+                "name_ar": entry["name_ar"],
+                "market_value_sar": _money(entry["market_value"]),
+                "weight_percent": sector_percentages[index],
+            }
+            for index, entry in enumerate(sorted_sectors)
+        ],
+    }
+
+
+def calculate_investment_projection(
+    *,
+    starting_value: Decimal,
+    monthly_contribution: Decimal,
+    years: int,
+    annual_return_percent: Decimal = Decimal("7.0"),
+    one_time_contribution: Decimal = Decimal("0"),
+    inflation_percent: Decimal = Decimal("2.5"),
+    target_amount: Decimal | None = None,
+) -> dict[str, Any]:
+    """Project custom cash flows using effective annual return and inflation."""
+
+    if starting_value < 0 or monthly_contribution < 0 or one_time_contribution < 0:
+        raise ValueError("Investment projection amounts cannot be negative")
+    if years < 1 or years > 50:
+        raise ValueError("Investment projection horizon must be between 1 and 50 years")
+    if annual_return_percent < Decimal("-20") or annual_return_percent > Decimal("30"):
+        raise ValueError("Annual return assumption must be between -20 and 30 percent")
+    if inflation_percent < 0 or inflation_percent > Decimal("20"):
+        raise ValueError("Inflation assumption must be between 0 and 20 percent")
+    if target_amount is not None and target_amount <= 0:
+        raise ValueError("Investment target must be greater than zero")
+
+    months = years * 12
+    with localcontext() as context:
+        context.prec = 34
+        invested_starting_value = starting_value + one_time_contribution
+        annual_factor = Decimal("1") + annual_return_percent / Decimal("100")
+        monthly_rate = annual_factor ** (Decimal("1") / Decimal("12")) - Decimal("1")
+
+        def value_at(month: int) -> Decimal:
+            growth_factor = (Decimal("1") + monthly_rate) ** month
+            contribution_value = (
+                monthly_contribution * (growth_factor - Decimal("1")) / monthly_rate
+                if monthly_rate != 0
+                else monthly_contribution * month
+            )
+            return invested_starting_value * growth_factor + contribution_value
+
+        projected_value = value_at(months)
+        total_contributions = invested_starting_value + monthly_contribution * months
+        estimated_growth = projected_value - total_contributions
+        inflation_factor = (
+            Decimal("1") + inflation_percent / Decimal("100")
+        ) ** years
+        inflation_adjusted_value = projected_value / inflation_factor
+        target_gap = (
+            max(Decimal("0"), target_amount - projected_value)
+            if target_amount is not None
+            else None
+        )
+        target_surplus = (
+            max(Decimal("0"), projected_value - target_amount)
+            if target_amount is not None
+            else None
+        )
+        if target_amount is not None:
+            ending_factor = (Decimal("1") + monthly_rate) ** months
+            amount_needed_from_monthly = max(
+                Decimal("0"), target_amount - invested_starting_value * ending_factor
+            )
+            required_monthly_contribution = (
+                amount_needed_from_monthly * monthly_rate / (ending_factor - Decimal("1"))
+                if monthly_rate != 0
+                else amount_needed_from_monthly / months
+            )
+        else:
+            required_monthly_contribution = None
+        milestones = []
+        for index in range(1, 13):
+            milestone_month = max(1, round(index / 12 * months))
+            milestones.append(
+                {
+                    "month": milestone_month,
+                    "value_sar": _money(value_at(milestone_month)),
+                    "contributions_sar": _money(
+                        invested_starting_value
+                        + monthly_contribution * milestone_month
+                    ),
+                }
+            )
+
+    return {
+        "starting_value_sar": _money(starting_value),
+        "one_time_contribution_sar": _money(one_time_contribution),
+        "monthly_contribution_sar": _money(monthly_contribution),
+        "years": years,
+        "annual_return_percent": float(annual_return_percent),
+        "inflation_percent": float(inflation_percent),
+        "contribution_timing": "end_of_month",
+        "projected_value_sar": _money(projected_value),
+        "inflation_adjusted_value_sar": _money(inflation_adjusted_value),
+        "total_contributions_sar": _money(total_contributions),
+        "estimated_growth_sar": _money(estimated_growth),
+        "target_amount_sar": _money(target_amount) if target_amount is not None else None,
+        "target_gap_sar": _money(target_gap) if target_gap is not None else None,
+        "target_surplus_sar": _money(target_surplus) if target_surplus is not None else None,
+        "target_achieved": projected_value >= target_amount if target_amount is not None else None,
+        "required_monthly_contribution_sar": (
+            _money(required_monthly_contribution)
+            if required_monthly_contribution is not None
+            else None
+        ),
+        "milestones": milestones,
+    }
+
+
 def _masked_account(account_number: str) -> str:
     normalized = "".join(account_number.split())
     if len(normalized) <= 8:
@@ -85,6 +285,26 @@ class DashboardStore:
         if not normalized.startswith("postgresql://"):
             raise ValueError("DashboardStore requires a PostgreSQL URL")
         self.database_url = normalized
+
+    def user_identity(self, *, user_id: str, tenant_id: str) -> dict[str, str]:
+        """Return the authenticated customer's canonical, server-owned names."""
+
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            user = connection.execute(
+                """
+                SELECT full_name_ar, full_name_en
+                  FROM users
+                 WHERE username = %s
+                 LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+        if user is None:
+            raise LookupError("Authenticated customer profile was not found")
+        return {
+            "full_name_ar": str(user["full_name_ar"] or "").strip(),
+            "full_name_en": str(user["full_name_en"] or "").strip(),
+        }
 
     def preview_wallet_deposit(
         self,
@@ -284,7 +504,11 @@ class DashboardStore:
             user = connection.execute(
                 """
                 SELECT uuid::text AS id, username::text, full_name_ar, full_name_en,
-                       nafi_iban, nafi_balance
+                       nafi_iban, nafi_balance,
+                       (SELECT COALESCE(SUM(s.balance_sar), 0)
+                          FROM nafi_savings_accounts s
+                         WHERE s.user_uuid = users.uuid
+                           AND s.account_type = 'liquid') AS nafi_liquid_savings_balance
                 FROM users
                 WHERE username = %s
                 LIMIT 1
@@ -303,13 +527,24 @@ class DashboardStore:
 
             holdings = connection.execute(
                 """
-                SELECT h.symbol, h.quantity, h.average_cost_sar, a.name, a.price_sar
+                SELECT h.symbol, h.quantity, h.average_cost_sar, a.name, a.price_sar,
+                       a.asset_class, a.exchange, a.currency_code, a.updatedat,
+                       a.sector, a.sector_name, a.sector_name_ar
                 FROM investment_holdings h
                 JOIN investment_assets a ON a.symbol = h.symbol
                 WHERE h.user_uuid = %s AND h.quantity > 0 AND a.status = 'active'
                 ORDER BY h.symbol
                 """,
                 (user["id"],),
+            ).fetchall()
+            investment_assets = connection.execute(
+                """
+                SELECT symbol, name, asset_class, exchange, currency_code,
+                       price_sar, updatedat, sector, sector_name, sector_name_ar
+                FROM investment_assets
+                WHERE status = 'active'
+                ORDER BY symbol
+                """
             ).fetchall()
             transactions = connection.execute(
                 """
@@ -351,7 +586,10 @@ class DashboardStore:
                 SELECT
                   COALESCE(SUM(amount_sar) FILTER (
                     WHERE direction = 'debit'
-                      AND transaction_type != 'nafi_top_up_source'
+                      AND transaction_type NOT IN (
+                        'nafi_top_up_source', 'nafi_liquid_savings_debit',
+                        'nafi_liquid_savings_credit'
+                      )
                       AND createdat >= date_trunc('month', CURRENT_TIMESTAMP)
                   ), 0) AS monthly_spend_sar,
                   (SELECT COUNT(*) FROM fatoorahs
@@ -382,9 +620,26 @@ class DashboardStore:
             holding_values.append((holding, market_value, cost_value))
 
         wallet_balance = Decimal(str(user["nafi_balance"]))
+        liquid_savings_balance = Decimal(str(user["nafi_liquid_savings_balance"]))
         portfolio_gain = portfolio_value - portfolio_cost
-        net_worth = balance + wallet_balance + portfolio_value
-        net_basis = balance + wallet_balance + portfolio_cost
+        holding_weight_percentages = _allocation_percentages(
+            [market_value for _, market_value, _ in holding_values], portfolio_value
+        )
+        portfolio_analytics = calculate_portfolio_analytics(
+            [
+                (
+                    str(holding["sector"]),
+                    str(holding["sector_name"]),
+                    str(holding["sector_name_ar"]),
+                    market_value,
+                )
+                for holding, market_value, _ in holding_values
+            ],
+            portfolio_value=portfolio_value,
+            supported_asset_count=len(investment_assets),
+        )
+        net_worth = balance + wallet_balance + liquid_savings_balance + portfolio_value
+        net_basis = balance + wallet_balance + liquid_savings_balance + portfolio_cost
         account_views = [
             {
                 "id": account["id"],
@@ -444,20 +699,51 @@ class DashboardStore:
             "wallet": {
                 "nafi_iban": user["nafi_iban"],
                 "balance_sar": _money(user["nafi_balance"]),
+                "liquid_savings_balance_sar": _money(liquid_savings_balance),
             },
             "accounts": account_views,
             "portfolio": {
                 "value_sar": _money(portfolio_value),
+                "cost_basis_sar": _money(portfolio_cost),
+                "unrealized_gain_sar": _money(portfolio_gain),
                 "total_return_percent": _percent(portfolio_gain, portfolio_cost),
+                "analytics": portfolio_analytics,
                 "holdings": [
                     {
                         "ticker": holding["symbol"],
                         "name": holding["name"],
                         "name_ar": _ASSET_NAMES_AR.get(holding["symbol"], holding["name"]),
-                        "weight_percent": _percent(market_value, portfolio_value),
+                        "asset_class": holding["asset_class"],
+                        "exchange": holding["exchange"],
+                        "currency_code": holding["currency_code"],
+                        "sector": holding["sector"],
+                        "sector_name": holding["sector_name"],
+                        "sector_name_ar": holding["sector_name_ar"],
+                        "quantity": format(Decimal(str(holding["quantity"])).normalize(), "f"),
+                        "price_sar": _money(holding["price_sar"]),
+                        "average_cost_sar": _money(holding["average_cost_sar"]),
+                        "market_value_sar": _money(market_value),
+                        "unrealized_gain_sar": _money(market_value - cost_value),
+                        "weight_percent": holding_weight_percentages[index],
                         "return_percent": _percent(market_value - cost_value, cost_value),
                     }
-                    for holding, market_value, cost_value in holding_values
+                    for index, (holding, market_value, cost_value) in enumerate(holding_values)
+                ],
+                "supported_assets": [
+                    {
+                        "ticker": asset["symbol"],
+                        "name": asset["name"],
+                        "name_ar": _ASSET_NAMES_AR.get(asset["symbol"], asset["name"]),
+                        "asset_class": asset["asset_class"],
+                        "exchange": asset["exchange"],
+                        "currency_code": asset["currency_code"],
+                        "sector": asset["sector"],
+                        "sector_name": asset["sector_name"],
+                        "sector_name_ar": asset["sector_name_ar"],
+                        "price_sar": _money(asset["price_sar"]),
+                        "updated_at": asset["updatedat"].isoformat(),
+                    }
+                    for asset in investment_assets
                 ],
             },
             "activity": {
@@ -480,3 +766,44 @@ class DashboardStore:
                 for recipient in recipients
             ],
         }
+
+    def investment_projection(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        monthly_contribution: Decimal,
+        years: int,
+        annual_return_percent: Decimal,
+        one_time_contribution: Decimal,
+        inflation_percent: Decimal,
+        target_amount: Decimal | None,
+    ) -> dict[str, Any]:
+        """Project the authenticated customer's current portfolio and contributions."""
+
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                SELECT u.uuid::text AS id,
+                       COALESCE(SUM(h.quantity * a.price_sar), 0) AS portfolio_value_sar
+                FROM users u
+                LEFT JOIN investment_holdings h
+                  ON h.user_uuid = u.uuid AND h.quantity > 0
+                LEFT JOIN investment_assets a
+                  ON a.symbol = h.symbol AND a.status = 'active'
+                WHERE u.username = %s
+                GROUP BY u.uuid
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            raise LookupError("Authenticated customer profile was not found")
+        return calculate_investment_projection(
+            starting_value=Decimal(str(row["portfolio_value_sar"])),
+            monthly_contribution=monthly_contribution,
+            years=years,
+            annual_return_percent=annual_return_percent,
+            one_time_contribution=one_time_contribution,
+            inflation_percent=inflation_percent,
+            target_amount=target_amount,
+        )

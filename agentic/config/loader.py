@@ -43,6 +43,7 @@ class LLMConfig(StrictModel):
         missing = {
             "primary",
             "intent_classifier",
+            "financial_advisor",
             "guardrail",
             "summarizer",
             "memory_extractor",
@@ -143,6 +144,17 @@ class FinancialActionPolicy(StrictModel):
     require_authoritative_receipt: frozenset[str] = frozenset()
 
 
+class FinancialAdvisorPolicy(StrictModel):
+    """Non-configurable safety invariants for the advisory sub-agent."""
+
+    advisory_only: Literal[True] = True
+    require_authoritative_data: Literal[True] = True
+    max_calls_per_tool: int = Field(default=6, ge=1, le=20)
+    allowed_tool_risks: frozenset[Literal["read", "sensitive_read"]] = frozenset(
+        {"read", "sensitive_read"}
+    )
+
+
 class SecurityPolicy(StrictModel):
     reject_cross_user_requests: bool = True
     reject_credential_requests: bool = True
@@ -159,6 +171,7 @@ class MemoryPolicyConfig(StrictModel):
 
 class PoliciesConfig(StrictModel):
     financial_actions: FinancialActionPolicy
+    financial_advisor: FinancialAdvisorPolicy
     security: SecurityPolicy
     memory: MemoryPolicyConfig
 

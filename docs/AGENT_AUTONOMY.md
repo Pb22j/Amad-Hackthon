@@ -32,6 +32,19 @@ evidence leaves one reasonable interpretation. Otherwise it asks one field-speci
 - Tool and model budgets bound autonomous work, and duplicated reads are discouraged in the task
   brief. External tool wrappers continue to enforce least privilege and exact user provenance.
 
+## Advisory autonomy
+
+Decision-support requests use a separate financial-advisor sub-agent. It can retrieve the user's
+available authenticated read data across financial domains, use deterministic analysis for derived
+figures, compare options, and recommend one primary solution with trade-offs and user-controlled
+next steps.
+
+This sub-agent has no state-changing capabilities. The policy admits only `read` and
+`sensitive_read` metadata, excludes any capability requiring confirmation or a receipt, and rejects
+reports that claim an executed action or return a receipt. A request that mixes advice with an
+instruction to act remains advisory-only; execution requires a later explicit request routed to the
+regular guarded action agent.
+
 ## Non-negotiable limits
 
 The agent cannot infer identity, scopes, confirmation, live financial state, action success, or

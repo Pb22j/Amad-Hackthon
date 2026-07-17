@@ -27,14 +27,24 @@ FORBIDDEN_OUTPUT_PHRASES = (
 )
 
 
+def _compact_summary(summary: str, limit: int) -> str:
+    """Fit model prose to the transport limit without failing the task."""
+
+    if len(summary) <= limit:
+        return summary
+    prefix = summary[: limit - 1].rstrip()
+    word_boundary = prefix.rfind(" ")
+    if word_boundary >= limit // 2:
+        prefix = prefix[:word_boundary].rstrip()
+    return f"{prefix}…"
+
+
 class OutputPolicy:
     def __init__(self, limits: ReportLimits) -> None:
         self.limits = limits
 
     def validate(self, report: AgentReport) -> AgentReport:
         safe = AgentReport.model_validate(redact(report.model_dump(mode="json")))
-        if len(safe.summary) > self.limits.max_summary_characters:
-            raise ValueError("report summary exceeds the configured limit")
         if len(safe.actions) > self.limits.max_actions:
             raise ValueError("report contains too many actions")
         combined = json.dumps(
@@ -47,4 +57,12 @@ class OutputPolicy:
         ).lower()
         if any(phrase in combined for phrase in FORBIDDEN_OUTPUT_PHRASES):
             raise ValueError("report attempts to expose internal instructions")
-        return safe
+        if len(safe.summary) <= self.limits.max_summary_characters:
+            return safe
+        return safe.model_copy(
+            update={
+                "summary": _compact_summary(
+                    safe.summary, self.limits.max_summary_characters
+                )
+            }
+        )

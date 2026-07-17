@@ -18,6 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import JSONB
 
 from agentic.security.crypto import EncryptedJSON, EncryptedText
 
@@ -162,7 +163,7 @@ class FinancialOperationResultRow(Base):
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False)
     user_id: Mapped[str] = mapped_column(String(200), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    result: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

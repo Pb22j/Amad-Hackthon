@@ -1,12 +1,12 @@
 """``pay_fatoorah`` / ``list_fatoorahs`` — pay the user's assigned bills.
 
-Every fatoorah (bill) in the database has a purely numeric SADAD-style bill
-number and is assigned to exactly one bank customer, so a user can only see
-and pay their own bills. To pay, the user must state the **last four digits**
-of the bill number — that is how the bill is selected. Payment deducts the
-bill amount from the user's Nafi wallet (rejected if its balance cannot cover it)
-and records a ledger entry under the "فواتير" category, so it appears in the
-monthly report. Bill-payment debits count toward the customer's daily limit.
+Every fatoorah (bill) is assigned to exactly one bank customer, so a user can
+only see and pay their own bills. A bill is selected by its biller name; the
+customer never has to provide digits from the bill number. Payment deducts the
+bill amount from the user's Nafi wallet (rejected if its balance cannot cover
+it) and records a ledger entry under the "فواتير" category, so it appears in
+the monthly report. Bill-payment debits count toward the customer's daily
+limit.
 """
 
 from __future__ import annotations
@@ -31,16 +31,16 @@ from agentic.tools.bank_db import (
     tool_result,
     update_nafi_balance,
 )
+from agentic.tools.entity_resolution import normalize_entity_text, resolve_entity
 
 
 class PayFatoorahArgs(BankToolArgs):
-    last_four_digits: str = Field(
-        min_length=4,
-        max_length=4,
-        pattern=r"^[0-9]{4}$",
+    biller: str = Field(
+        min_length=1,
+        max_length=200,
         description=(
-            "The last four digits of the bill number, exactly as the user stated "
-            "them. Bill numbers are numeric only."
+            "The biller or service-provider name exactly as the user stated it, "
+            "for example الكهرباء, STC, or شركة المياه."
         ),
     )
 
@@ -60,20 +60,35 @@ def _fatoorah_view(row: BankRow) -> dict[str, Any]:
     }
 
 
-async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
-    """Pay the caller's bill selected by the last four digits of its number."""
+def _biller_labels(row: BankRow) -> tuple[str, ...]:
+    """Return safe natural-language aliases derived from a stored biller name."""
+
+    biller = str(row["Biller_Name_Ar"])
+    labels = {biller}
+    for token in normalize_entity_text(biller).split():
+        labels.add(token)
+        without_prefix = token
+        if len(without_prefix) > 3 and without_prefix[0] in {"و", "ل", "ب", "ك"}:
+            without_prefix = without_prefix[1:]
+            labels.add(without_prefix)
+        if len(without_prefix) > 4 and without_prefix.startswith("ال"):
+            labels.add(without_prefix[2:])
+    return tuple(labels)
+
+
+async def pay_fatoorah(biller: str) -> dict[str, Any]:
+    """Pay the caller's bill selected by its biller or service-provider name."""
 
     username, _ = owner_identity()
-    digits = last_four_digits.strip()
+    requested_biller = biller.strip()
 
     def work(connection: BankConnection) -> dict[str, Any]:
-        # The schema enforces four numeric digits; this guards direct calls.
-        if not (len(digits) == 4 and digits.isdigit()):
+        if not requested_biller:
             return tool_result(
                 status="failed",
-                summary="The bill must be selected by exactly four numeric digits.",
-                data={"last_four_digits": digits},
-                error_code="invalid_bill_digits",
+                summary="A biller name is required to select the fatoorah.",
+                data={"biller": requested_biller},
+                error_code="invalid_biller",
             )
 
         payer = find_user_by_username(connection, username)
@@ -84,47 +99,51 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
                 data={},
                 error_code="customer_not_found",
             )
-        # Bills are assigned to one customer; only the owner's bills match.
-        matches = connection.execute(
-            "SELECT * FROM fatoorahs"
-            " WHERE user_uuid = %s AND RIGHT(Bill_Number, 4) = %s"
-            " ORDER BY createdAt",
-            (payer["uuid"], digits),
+        # Bills are assigned to one customer; only the owner's bills are ever
+        # considered by the natural-language resolver.
+        rows = connection.execute(
+            "SELECT * FROM fatoorahs WHERE user_uuid = %s ORDER BY createdAt",
+            (payer["uuid"],),
         ).fetchall()
-        unpaid = [row for row in matches if row["status"] == "unpaid"]
-        if not unpaid:
-            if matches:
+        unpaid_resolution = resolve_entity(
+            requested_biller,
+            (row for row in rows if row["status"] == "unpaid"),
+            labels=_biller_labels,
+        )
+        if unpaid_resolution.match is None:
+            if unpaid_resolution.candidates:
+                return tool_result(
+                    status="failed",
+                    summary=(
+                        "More than one unpaid bill matches this biller; the user "
+                        "must choose a more specific biller name."
+                    ),
+                    data={
+                        "biller": requested_biller,
+                        "candidates": [_fatoorah_view(row) for row in unpaid_resolution.candidates],
+                    },
+                    error_code="ambiguous_biller",
+                )
+
+            paid_resolution = resolve_entity(
+                requested_biller,
+                (row for row in rows if row["status"] == "paid"),
+                labels=_biller_labels,
+            )
+            if paid_resolution.match is not None or paid_resolution.candidates:
                 return tool_result(
                     status="failed",
                     summary="This fatoorah is already paid.",
-                    data={"last_four_digits": digits, "status": "مدفوعة"},
+                    data={"biller": requested_biller, "status": "مدفوعة"},
                     error_code="already_paid",
                 )
             return tool_result(
                 status="failed",
-                summary=(
-                    "No bill assigned to the user ends with these four digits."
-                ),
-                data={"last_four_digits": digits},
+                summary="No bill assigned to the user matches this biller.",
+                data={"biller": requested_biller},
                 error_code="fatoorah_not_found",
             )
-        if len(unpaid) > 1:
-            return tool_result(
-                status="failed",
-                summary=(
-                    "More than one unpaid bill ends with these digits; the user "
-                    "must disambiguate by biller."
-                ),
-                data={
-                    "last_four_digits": digits,
-                    "candidates": [
-                        {"biller": row["Biller_Name_Ar"], "bill_number": row["Bill_Number"]}
-                        for row in unpaid
-                    ],
-                },
-                error_code="ambiguous_bill_digits",
-            )
-        fatoorah = unpaid[0]
+        fatoorah = unpaid_resolution.match
         amount = money(fatoorah["Amount_SAR"])
 
         balance = money(payer["nafi_balance"])
@@ -181,10 +200,7 @@ async def pay_fatoorah(last_four_digits: str) -> dict[str, Any]:
 
         return tool_result(
             status="completed",
-            summary=(
-                f"Paid the {fatoorah['Biller_Name_Ar']} fatoorah ending in {digits} "
-                f"({amount} SAR)."
-            ),
+            summary=(f"Paid the {fatoorah['Biller_Name_Ar']} fatoorah ({amount} SAR)."),
             data={
                 "bill_number": fatoorah["Bill_Number"],
                 "biller": fatoorah["Biller_Name_Ar"],
@@ -217,8 +233,7 @@ async def list_fatoorahs() -> dict[str, Any]:
                 error_code="customer_not_found",
             )
         rows = connection.execute(
-            "SELECT * FROM fatoorahs WHERE user_uuid = %s"
-            " ORDER BY status DESC, createdAt",
+            "SELECT * FROM fatoorahs WHERE user_uuid = %s ORDER BY status DESC, createdAt",
             (user["uuid"],),
         ).fetchall()
         bills = [_fatoorah_view(row) for row in rows]
@@ -229,8 +244,7 @@ async def list_fatoorahs() -> dict[str, Any]:
         return tool_result(
             status="completed",
             summary=(
-                f"Found {len(bills)} fatoorahs for the user; unpaid total "
-                f"{unpaid_total} SAR."
+                f"Found {len(bills)} fatoorahs for the user; unpaid total {unpaid_total} SAR."
             ),
             data={"fatoorahs": bills, "unpaid_total_sar": str(unpaid_total)},
             operation_id=next_reference(connection, "fatoorah-list"),
@@ -244,9 +258,10 @@ PAY_FATOORAH_TOOL: BaseTool = StructuredTool.from_function(
     name="pay_fatoorah",
     description=(
         "Pay one of the authenticated user's assigned bills (فاتورة) after "
-        "confirmation. The user must state the last four digits of the numeric bill "
-        "number to select which bill to pay. The amount is deducted only from the "
-        "Nafi wallet balance and appears in the monthly report; linked banks are read-only."
+        "confirmation. Select the bill from the biller or service-provider name; "
+        "never ask for digits from the bill number. The amount is deducted only "
+        "from the Nafi wallet balance and appears in the monthly report; linked "
+        "banks are read-only."
     ),
     args_schema=PayFatoorahArgs,
 )

@@ -213,11 +213,13 @@ async def main() -> None:
     graph = build_financial_agent(
         primary_model=models.create("primary"),
         classifier_model=models.create("intent_classifier"),
+        advisor_model=models.create("financial_advisor"),
         external_tools=bundle.tools,
         tool_metadata=bundle.metadata,
         config=config,
         checkpointer=InMemorySaver(),
         fallback_models=models.create_fallbacks("primary"),
+        advisor_fallback_models=models.create_fallbacks("financial_advisor"),
     )
     service = AgentService(
         graph=graph,

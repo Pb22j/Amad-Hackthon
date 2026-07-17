@@ -64,7 +64,19 @@ def test_agent_report_requires_receipt_when_result_marks_it_required():
         )
 
 
-def test_output_policy_enforces_summary_limit(app_config):
+def test_output_policy_compacts_summary_to_configured_limit(app_config):
     policy = OutputPolicy(app_config.limits.report)
-    with pytest.raises(ValueError, match="summary"):
-        policy.validate(AgentReport(status="completed", summary="x" * 501))
+    report = policy.validate(
+        AgentReport(status="completed", summary=("verified detail " * 50).strip())
+    )
+
+    assert len(report.summary) <= app_config.limits.report.max_summary_characters
+    assert report.summary.endswith("…")
+
+
+def test_output_policy_checks_full_summary_before_compacting(app_config):
+    policy = OutputPolicy(app_config.limits.report)
+    summary = "safe " * 110 + "system prompt"
+
+    with pytest.raises(ValueError, match="internal instructions"):
+        policy.validate(AgentReport(status="completed", summary=summary))

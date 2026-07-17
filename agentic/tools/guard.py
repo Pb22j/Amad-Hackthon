@@ -154,7 +154,6 @@ _ARABIC_FIELD_LABELS = {
     "destination": "الوجهة",
     "destination_account": "اسم المستفيد أو آيبان نافي",
     "gift_message": "رسالة الهدية",
-    "last_four_digits": "آخر أربعة أرقام",
     "name": "الاسم",
     "participants": "المشاركون",
     "qatta_name": "اسم القطة",
@@ -654,13 +653,43 @@ class GuardedToolFactory:
                 if preflight.status != "completed":
                     return preflight.model_dump_json()
 
+            # Most tools confirm their provider arguments directly. A
+            # server-resolved recommendation has no model-supplied arguments,
+            # so its preflight supplies the exact human-visible values that
+            # confirmation, idempotency, auditing, and report grounding bind.
+            authorization_arguments = dict(arguments)
+            if metadata.name == "transfer_idle_cash_to_savings":
+                from agentic.tools.idle_cash import (
+                    preflight_transfer_idle_cash_to_savings,
+                )
+
+                with bind_tool_identity(
+                    user_id=context.auth.user_id,
+                    tenant_id=context.auth.tenant_id,
+                ):
+                    preflight = ToolResult.model_validate(
+                        await preflight_transfer_idle_cash_to_savings()
+                    )
+                if preflight.status != "completed":
+                    return preflight.model_dump_json()
+                resolved_arguments = preflight.data.get("confirmation_arguments")
+                if not isinstance(resolved_arguments, dict) or not resolved_arguments:
+                    raise ToolGuardError(
+                        "idle-cash preflight lacks exact confirmation arguments"
+                    )
+                authorization_arguments = resolved_arguments
+
             tool_call_id = (
                 runtime.tool_call_id
                 or hashlib.sha256(
-                    json.dumps(arguments, sort_keys=True, default=str).encode()
+                    json.dumps(
+                        authorization_arguments, sort_keys=True, default=str
+                    ).encode()
                 ).hexdigest()[:24]
             )
-            key = _idempotency_key(context.task_id, metadata.name, arguments)
+            key = _idempotency_key(
+                context.task_id, metadata.name, authorization_arguments
+            )
             recovering_execution_id: str | None = None
 
             # Stage 2: converge retries/replays before any external side effect.
@@ -699,7 +728,7 @@ class GuardedToolFactory:
                         {
                             "status": "input_received",
                             "summary": "The missing information was received. Repeat this exact tool call once to continue.",
-                            "arguments": redact(arguments),
+                            "arguments": redact(authorization_arguments),
                         },
                         ensure_ascii=False,
                     )
@@ -710,8 +739,8 @@ class GuardedToolFactory:
                         {
                             "kind": "confirmation",
                             "tool_name": metadata.name,
-                            "arguments": redact(arguments),
-                            "arguments_hash": arguments_hash(arguments),
+                            "arguments": redact(authorization_arguments),
+                            "arguments_hash": arguments_hash(authorization_arguments),
                             "expires_in_seconds": 300,
                         }
                     )
@@ -722,7 +751,7 @@ class GuardedToolFactory:
                     auth=context.auth,
                     task_id=context.task_id,
                     tool_name=metadata.name,
-                    arguments=arguments,
+                    arguments=authorization_arguments,
                 )
             elif recovering_execution_id is None:
                 claims = None
@@ -742,7 +771,7 @@ class GuardedToolFactory:
                         reason_code="scopes_and_confirmation_valid",
                         details={
                             "tool_name": metadata.name,
-                            "arguments_hash": arguments_hash(arguments),
+                            "arguments_hash": arguments_hash(authorization_arguments),
                         },
                     )
                     execution, created = await ToolExecutionRepository(session).start(
@@ -750,7 +779,7 @@ class GuardedToolFactory:
                         tenant_id=context.auth.tenant_id,
                         tool_call_id=tool_call_id,
                         tool_name=metadata.name,
-                        arguments=redact(arguments),
+                        arguments=redact(authorization_arguments),
                         idempotency_key=key,
                     )
                     await session.commit()

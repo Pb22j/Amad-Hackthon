@@ -20,6 +20,11 @@ from agentic.tools.accounts import get_balance, search_transactions
 from agentic.tools.analyze_finances import analyze_finances
 from agentic.tools.fatoorah import list_fatoorahs, pay_fatoorah
 from agentic.tools.gift import send_gift
+from agentic.tools.idle_cash import (
+    analyze_idle_cash,
+    preflight_transfer_idle_cash_to_savings,
+    transfer_idle_cash_to_savings,
+)
 from agentic.tools.investments import buy_investment, get_portfolio, sell_investment
 from agentic.tools.metadata import ToolResult
 from agentic.tools.monthly_report import monthly_report
@@ -154,6 +159,7 @@ async def test_balance_and_transaction_search_are_bank_backed():
     assert balance.data["balance_sar"] == "25431.50"
     assert balance.data["nafi_balance_sar"] == "25431.50"
     assert balance.data["spendable_balance_sar"] == "25431.50"
+    assert balance.data["nafi_liquid_savings_balance_sar"] == "0.00"
     assert balance.data["total_balance_sar"] == "29631.50"
     assert len(balance.data["accounts"]) == 2
     assert "*" in balance.data["masked_account_number"]
@@ -162,6 +168,129 @@ async def test_balance_and_transaction_search_are_bank_backed():
     assert transactions.status == "completed"
     assert transactions.data["transactions"]
     assert all("راتب" in item["description"] for item in transactions.data["transactions"])
+
+
+async def test_idle_cash_analysis_persists_explicit_wallet_only_recommendation():
+    result = _validated(await analyze_idle_cash())
+
+    assert result.status == "completed"
+    assert result.data["history_sufficient"] is True
+    assert result.data["methodology"]["analysis_months"] == 3
+    assert result.data["methodology"]["emergency_months"] == 3
+    assert result.data["linked_bank_accounts_are_read_only"] is True
+    assert result.data["no_bank_money_moved"] is True
+    assert result.data["wallet_deposit_notice"]
+    assert result.data["wallet_deposit_notice_ar"]
+    recommended = Decimal(result.data["recommended_wallet_transfer_sar"])
+    assert recommended > 0
+    assert str(recommended) in result.data["consent_question"]
+    assert str(recommended) in result.data["consent_question_ar"]
+
+    with psycopg.connect(os.environ["BANK_DATABASE_URL"]) as connection:
+        row = connection.execute(
+            """SELECT status, recommended_wallet_transfer_sar,
+                      emergency_reserve_target_sar
+                 FROM idle_cash_recommendations
+                WHERE uuid = %s""",
+            (result.data["recommendation_id"],),
+        ).fetchone()
+    assert row[0] == "active"
+    assert row[1] == recommended
+    assert row[2] == Decimal(result.data["emergency_reserve_target_sar"])
+
+
+async def test_idle_cash_analysis_conservatively_imputes_one_zero_month():
+    with psycopg.connect(os.environ["BANK_DATABASE_URL"]) as connection:
+        connection.execute(
+            """DELETE FROM transactions
+                WHERE user_uuid = (
+                    SELECT uuid FROM users WHERE username = 'evaluation-user'
+                )
+                  AND createdat >= date_trunc('month', CURRENT_TIMESTAMP) - interval '1 month'
+                  AND createdat < date_trunc('month', CURRENT_TIMESTAMP)"""
+        )
+
+    result = _validated(await analyze_idle_cash())
+
+    assert result.status == "completed"
+    assert result.data["history_sufficient"] is True
+    assert result.data["months_with_payment_data"] == 2
+    monthly = result.data["monthly_cash_flow"]
+    imputed = [month for month in monthly if month["imputed_for_reserve"]]
+    observed = [
+        Decimal(month["projected_full_month_spend_sar"])
+        for month in monthly
+        if not month["imputed_for_reserve"]
+    ]
+    assert len(imputed) == 1
+    assert Decimal(imputed[0]["reserve_month_spend_sar"]) == max(observed)
+
+
+async def test_idle_cash_transfer_moves_only_nafi_wallet_money_and_writes_paired_ledger():
+    analysis = _validated(await analyze_idle_cash())
+    amount = Decimal(analysis.data["recommended_wallet_transfer_sar"])
+    assert amount > 0
+
+    preview = _validated(await preflight_transfer_idle_cash_to_savings())
+    assert preview.status == "completed"
+    assert preview.data["confirmation_arguments"]["amount_sar"] == str(amount)
+    assert preview.data["bank_accounts_are_read_only"] is True
+
+    database_url = os.environ["BANK_DATABASE_URL"]
+    with psycopg.connect(database_url) as connection:
+        bank_before = connection.execute(
+            """SELECT a.uuid::text, a.balance_sar FROM bank_accounts a
+                 JOIN users u ON u.uuid = a.user_uuid
+                WHERE u.username = 'evaluation-user' ORDER BY a.uuid"""
+        ).fetchall()
+        wallet_before, savings_before = connection.execute(
+            """SELECT u.nafi_balance, s.balance_sar FROM users u
+                 JOIN nafi_savings_accounts s ON s.user_uuid = u.uuid
+                WHERE u.username = 'evaluation-user' AND s.account_type = 'liquid'"""
+        ).fetchone()
+
+    result = _validated(await transfer_idle_cash_to_savings())
+    assert result.status == "completed"
+    assert result.receipt_id
+    assert result.data["amount_sar"] == str(amount)
+    assert result.data["linked_bank_accounts_changed"] is False
+
+    with psycopg.connect(database_url) as connection:
+        bank_after = connection.execute(
+            """SELECT a.uuid::text, a.balance_sar FROM bank_accounts a
+                 JOIN users u ON u.uuid = a.user_uuid
+                WHERE u.username = 'evaluation-user' ORDER BY a.uuid"""
+        ).fetchall()
+        wallet_after, savings_after = connection.execute(
+            """SELECT u.nafi_balance, s.balance_sar FROM users u
+                 JOIN nafi_savings_accounts s ON s.user_uuid = u.uuid
+                WHERE u.username = 'evaluation-user' AND s.account_type = 'liquid'"""
+        ).fetchone()
+        ledger = connection.execute(
+            "SELECT direction, transaction_type FROM transactions WHERE reference = %s",
+            (result.data["reference"],),
+        ).fetchall()
+        recommendation_status = connection.execute(
+            "SELECT status FROM idle_cash_recommendations WHERE uuid = %s",
+            (analysis.data["recommendation_id"],),
+        ).fetchone()[0]
+
+    assert bank_after == bank_before
+    assert wallet_after == wallet_before - amount
+    assert savings_after == savings_before + amount
+    assert set(ledger) == {
+        ("debit", "nafi_liquid_savings_debit"),
+        ("credit", "nafi_liquid_savings_credit"),
+    }
+    assert recommendation_status == "executed"
+
+
+async def test_idle_cash_action_requires_a_prior_active_recommendation():
+    result = _validated(await preflight_transfer_idle_cash_to_savings())
+
+    assert result.status == "failed"
+    assert result.error_code == "idle_cash_recommendation_required"
+    assert result.data["bank_accounts_are_read_only"] is True
 
 
 async def test_provider_operation_result_reconciles_after_execution_recording_crash():
@@ -262,7 +391,7 @@ async def test_agentic_wallet_funding_rejects_ambiguous_or_insufficient_sources(
 
 @pytest.mark.parametrize(
     "spoken_alias",
-    ("bank alahli", "Al Ahli", "الاهلي", "الأهلي", "البنك الاهلي"),
+    ("bank alahli", "Al Ahli", "Ahli", "الاهلي", "الأهلي", "اهلي", "البنك الاهلي"),
 )
 async def test_wallet_funding_resolves_spoken_alahli_alias_from_owned_accounts(
     spoken_alias: str,
@@ -302,6 +431,34 @@ async def test_wallet_funding_binds_canonical_primary_to_spoken_owned_bank_alias
 
     assert grounded is True
     assert unrelated is False
+
+
+async def test_wallet_funding_automatically_grounds_a_sole_owned_account():
+    with bind_tool_identity(user_id="admin", tenant_id="evaluation-tenant"):
+        grounded = await source_account_is_grounded(
+            "primary",
+            ("أودع 700 ريال في محفظة نافع",),
+        )
+
+    assert grounded is True
+
+    with bind_tool_identity(user_id="admin", tenant_id="evaluation-tenant"):
+        named_unlinked_bank = await source_account_is_grounded(
+            "primary",
+            ("Deposit 700 SAR into Nafi from Rajhi",),
+        )
+
+    assert named_unlinked_bank is False
+
+
+async def test_wallet_funding_does_not_default_when_user_owns_multiple_accounts():
+    with bind_tool_identity(user_id="evaluation-user", tenant_id="evaluation-tenant"):
+        grounded = await source_account_is_grounded(
+            "primary",
+            ("Deposit 700 SAR into my Nafi wallet",),
+        )
+
+    assert grounded is False
 
 
 def test_dashboard_deposit_moves_only_selected_bank_funds_into_nafi_wallet():
@@ -735,15 +892,17 @@ async def test_analyze_finances_computes_deterministic_insights():
     assert data["period_months"] == 3
     assert len(data["monthly"]) == 3
 
-    # The oldest analyzed month is fully seeded: salary 15,500 + 750 received,
-    # and 6,591.15 spent across the fixed activity template.
+    # The oldest analyzed month is fully seeded with positive cash flow and
+    # internally consistent aggregate arithmetic.
     oldest = data["monthly"][0]
-    assert oldest["income_sar"] == "16250.00"
-    assert oldest["spent_sar"] == "6591.15"
+    oldest_income = Decimal(oldest["income_sar"])
+    oldest_spent = Decimal(oldest["spent_sar"])
+    assert oldest_income > oldest_spent > 0
+    assert Decimal(oldest["net_sar"]) == oldest_income - oldest_spent
 
-    assert data["top_counterparties"][0]["name"] == "شركة الفيصلية العقارية"
+    assert data["top_counterparties"][0]["name"] == "شركة العقار السكنية"
     recurring_names = {item["name"] for item in data["recurring_commitments"]}
-    assert "شركة الفيصلية العقارية" in recurring_names
+    assert "شركة العقار السكنية" in recurring_names
     assert "راتب" in data["category_trends"]
 
     projection = data["current_month_projection"]
@@ -777,15 +936,15 @@ async def test_list_fatoorahs_shows_only_the_users_bills():
     assert all(item["bill_number"].isdigit() for item in result.data["fatoorahs"])
 
 
-async def test_pay_fatoorah_by_last_four_digits_shows_in_monthly_report():
-    result = _validated(await pay_fatoorah(last_four_digits="1234"))
+async def test_pay_fatoorah_by_biller_shows_in_monthly_report():
+    result = _validated(await pay_fatoorah(biller="الكهرباء"))
     assert result.status == "completed"
     assert result.receipt_id and result.receipt_id.startswith("receipt-")
     assert result.data["biller"] == "الشركة السعودية للكهرباء"
     assert result.data["bill_status"] == "مدفوعة"
     assert result.data["new_balance_sar"] == "25082.90"  # 25431.50 - 348.60
 
-    again = _validated(await pay_fatoorah(last_four_digits="1234"))
+    again = _validated(await pay_fatoorah(biller="الكهرباء"))
     assert again.error_code == "already_paid"
 
     report = _validated(await monthly_report())
@@ -794,21 +953,21 @@ async def test_pay_fatoorah_by_last_four_digits_shows_in_monthly_report():
     assert entry["category"] == "فواتير"
 
 
-async def test_pay_fatoorah_rejects_unknown_digits_and_insufficient_funds(monkeypatch):
-    unknown = _validated(await pay_fatoorah(last_four_digits="0000"))
+async def test_pay_fatoorah_rejects_unknown_biller_and_insufficient_funds(monkeypatch):
+    unknown = _validated(await pay_fatoorah(biller="مزود غير موجود"))
     assert unknown.error_code == "fatoorah_not_found"
 
-    invalid = _validated(await pay_fatoorah(last_four_digits="12x4"))
-    assert invalid.error_code == "invalid_bill_digits"
+    invalid = _validated(await pay_fatoorah(biller=" "))
+    assert invalid.error_code == "invalid_biller"
 
     # وليد's seeded traffic-fines bill (20,000) exceeds his 15,000 balance.
     monkeypatch.setenv("BANK_TOOL_USER_ID", "waleed")
-    broke = _validated(await pay_fatoorah(last_four_digits="4444"))
+    broke = _validated(await pay_fatoorah(biller="المرور"))
     assert broke.error_code == "insufficient_funds"
 
 
 async def test_pay_fatoorah_counts_toward_the_daily_spend_limit():
-    _validated(await pay_fatoorah(last_four_digits="1234"))
+    _validated(await pay_fatoorah(biller="الكهرباء"))
     transfer = _validated(
         await transfer_between_accounts(
             destination_account=LATIFA_NAFI_IBAN, amount=Decimal("4950.00")

@@ -191,6 +191,18 @@ def _websocket_origin_allowed(websocket: WebSocket) -> bool:
     return origin is None or origin in settings.frontend_origins
 
 
+def _localized_user_name(identity: dict[str, str], language: str) -> str:
+    preferred, fallback = (
+        (identity.get("full_name_en"), identity.get("full_name_ar"))
+        if language == "en"
+        else (identity.get("full_name_ar"), identity.get("full_name_en"))
+    )
+    name = (preferred or fallback or "").strip()
+    if not name:
+        raise LookupError("Authenticated customer profile has no name")
+    return name
+
+
 def _issue_voice_evidence(*, session_id: str, call_id: str, transcript: str) -> str:
     claims = {"session_id": session_id, "call_id": call_id, "transcript": transcript}
     body = json.dumps(claims, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -394,6 +406,25 @@ class WalletDepositPreviewRequest(StrictModel):
     request_id: UUID
     source_account_id: UUID
     amount: Decimal = Field(gt=0, max_digits=18, decimal_places=2)
+
+
+class InvestmentProjectionRequest(StrictModel):
+    monthly_contribution_sar: Decimal = Field(
+        ge=0, le=10_000_000, max_digits=14, decimal_places=2
+    )
+    years: int = Field(ge=1, le=50)
+    annual_return_percent: Decimal = Field(
+        default=Decimal("7.0"), ge=-20, le=30, max_digits=5, decimal_places=2
+    )
+    one_time_contribution_sar: Decimal = Field(
+        default=Decimal("0"), ge=0, le=100_000_000, max_digits=14, decimal_places=2
+    )
+    inflation_percent: Decimal = Field(
+        default=Decimal("2.5"), ge=0, le=20, max_digits=5, decimal_places=2
+    )
+    target_amount_sar: Decimal | None = Field(
+        default=None, gt=0, le=1_000_000_000, max_digits=15, decimal_places=2
+    )
 
 
 class WalletDepositConfirmationRequest(StrictModel):
@@ -630,6 +661,31 @@ async def get_dashboard(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.post("/api/investments/projection")
+async def get_investment_projection(
+    payload: InvestmentProjectionRequest, request: Request
+) -> dict[str, Any]:
+    """Return a server-calculated illustration based on the live portfolio value."""
+
+    session = await require_session(request)
+    if "financial:read" not in session.scopes:
+        raise HTTPException(status_code=403, detail="Financial read access is required")
+    try:
+        return await asyncio.to_thread(
+            dashboard_store.investment_projection,
+            user_id=session.user_id,
+            tenant_id=session.tenant_id,
+            monthly_contribution=payload.monthly_contribution_sar,
+            years=payload.years,
+            annual_return_percent=payload.annual_return_percent,
+            one_time_contribution=payload.one_time_contribution_sar,
+            inflation_percent=payload.inflation_percent,
+            target_amount=payload.target_amount_sar,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.post("/api/wallet/deposit/request")
 async def request_wallet_deposit(
     payload: WalletDepositPreviewRequest, request: Request
@@ -860,6 +916,12 @@ async def realtime_websocket(websocket: WebSocket) -> None:
     )
     resume_handle = realtime_resume_handles.get(session.session_id)
     try:
+        identity = await _interaction_call(
+            dashboard_store.user_identity,
+            user_id=session.user_id,
+            tenant_id=session.tenant_id,
+        )
+        user_name = _localized_user_name(identity, session.language)
         async with websockets.connect(provider_url, max_size=2_000_000) as provider:
             await provider.send(
                 json.dumps(
@@ -867,6 +929,7 @@ async def realtime_websocket(websocket: WebSocket) -> None:
                         model=settings.REALTIME_MODEL,
                         language=session.language,
                         voice=settings.REALTIME_VOICE,
+                        user_name=user_name,
                         resume_handle=resume_handle,
                         context_trigger_tokens=settings.VOICE_CONTEXT_TRIGGER_TOKENS,
                         context_target_tokens=settings.VOICE_CONTEXT_TARGET_TOKENS,

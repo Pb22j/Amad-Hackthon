@@ -36,11 +36,6 @@ function readStoredSessionToken(): string | undefined {
   }
 }
 
-/**
- * The exported Next.js app cannot use server-side rewrites, so its browser API
- * target is selected at build time. Local development defaults to the voice
- * interaction service on port 8001.
- */
 export const NAFEA_API_BASE_URL = (
   configuredBaseUrl || "http://localhost:8001"
 ).replace(/\/$/, "");
@@ -51,7 +46,7 @@ export function setNafeaSessionToken(token: string): void {
     try {
       window.sessionStorage.setItem(SESSION_TOKEN_KEY, token);
     } catch {
-      // Storage can be unavailable in hardened browsers; in-memory auth still works.
+      // In-memory authentication still works when browser storage is unavailable.
     }
   }
 }
@@ -63,7 +58,7 @@ export function invalidateNafeaSession(): void {
     try {
       window.sessionStorage.removeItem(SESSION_TOKEN_KEY);
     } catch {
-      // In-memory invalidation still prevents reuse in hardened browsers.
+      // The in-memory token has still been cleared.
     }
   }
 }
@@ -79,12 +74,7 @@ export async function authenticateNafea(
     password,
     language,
   });
-  setNafeaSessionToken(session.session_token);
-  sessionBootstrap = {
-    language,
-    expiresAt: session.expires_at,
-    promise: Promise.resolve(session),
-  };
+  rememberSession(session);
   return session;
 }
 
@@ -93,23 +83,13 @@ export async function registerNafea(
 ): Promise<NafeaSession> {
   invalidateNafeaSession();
   const session = await nafeaPost<NafeaSession>("/api/auth/register", registration);
-  setNafeaSessionToken(session.session_token);
-  sessionBootstrap = {
-    language: registration.language,
-    expiresAt: session.expires_at,
-    promise: Promise.resolve(session),
-  };
+  rememberSession(session);
   return session;
 }
 
 export async function getNafeaSession(): Promise<NafeaSession> {
   const session = await nafeaRequest<NafeaSession>("/api/auth/session");
-  setNafeaSessionToken(session.session_token);
-  sessionBootstrap = {
-    language: session.language,
-    expiresAt: session.expires_at,
-    promise: Promise.resolve(session),
-  };
+  rememberSession(session);
   return session;
 }
 
@@ -117,7 +97,7 @@ export async function logoutNafea(): Promise<void> {
   try {
     await nafeaPost<void>("/api/auth/logout", {});
   } catch {
-    // Local credentials must still be removed when the service is unavailable.
+    // Local credentials must still be removed if the interaction service is unavailable.
   } finally {
     invalidateNafeaSession();
   }
@@ -125,20 +105,10 @@ export async function logoutNafea(): Promise<void> {
 
 export async function startNewNafeaChat(): Promise<NafeaSession> {
   const session = await nafeaPost<NafeaSession>("/api/new-chat", {});
-  setNafeaSessionToken(session.session_token);
-  sessionBootstrap = {
-    language: session.language,
-    expiresAt: session.expires_at,
-    promise: Promise.resolve(session),
-  };
+  rememberSession(session);
   return session;
 }
 
-/**
- * Establish or refresh one interaction session for every browser surface.
- * Chat, voice, login, and dashboards share this promise so route changes do
- * not create separate backend identities or memory namespaces.
- */
 export function ensureNafeaSession(language: NafeaLanguage): Promise<NafeaSession> {
   const now = Date.now() / 1000;
   if (
@@ -147,7 +117,6 @@ export function ensureNafeaSession(language: NafeaLanguage): Promise<NafeaSessio
   ) {
     return sessionBootstrap.promise;
   }
-
   const record = {
     language,
     expiresAt: 0,
@@ -168,11 +137,17 @@ export function ensureNafeaSession(language: NafeaLanguage): Promise<NafeaSessio
   return record.promise;
 }
 
+function rememberSession(session: NafeaSession) {
+  setNafeaSessionToken(session.session_token);
+  sessionBootstrap = {
+    language: session.language,
+    expiresAt: session.expires_at,
+    promise: Promise.resolve(session),
+  };
+}
+
 export class NafeaApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number
-  ) {
+  constructor(message: string, readonly status: number) {
     super(message);
     this.name = "NafeaApiError";
   }
@@ -183,11 +158,8 @@ function endpoint(path: string): string {
   if (typeof window !== "undefined") {
     const configured = new URL(baseUrl);
     const browserHost = window.location.hostname;
-    const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1"]);
-    if (loopbackHosts.has(configured.hostname) && loopbackHosts.has(browserHost)) {
-      // Keep the API on the same loopback site as the page. Otherwise a page
-      // opened at 127.0.0.1 would call localhost and Strict session cookies
-      // would correctly be withheld as cross-site.
+    const loopback = new Set(["localhost", "127.0.0.1", "::1"]);
+    if (loopback.has(configured.hostname) && loopback.has(browserHost)) {
       configured.hostname = browserHost;
       baseUrl = configured.toString().replace(/\/$/, "");
     }
@@ -226,13 +198,12 @@ export async function nafeaRequest<T>(
       window.dispatchEvent(new Event("nafea:unauthorized"));
     }
     let message = "Nafi could not complete that request.";
-    // Backend 5xx details are intentionally not surfaced to the user.
     if (response.status < 500 || response.status === 504) {
       try {
         const payload = (await response.json()) as { detail?: string };
         if (payload.detail) message = payload.detail;
       } catch {
-        // Use the generic message when the response is not JSON.
+        // Keep the safe fallback message for non-JSON errors.
       }
     }
     throw new NafeaApiError(message, response.status);
