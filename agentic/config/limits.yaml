@@ -1,0 +1,27 @@
+task:
+  max_runtime_seconds: 180
+  max_model_calls: 10
+  max_tool_calls: 15
+  max_clarification_rounds: 3
+  max_tool_result_bytes: 100000
+  max_context_tokens: 50000
+  max_request_characters: 20000
+memory:
+  recent_messages: 20
+  max_items_per_session: 50
+  max_items_per_type: 5
+  max_value_characters: 4000
+  task_checkpoint_ttl_days: 30
+  semantic_top_k: 5
+  minimum_similarity: 0.78
+retries:
+  model_attempts: 2
+  read_tool_attempts: 3
+  write_tool_attempts: 1
+report:
+  max_actions: 3
+  max_summary_characters: 500
+rate_limit:
+  requests_per_minute: 60
+  max_concurrent_tasks_per_user: 3
+  max_concurrent_tasks_per_tenant: 50
